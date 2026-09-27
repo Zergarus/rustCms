@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% set section = "iblocks" %}
+{% block title %}{{ iblock.name }}{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/admin/iblocks">Инфоблоки</a> /</div>
+<div class="page-head">
+  <h1>{{ iblock.name }} <span class="muted count">{{ total }}</span></h1>
+  <div class="head-actions">
+    {% if "iblocks.manage" in user.permissions %}<a class="btn" href="/admin/iblocks/{{ iblock.id }}">Настройки</a>{% endif %}
+    {% if can_write %}<a class="btn primary" href="/admin/iblocks/{{ iblock.id }}/elements/new">Добавить элемент</a>
+    {% else %}<span class="badge">только чтение</span>{% endif %}
+  </div>
+</div>
+
+{% if items %}
+<div class="card table-wrap">
+  <table>
+    <thead>
+      <tr><th>ID</th><th>Название</th><th>Код</th><th>Акт.</th><th>Сорт.</th><th>Публикация</th><th>Изменён</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for el in items %}
+      <tr {% if not el.active %}class="inactive"{% endif %}>
+        <td class="muted">{{ el.id }}</td>
+        <td><a href="/admin/elements/{{ el.id }}">{{ el.name }}</a></td>
+        <td><code>{{ el.code }}</code></td>
+        <td>{% if el.active %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}</td>
+        <td>{{ el.sort }}</td>
+        <td class="muted">{% if el.published_at %}{{ el.published_at[:16]|replace("T", " ") }}{% else %}—{% endif %}</td>
+        <td class="muted">{{ el.updated_at[:16]|replace("T", " ") }}</td>
+        <td class="actions">
+          {% if can_write %}
+          <form method="post" action="/admin/elements/{{ el.id }}/delete" hx-confirm="Удалить «{{ el.name }}»?">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% if pages > 1 %}
+<nav class="pager">
+  {% for p in range(1, pages + 1) %}
+    {% if p == page %}<span class="current">{{ p }}</span>
+    {% else %}<a href="?page={{ p }}">{{ p }}</a>{% endif %}
+  {% endfor %}
+</nav>
+{% endif %}
+{% else %}
+<div class="card empty">
+  <p>В инфоблоке пока нет элементов.</p>
+  {% if can_write %}<a class="btn primary" href="/admin/iblocks/{{ iblock.id }}/elements/new">Добавить элемент</a>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% set section = "iblocks" %}
+{% block title %}{% if element_id %}{{ form.name }}{% else %}Новый элемент{% endif %}{% endblock %}
+{% block content %}
+<div class="breadcrumbs">
+  <a href="/admin/iblocks">Инфоблоки</a> /
+  <a href="/admin/iblocks/{{ iblock.id }}/elements">{{ iblock.name }}</a> /
+</div>
+<h1>{% if element_id %}{{ form.name }}{% else %}Новый элемент{% endif %}</h1>
+
+<form class="card form" method="post"
+      action="{% if element_id %}/admin/elements/{{ element_id }}{% else %}/admin/iblocks/{{ iblock.id }}/elements{% endif %}">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  {% if not can_write %}<div class="notice">Только просмотр: у вас нет прав на изменение элементов этого инфоблока.</div>{% endif %}
+  <fieldset class="plain" {% if not can_write %}disabled{% endif %}>
+
+  <div class="grid-2">
+    <label>Название *
+      <input name="name" value="{{ form.name }}" required>
+    </label>
+    <label>Символьный код
+      <input name="code" value="{{ form.code }}" pattern="[a-z0-9_\-]+" placeholder="создастся из названия">
+    </label>
+  </div>
+  <div class="grid-3">
+    <label class="check">
+      <input type="checkbox" name="active" {% if form.active %}checked{% endif %}> Активен
+    </label>
+    <label>Сортировка
+      <input name="sort" type="number" value="{{ form.sort }}">
+    </label>
+    <label>Дата публикации (UTC)
+      <input name="published_at" type="datetime-local" value="{{ form.published_at }}">
+      <small>Пусто — опубликован сразу. В будущем — появится в API в это время.</small>
+    </label>
+  </div>
+  <label>Анонс
+    <textarea name="preview_text" rows="3">{{ form.preview_text }}</textarea>
+  </label>
+  <label>Детальный текст
+    <textarea name="detail_text" rows="10">{{ form.detail_text }}</textarea>
+  </label>
+
+  {% if properties %}
+  <fieldset>
+    <legend>Свойства</legend>
+    {% for p in properties %}
+      {% set key = "prop_" ~ p.code %}
+      {% if p.kind == "boolean" %}
+        <label class="check">
+          <input type="checkbox" name="{{ key }}" {% if form[key] %}checked{% endif %}> {{ p.name }}
+        </label>
+      {% else %}
+        <label>{{ p.name }}{% if p.is_required %} *{% endif %}
+          {% if p.kind == "text" %}
+            <textarea name="{{ key }}" rows="4">{{ form[key] }}</textarea>
+          {% elif p.kind == "number" %}
+            <input name="{{ key }}" inputmode="decimal" value="{{ form[key] }}">
+          {% elif p.kind == "date" %}
+            <input name="{{ key }}" type="date" value="{{ form[key] }}">
+          {% else %}
+            <input name="{{ key }}" value="{{ form[key] }}">
+          {% endif %}
+        </label>
+      {% endif %}
+    {% endfor %}
+  </fieldset>
+  {% endif %}
+
+  </fieldset>
+  <div class="form-actions">
+    {% if can_write %}<button class="btn primary" type="submit">Сохранить</button>{% endif %}
+    <a class="btn" href="/admin/iblocks/{{ iblock.id }}/elements">{% if can_write %}Отмена{% else %}Назад{% endif %}</a>
+  </div>
+</form>
+{% endblock %}

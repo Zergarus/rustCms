@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% set section = "dashboard" %}
+{% block title %}Рабочий стол{% endblock %}
+{% block content %}
+<h1>Рабочий стол</h1>
+<div class="stats">
+  <a class="card stat" href="/admin/iblocks">
+    <span class="stat-value">{{ stats.iblocks }}</span>
+    <span class="stat-label">инфоблоков</span>
+  </a>
+  <div class="card stat">
+    <span class="stat-value">{{ stats.elements }}</span>
+    <span class="stat-label">элементов</span>
+  </div>
+  <a class="card stat" href="/admin/users">
+    <span class="stat-value">{{ stats.users }}</span>
+    <span class="stat-label">пользователей</span>
+  </a>
+</div>
+
+<section class="card">
+  <h2>Публичный API</h2>
+  <p class="muted">Фронтенд получает контент через JSON API. Доступны только инфоблоки с включённой галочкой «Доступен в API».</p>
+  <ul class="api-list">
+    <li><code>GET /api/v1/iblocks</code> — список инфоблоков</li>
+    <li><code>GET /api/v1/iblocks/{code}</code> — инфоблок и схема свойств</li>
+    <li><code>GET /api/v1/iblocks/{code}/elements?page=1&amp;per_page=20&amp;sort=-published_at&amp;prop.color=red</code></li>
+    <li><code>GET /api/v1/iblocks/{code}/elements/{element_code}</code></li>
+  </ul>
+</section>
+{% endblock %}

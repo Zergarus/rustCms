@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% set section = "users" %}
+{% block title %}Пользователи{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Пользователи <span class="muted count">{{ items|length }}</span></h1>
+  <a class="btn primary" href="/admin/users/new">Добавить пользователя</a>
+</div>
+
+<div class="card table-wrap">
+  <table>
+    <thead>
+      <tr><th>ID</th><th>Логин</th><th>Имя</th><th>E-mail</th><th>Роль</th><th>Группы</th><th>Статус</th><th>Последний вход</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for u in items %}
+      <tr {% if not u.active %}class="inactive"{% endif %}>
+        <td class="muted">{{ u.id }}</td>
+        <td>
+          {% if user.is_admin or not u.is_admin %}<a href="/admin/users/{{ u.id }}">{{ u.login }}</a>{% else %}{{ u.login }}{% endif %}
+          {% if u.id == user.id %}<span class="badge">это вы</span>{% endif %}
+        </td>
+        <td>{{ u.name or "—" }}</td>
+        <td>{{ u.email or "—" }}</td>
+        <td>{% if u.is_admin %}<span class="badge accent">суперадмин</span>{% else %}<span class="badge">пользователь</span>{% endif %}</td>
+        <td>{% for g in u.groups %}<span class="badge">{{ g }}</span> {% else %}<span class="muted">—</span>{% endfor %}</td>
+        <td>{% if u.active %}<span class="badge ok">активен</span>{% else %}<span class="badge">заблокирован</span>{% endif %}</td>
+        <td class="muted">{% if u.last_login_at %}{{ u.last_login_at[:16]|replace("T", " ") }}{% else %}—{% endif %}</td>
+        <td class="actions">
+          {% if u.id != user.id and (user.is_admin or not u.is_admin) %}
+          <form method="post" action="/admin/users/{{ u.id }}/delete" hx-confirm="Удалить пользователя «{{ u.login }}»?">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="muted">В админку входят суперадминистраторы и участники групп с правом «Вход в админку».</p>
+{% endblock %}

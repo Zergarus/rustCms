@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% set section = "users" %}
+{% block title %}{% if target %}{{ target.login }}{% else %}Новый пользователь{% endif %}{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/admin/users">Пользователи</a> /</div>
+<h1>{% if target %}{{ target.login }}{% else %}Новый пользователь{% endif %}</h1>
+
+<form class="card form" method="post" action="{% if target %}/admin/users/{{ target.id }}{% else %}/admin/users{% endif %}" autocomplete="off">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+
+  <div class="grid-2">
+    <label>Логин *
+      <input name="login" value="{{ form.login }}" required minlength="3" maxlength="50">
+    </label>
+    <label>Имя
+      <input name="name" value="{{ form.name }}" placeholder="Иван Петров">
+    </label>
+  </div>
+  <label>E-mail
+    <input name="email" type="email" value="{{ form.email }}">
+  </label>
+
+  <fieldset>
+    <legend>Доступ</legend>
+    <label class="check">
+      <input type="checkbox" name="active" {% if form.active %}checked{% endif %} {% if is_self %}disabled{% endif %}>
+      Активен
+    </label>
+    {% if can_set_admin %}
+    <label class="check">
+      <input type="checkbox" name="is_admin" {% if form.is_admin %}checked{% endif %} {% if is_self %}disabled{% endif %}>
+      Суперадминистратор — полный доступ ко всему, права групп не нужны
+    </label>
+    {% endif %}
+    {% if is_self %}<p class="muted hint">Свою учётную запись нельзя заблокировать{% if can_set_admin %} или лишить прав суперадминистратора{% endif %}.</p>{% endif %}
+  </fieldset>
+
+  <fieldset>
+    <legend>Группы</legend>
+    {% if all_groups %}
+      {% for g in all_groups %}
+      <label class="check">
+        <input type="checkbox" name="groups" value="{{ g.id }}" {% if g.id in form.groups %}checked{% endif %} {% if not can_edit_groups %}disabled{% endif %}>
+        {{ g.name }} <span class="muted">— {{ g.description or g.code }}</span>
+      </label>
+      {% endfor %}
+      {% if not can_edit_groups %}<p class="muted hint">Состав групп меняет только суперадминистратор.</p>{% endif %}
+    {% else %}
+      <p class="muted hint">Групп пока нет{% if can_edit_groups %} — <a href="/admin/groups/new">создать</a>{% endif %}.</p>
+    {% endif %}
+  </fieldset>
+
+  <fieldset>
+    <legend>{% if target %}Смена пароля{% else %}Пароль{% endif %}</legend>
+    {% if target %}<p class="muted hint">Оставьте пустым, чтобы не менять. После смены все остальные сессии пользователя будут завершены.</p>{% endif %}
+    <div class="grid-2">
+      <label>Пароль{% if not target %} *{% endif %}
+        <input name="password" type="password" autocomplete="new-password" minlength="8" {% if not target %}required{% endif %}>
+        <small>Не короче 8 символов</small>
+      </label>
+      <label>Повторите пароль
+        <input name="password_confirm" type="password" autocomplete="new-password">
+      </label>
+    </div>
+  </fieldset>
+
+  {% if target %}
+  <p class="muted">
+    Создан {{ target.created_at[:16]|replace("T", " ") }} ·
+    последний вход {% if target.last_login_at %}{{ target.last_login_at[:16]|replace("T", " ") }}{% else %}— ещё не входил{% endif %}
+  </p>
+  {% endif %}
+
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/users">Отмена</a>
+  </div>
+</form>
+
+{% if target and not is_self %}
+<section class="card danger-zone">
+  <h2>Удаление</h2>
+  <p class="muted">Пользователь будет удалён безвозвратно, все его сессии завершатся.</p>
+  <form method="post" action="/admin/users/{{ target.id }}/delete" hx-confirm="Удалить пользователя «{{ target.login }}»?">
+    <button class="btn danger" type="submit">Удалить пользователя</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

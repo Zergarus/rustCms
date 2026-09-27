@@ -1,0 +1,176 @@
+//! Админ-панель: серверный рендер (MiniJinja) + HTMX.
+
+mod auth_pages;
+mod elements;
+mod groups;
+mod iblocks;
+mod users;
+
+use axum::{
+    Extension, Router,
+    extract::{Request, State},
+    http::{Method, StatusCode, header},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Redirect, Response},
+    routing::{get, post},
+};
+use axum_extra::extract::CookieJar;
+use minijinja::{Value, context};
+use serde::Deserialize;
+use tower_http::services::ServeDir;
+
+use crate::{
+    access::Access,
+    auth,
+    error::{AppError, AppResult},
+    state::AppState,
+};
+
+pub fn router(state: AppState) -> Router<AppState> {
+    let protected = Router::new()
+        .route("/", get(dashboard))
+        .route("/logout", post(auth_pages::logout))
+        .route("/iblocks", get(iblocks::list).post(iblocks::create))
+        .route("/iblocks/new", get(iblocks::new_form))
+        .route(
+            "/iblocks/{id}",
+            get(iblocks::edit_form).post(iblocks::update),
+        )
+        .route("/iblocks/{id}/delete", post(iblocks::delete))
+        .route("/iblocks/{id}/properties", post(iblocks::add_property))
+        .route("/properties/{id}/delete", post(iblocks::delete_property))
+        .route(
+            "/iblocks/{id}/elements",
+            get(elements::list).post(elements::create),
+        )
+        .route("/iblocks/{id}/elements/new", get(elements::new_form))
+        .route(
+            "/elements/{id}",
+            get(elements::edit_form).post(elements::update),
+        )
+        .route("/elements/{id}/delete", post(elements::delete))
+        .route("/users", get(users::list).post(users::create))
+        .route("/users/new", get(users::new_form))
+        .route("/users/{id}", get(users::edit_form).post(users::update))
+        .route("/users/{id}/delete", post(users::delete))
+        .route("/groups", get(groups::list).post(groups::create))
+        .route("/groups/new", get(groups::new_form))
+        .route("/groups/{id}", get(groups::edit_form).post(groups::update))
+        .route("/groups/{id}/delete", post(groups::delete))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_access,
+        ));
+
+    let static_dir = state.config.static_dir.join("admin");
+    Router::new()
+        .route(
+            "/login",
+            get(auth_pages::login_form).post(auth_pages::login),
+        )
+        .merge(protected)
+        .nest_service("/static", ServeDir::new(static_dir))
+        .layer(middleware::from_fn(same_origin_guard))
+}
+
+/// Пускает дальше пользователей с правом входа в админку (см. [`Access`]),
+/// остальных — на страницу входа. Права пересчитываются на каждый запрос,
+/// поэтому изменения групп действуют сразу.
+async fn require_access(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let access = match auth::current_user(&state.db, &jar).await {
+        Ok(Some(user)) => Access::load(&state.db, user).await,
+        Ok(None) => return Redirect::to("/admin/login").into_response(),
+        Err(err) => Err(err),
+    };
+    match access {
+        Ok(access) if access.can_enter_admin() => {
+            req.extensions_mut().insert(access);
+            next.run(req).await
+        }
+        Ok(_) => Redirect::to("/admin/login").into_response(),
+        Err(err) => AppError::from(err).into_response(),
+    }
+}
+
+/// Защита от CSRF: изменяющие запросы принимаются только с того же origin.
+/// Вместе с SameSite=Lax у cookie сессии этого достаточно для админки.
+async fn same_origin_guard(req: Request, next: Next) -> Response {
+    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+        return next.run(req).await;
+    }
+    let headers = req.headers();
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let source = headers
+        .get(header::ORIGIN)
+        .or_else(|| headers.get(header::REFERER))
+        .and_then(|v| v.to_str().ok())
+        .and_then(url_authority);
+    match (host, source) {
+        (Some(host), Some(source)) if host.eq_ignore_ascii_case(source) => next.run(req).await,
+        _ => (StatusCode::FORBIDDEN, "Запрос отклонён: неверный Origin").into_response(),
+    }
+}
+
+fn url_authority(url: &str) -> Option<&str> {
+    let rest = url.split_once("://")?.1;
+    rest.split(['/', '?', '#']).next()
+}
+
+pub(crate) fn render(state: &AppState, name: &str, ctx: Value) -> AppResult<Html<String>> {
+    let tmpl = state.templates.get_template(name)?;
+    Ok(Html(tmpl.render(ctx)?))
+}
+
+/// Номер страницы в списках админки.
+#[derive(Deserialize)]
+pub(crate) struct PageQuery {
+    page: Option<i64>,
+}
+
+impl PageQuery {
+    pub fn page(&self) -> i64 {
+        self.page.unwrap_or(1).clamp(1, 1_000_000)
+    }
+}
+
+pub(crate) fn parse_sort(raw: &str) -> i32 {
+    raw.trim().parse().unwrap_or(500)
+}
+
+async fn dashboard(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+) -> AppResult<Html<String>> {
+    let (iblocks, elements, users): (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM iblocks),
+                (SELECT count(*) FROM iblock_elements),
+                (SELECT count(*) FROM users)",
+    )
+    .fetch_one(&state.db)
+    .await?;
+    render(
+        &state,
+        "dashboard.html",
+        context! { user, stats => context! { iblocks, elements, users } },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::url_authority;
+
+    #[test]
+    fn authority() {
+        assert_eq!(
+            url_authority("http://localhost:3000/admin/x"),
+            Some("localhost:3000")
+        );
+        assert_eq!(url_authority("https://example.com"), Some("example.com"));
+        assert_eq!(url_authority("null"), None);
+    }
+}

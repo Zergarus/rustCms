@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% set section = "groups" %}
+{% block title %}{% if group_id %}{{ form.name }}{% else %}Новая группа{% endif %}{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/admin/groups">Группы</a> /</div>
+<h1>{% if group_id %}{{ form.name }}{% else %}Новая группа{% endif %}</h1>
+
+<form class="card form" method="post" action="{% if group_id %}/admin/groups/{{ group_id }}{% else %}/admin/groups{% endif %}">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+
+  <div class="grid-2">
+    <label>Название *
+      <input name="name" value="{{ form.name }}" required>
+    </label>
+    <label>Символьный код *
+      <input name="code" value="{{ form.code }}" pattern="[a-z0-9_\-]+" placeholder="editors" required>
+    </label>
+  </div>
+  <div class="grid-2">
+    <label>Описание
+      <input name="description" value="{{ form.description }}">
+    </label>
+    <label>Сортировка
+      <input name="sort" type="number" value="{{ form.sort }}">
+    </label>
+  </div>
+
+  <fieldset>
+    <legend>Права на разделы</legend>
+    {% for p in all_permissions %}
+    <label class="check perm">
+      <input type="checkbox" name="permission" value="{{ p.code }}" {% if p.code in form.permissions %}checked{% endif %}>
+      <span><strong>{{ p.name }}</strong><br><span class="muted small">{{ p.description }}</span></span>
+    </label>
+    {% endfor %}
+  </fieldset>
+
+  <fieldset>
+    <legend>Доступ к инфоблокам</legend>
+    {% if iblocks %}
+    <p class="muted hint">Право «Управление инфоблоками» даёт изменение во всех инфоблоках — тогда настройки ниже не нужны.</p>
+    <div class="access-grid">
+      {% for ib in iblocks %}
+      {% set current = form.levels[ib.id|string] or "none" %}
+      <div class="access-row">
+        <span>{{ ib.name }} <code>{{ ib.code }}</code></span>
+        <div class="segmented" role="radiogroup" aria-label="Доступ к {{ ib.name }}">
+          {% for value, label in [("none", "Нет"), ("read", "Чтение"), ("write", "Изменение")] %}
+          <label>
+            <input type="radio" name="iblock_{{ ib.id }}" value="{{ value }}" {% if current == value %}checked{% endif %}>
+            <span>{{ label }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="muted hint">Инфоблоков пока нет.</p>
+    {% endif %}
+  </fieldset>
+
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/groups">Отмена</a>
+  </div>
+</form>
+
+{% if group_id %}
+<section class="card">
+  <h2>Участники <span class="muted count">{{ members|length }}</span></h2>
+  {% if members %}
+  <p class="muted">Состав группы меняется в карточке пользователя.</p>
+  <ul class="member-list">
+    {% for m in members %}
+    <li {% if not m.active %}class="inactive"{% endif %}>
+      <a href="/admin/users/{{ m.id }}">{{ m.login }}</a>{% if m.name %} <span class="muted">{{ m.name }}</span>{% endif %}
+      {% if not m.active %}<span class="badge">заблокирован</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">В группе пока никого нет. Добавить пользователя можно в его карточке.</p>
+  {% endif %}
+</section>
+
+<section class="card danger-zone">
+  <h2>Удаление</h2>
+  <p class="muted">Участники останутся, но потеряют права этой группы.</p>
+  <form method="post" action="/admin/groups/{{ group_id }}/delete" hx-confirm="Удалить группу «{{ form.name }}»?">
+    <button class="btn danger" type="submit">Удалить группу</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

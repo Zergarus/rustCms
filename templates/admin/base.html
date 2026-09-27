@@ -1,0 +1,68 @@
+{%- macro icon(name) -%}
+<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  {%- if name == "dashboard" -%}
+    <rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>
+  {%- elif name == "iblocks" -%}
+    <path d="M12 3 2.5 8 12 13l9.5-5L12 3Z"/><path d="m2.5 12.5 9.5 5 9.5-5"/><path d="m2.5 17 9.5 5 9.5-5"/>
+  {%- elif name == "users" -%}
+    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+  {%- elif name == "groups" -%}
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/>
+  {%- elif name == "logout" -%}
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>
+  {%- endif -%}
+</svg>
+{%- endmacro -%}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Админка{% endblock %} — CMS</title>
+  <link rel="stylesheet" href="/admin/static/admin.css">
+  {#- 403 показываем как обычную страницу, а не alert -#}
+  <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"403","swap":true,"error":false},{"code":"[45]..","swap":false,"error":true}]}'>
+  <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
+</head>
+<body hx-boost="true" {% if user %}class="with-sidebar"{% endif %}>
+  {% if user %}
+  {#- Пункты меню: чтобы добавить раздел, допишите строку и иконку в макрос выше.
+      show — видит ли пункт текущий пользователь (сервер всё равно проверяет права сам) -#}
+  {% set menu = [
+    {"id": "dashboard", "url": "/admin", "label": "Рабочий стол", "show": true},
+    {"id": "iblocks", "url": "/admin/iblocks", "label": "Инфоблоки", "show": user.can_see_iblocks},
+    {"id": "users", "url": "/admin/users", "label": "Пользователи", "show": "users.manage" in user.permissions},
+    {"id": "groups", "url": "/admin/groups", "label": "Группы", "show": user.is_admin},
+  ] %}
+  <aside class="sidebar">
+    <a class="brand" href="/admin" title="CMS">CMS</a>
+    <nav class="sidebar-nav">
+      {% for item in menu if item.show %}
+      <a href="{{ item.url }}" class="sidebar-item{% if section == item.id %} active{% endif %}"
+         {% if section == item.id %}aria-current="page"{% endif %}>
+        {{ icon(item.id) }}
+        <span>{{ item.label }}</span>
+      </a>
+      {% endfor %}
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="avatar" title="{{ user.login }}">{{ user.login[:1]|upper }}</div>
+      <form method="post" action="/admin/logout">
+        <button class="sidebar-item" type="submit">
+          {{ icon("logout") }}
+          <span>Выйти</span>
+        </button>
+      </form>
+    </div>
+  </aside>
+  {% endif %}
+  <main class="{% block main_class %}container{% endblock %}">
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+    document.addEventListener("htmx:responseError", function (e) {
+      alert("Ошибка " + e.detail.xhr.status + ": " + (e.detail.xhr.responseText || "").slice(0, 300));
+    });
+  </script>
+</body>
+</html>

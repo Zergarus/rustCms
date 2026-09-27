@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% set section = "groups" %}
+{% block title %}Группы{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Группы <span class="muted count">{{ items|length }}</span></h1>
+  <a class="btn primary" href="/admin/groups/new">Добавить группу</a>
+</div>
+
+{% if items %}
+<div class="card table-wrap">
+  <table>
+    <thead>
+      <tr><th>ID</th><th>Название</th><th>Код</th><th>Права</th><th>Участников</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for g in items %}
+      <tr>
+        <td class="muted">{{ g.id }}</td>
+        <td>
+          <a href="/admin/groups/{{ g.id }}">{{ g.name }}</a>
+          {% if g.description %}<div class="muted small">{{ g.description }}</div>{% endif %}
+        </td>
+        <td><code>{{ g.code }}</code></td>
+        <td>
+          {% for p in all_permissions if p.code in g.permissions %}<span class="badge accent">{{ p.name }}</span> {% else %}<span class="muted">—</span>{% endfor %}
+        </td>
+        <td>{{ g.member_count }}</td>
+        <td class="actions">
+          <form method="post" action="/admin/groups/{{ g.id }}/delete"
+                hx-confirm="Удалить группу «{{ g.name }}»? Участники потеряют её права.">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card empty">
+  <p>Групп пока нет. Группа объединяет пользователей с одинаковыми правами.</p>
+  <a class="btn primary" href="/admin/groups/new">Создать группу</a>
+</div>
+{% endif %}
+<p class="muted">Права суммируются по всем группам пользователя. Суперадминистраторы имеют полный доступ независимо от групп.</p>
+{% endblock %}

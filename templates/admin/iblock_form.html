@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% set section = "iblocks" %}
+{% block title %}{% if iblock %}{{ iblock.name }}{% else %}Новый инфоблок{% endif %}{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/admin/iblocks">Инфоблоки</a> /</div>
+<div class="page-head">
+  <h1>{% if iblock %}{{ iblock.name }}{% else %}Новый инфоблок{% endif %}</h1>
+  {% if iblock %}<a class="btn" href="/admin/iblocks/{{ iblock.id }}/elements">Элементы →</a>{% endif %}
+</div>
+
+<form class="card form" method="post" action="{% if iblock %}/admin/iblocks/{{ iblock.id }}{% else %}/admin/iblocks{% endif %}">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <div class="grid-2">
+    <label>Название *
+      <input name="name" value="{{ form.name }}" required>
+    </label>
+    <label>Символьный код *
+      <input name="code" value="{{ form.code }}" pattern="[a-z0-9_\-]+" placeholder="news" required>
+      <small>Используется в URL API: <code>/api/v1/iblocks/код</code></small>
+    </label>
+  </div>
+  <label>Описание
+    <textarea name="description" rows="3">{{ form.description }}</textarea>
+  </label>
+  <div class="grid-2">
+    <label>Сортировка
+      <input name="sort" type="number" value="{{ form.sort }}">
+    </label>
+    <label class="check">
+      <input type="checkbox" name="api_enabled" {% if form.api_enabled %}checked{% endif %}>
+      Доступен в публичном API
+    </label>
+  </div>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/iblocks">Отмена</a>
+  </div>
+</form>
+
+{% if iblock %}
+<section class="card">
+  <h2>Свойства</h2>
+  <p class="muted">Дополнительные поля элементов. Значения попадают в API в объект <code>properties</code>.</p>
+  {% if properties %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Название</th><th>Код</th><th>Тип</th><th>Обяз.</th><th>Сорт.</th><th></th></tr></thead>
+      <tbody>
+        {% for p in properties %}
+        <tr>
+          <td>{{ p.name }}</td>
+          <td><code>{{ p.code }}</code></td>
+          <td>{% for k in kinds %}{% if k.code == p.kind %}{{ k.name }}{% endif %}{% endfor %}</td>
+          <td>{% if p.is_required %}да{% endif %}</td>
+          <td>{{ p.sort }}</td>
+          <td class="actions">
+            <form method="post" action="/admin/properties/{{ p.id }}/delete"
+                  hx-confirm="Удалить свойство «{{ p.name }}»? Его значения у всех элементов будут стёрты.">
+              <button class="link danger" type="submit">Удалить</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <form class="form prop-form" method="post" action="/admin/iblocks/{{ iblock.id }}/properties">
+    <h3>Добавить свойство</h3>
+    {% if prop_error %}<div class="alert">{{ prop_error }}</div>{% endif %}
+    <div class="grid-5">
+      <label>Название *<input name="name" value="{{ prop_form.name }}" required></label>
+      <label>Код *<input name="code" value="{{ prop_form.code }}" pattern="[a-z0-9_\-]+" required></label>
+      <label>Тип
+        <select name="kind">
+          {% for k in kinds %}
+          <option value="{{ k.code }}" {% if k.code == prop_form.kind %}selected{% endif %}>{{ k.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Сорт.<input name="sort" type="number" value="{{ prop_form.sort }}"></label>
+      <label class="check"><input type="checkbox" name="is_required" {% if prop_form.is_required %}checked{% endif %}> Обязательное</label>
+    </div>
+    <button class="btn" type="submit">Добавить</button>
+  </form>
+</section>
+
+<section class="card danger-zone">
+  <h2>Удаление</h2>
+  <p class="muted">Инфоблок будет удалён вместе со всеми свойствами и элементами.</p>
+  <form method="post" action="/admin/iblocks/{{ iblock.id }}/delete"
+        hx-confirm="Удалить инфоблок «{{ iblock.name }}» со всеми элементами?">
+    <button class="btn danger" type="submit">Удалить инфоблок</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}
