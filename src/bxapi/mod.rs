@@ -75,8 +75,8 @@ pub struct BxError {
     status: StatusCode,
     code: Value,
     message: String,
-    /// `customData` ошибки (`null` — нет).
-    custom: Value,
+    /// `customData` ошибки (`None` — `null`); в коробке, чтобы `Result<_, BxError>` был компактным.
+    custom: Option<Box<Value>>,
 }
 
 impl BxError {
@@ -85,12 +85,12 @@ impl BxError {
             status: StatusCode::OK,
             code: Value::from(code),
             message: message.into(),
-            custom: Value::Null,
+            custom: None,
         }
     }
 
     pub fn with_custom(mut self, custom: Value) -> Self {
-        self.custom = custom;
+        self.custom = (!custom.is_null()).then(|| Box::new(custom));
         self
     }
 
@@ -107,7 +107,7 @@ impl BxError {
             status,
             code: Value::from(status.as_u16()),
             message: message.into(),
-            custom: Value::Null,
+            custom: None,
         }
     }
 
@@ -131,7 +131,7 @@ impl IntoResponse for BxError {
         let body = json!({
             "status": "error",
             "data": null,
-            "errors": [{ "message": self.message, "code": self.code, "customData": self.custom }],
+            "errors": [{ "message": self.message, "code": self.code, "customData": self.custom.map_or(Value::Null, |c| *c) }],
         });
         (self.status, Json(body)).into_response()
     }

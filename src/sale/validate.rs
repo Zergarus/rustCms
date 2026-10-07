@@ -80,7 +80,7 @@ pub fn validate_properties(
                 _ => "N".into(),
             };
         }
-        let filled = !value.is_empty() && !(p.kind == "checkbox" && value == "N");
+        let filled = !(value.is_empty() || p.kind == "checkbox" && value == "N");
         if !filled {
             if p.required {
                 return Err(SubmitError::property(
@@ -110,6 +110,30 @@ pub fn validate_properties(
         out.push((p.id, value));
     }
     Ok(out)
+}
+
+/// Пустые свойства email, телефона и ФИО вошедшего заполняются из профиля — как
+/// значения по умолчанию в форме (фронт может не показывать эти поля).
+pub fn with_profile_defaults(
+    props: &[&OrderProperty],
+    input: &mut Map<String, Value>,
+    profile: &super::form::Profile,
+) {
+    for p in props {
+        let value = if p.is_email {
+            &profile.email
+        } else if p.is_phone {
+            &profile.phone
+        } else if p.is_payer || p.is_profile_name {
+            &profile.full_name
+        } else {
+            continue;
+        };
+        let empty = input.get(&p.code).is_none_or(|v| raw_value(v).is_empty());
+        if empty && !value.is_empty() {
+            input.insert(p.code.clone(), Value::from(value.clone()));
+        }
+    }
 }
 
 /// Что оформляется: вся корзина (со сверкой снимка) или выбранные позиции.
@@ -298,6 +322,25 @@ mod tests {
         let err = validate_properties(&refs, &variants, missing.as_object().unwrap(), &known)
             .unwrap_err();
         assert_eq!(err.message, "Заполните поле «Поле fio»");
+    }
+
+    #[test]
+    fn profile_defaults_fill_only_empty() {
+        let (props, _) = fixture();
+        let refs: Vec<&OrderProperty> = props.iter().collect();
+        let profile = crate::sale::form::Profile {
+            email: "user@b.ru".into(),
+            phone: "+7999".into(),
+            full_name: "Профиль".into(),
+        };
+        let mut input = json!({"fio": "Иван", "EMAIL": "  "})
+            .as_object()
+            .unwrap()
+            .clone();
+        with_profile_defaults(&refs, &mut input, &profile);
+        assert_eq!(input["EMAIL"], "user@b.ru");
+        assert_eq!(input["fio"], "Иван");
+        assert!(input.get("KPP").is_none());
     }
 
     #[test]

@@ -289,7 +289,7 @@ pub(crate) async fn card(
         state,
         "shop/order.html",
         context! { user, order, fields, extra, stores, statuses, person_type, error, notice,
-            store_list, deliveries, pay_systems, version },
+        store_list, deliveries, pay_systems, version },
     )
 }
 

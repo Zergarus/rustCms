@@ -27,7 +27,9 @@ use crate::{
         guest,
         repo::{self, NewOrder},
         stock::{self, StockLine},
-        validate::{SubmitError, parse_selection, pick_items, validate_properties},
+        validate::{
+            SubmitError, parse_selection, pick_items, validate_properties, with_profile_defaults,
+        },
     },
     state::AppState,
 };
@@ -234,11 +236,14 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         .into_iter()
         .filter(|p| settings.property_applies(p.id, payment.id, delivery.id))
         .collect();
-    let input = body
+    let mut input = body
         .get("properties")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    if let Some(profile) = profile(&state, user_id).await? {
+        with_profile_defaults(&props, &mut input, &profile);
+    }
     let known = repo::known_locations(&state.db, &input).await?;
     let values = validate_properties(&props, &settings.variants, &input, &known).map_err(fail)?;
 
@@ -392,16 +397,16 @@ mod tests {
             None,
         );
         assert_eq!(e.status, StatusCode::BAD_REQUEST);
-        assert_eq!(e.custom, json!({"field": "fio"}));
+        assert_eq!(e.custom.as_deref(), Some(&json!({"field": "fio"})));
         let e = to_bx(
             SubmitError::basket_changed(),
             Some(json!({"snapshot": "S"})),
         );
         assert_eq!(e.status, StatusCode::CONFLICT);
-        assert_eq!(e.custom["basket"]["snapshot"], "S");
+        assert_eq!(e.custom.as_deref().unwrap()["basket"]["snapshot"], "S");
         let e = to_bx(SubmitError::new("payment_forbidden", "Нет доступа"), None);
         assert_eq!(e.status, StatusCode::FORBIDDEN);
-        assert_eq!(e.custom, serde_json::Value::Null);
+        assert!(e.custom.is_none());
         let e = to_bx(SubmitError::new("user_provision_failed", "x"), None);
         assert_eq!(e.status, StatusCode::INTERNAL_SERVER_ERROR);
     }

@@ -2465,7 +2465,8 @@ async fn write_sale(tx: &mut sqlx::PgConnection, sale: &Sale) -> anyhow::Result<
     for p in &sale.pay_systems {
         sqlx::query(
             "INSERT INTO pay_systems (id, code, name, description, active, sort, api_type, group_ids)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             VALUES ($1, $2, $3, $4, $5, $6, $7,
+                     ARRAY(SELECT id FROM groups WHERE external_id = ANY($8) ORDER BY id))
              ON CONFLICT (id) DO UPDATE SET code = EXCLUDED.code, name = EXCLUDED.name,
                  description = EXCLUDED.description, active = EXCLUDED.active, sort = EXCLUDED.sort,
                  api_type = EXCLUDED.api_type, group_ids = EXCLUDED.group_ids",
@@ -2477,7 +2478,13 @@ async fn write_sale(tx: &mut sqlx::PgConnection, sale: &Sale) -> anyhow::Result<
         .bind(p.active)
         .bind(p.sort)
         .bind(p.api_type)
-        .bind(&p.group_ids)
+        // Группы CMS — по внешнему коду группы Битрикса
+        .bind(
+            p.group_ids
+                .iter()
+                .map(|g| format!("bitrix:{g}"))
+                .collect::<Vec<_>>(),
+        )
         .execute(&mut *tx)
         .await?;
     }
