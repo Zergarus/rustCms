@@ -404,6 +404,7 @@ mod tests {
                 pay(7, "QR", "other", vec![]),
             ],
             statuses: Vec::new(),
+            relations: HashMap::new(),
         }
     }
 

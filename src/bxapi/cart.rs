@@ -248,8 +248,26 @@ async fn product_views(
     Ok(out)
 }
 
+/// Корзина для оформления: позиции, данные покупки, склады и снимок.
+pub(super) struct CartState {
+    pub items: Vec<CartItem>,
+    pub info: HashMap<i64, PurchaseInfo>,
+    pub stores: Vec<StoreInfo>,
+    pub snapshot: Value,
+}
+
+/// Корзина текущего покупателя (по сессии или cookie гостя).
+pub(super) async fn cart_state(state: &AppState, jar: &CookieJar) -> Result<CartState, BxError> {
+    let buyer = current_buyer(state, jar).await?;
+    cart_state_for(state, buyer).await
+}
+
 /// Снимок корзины покупателя (нет покупателя — пустая корзина).
 async fn snapshot(state: &AppState, buyer: Option<i64>) -> Result<Value, BxError> {
+    Ok(cart_state_for(state, buyer).await?.snapshot)
+}
+
+async fn cart_state_for(state: &AppState, buyer: Option<i64>) -> Result<CartState, BxError> {
     let items: Vec<CartItem> = match buyer {
         Some(b) => repo::items(&state.db, b).await?,
         None => Vec::new(),
@@ -264,13 +282,13 @@ async fn snapshot(state: &AppState, buyer: Option<i64>) -> Result<Value, BxError
         required_store: config.required_props.contains(&"store"),
         currency: "RUB".into(),
     };
-    Ok(build_snapshot(
-        &items,
-        &info,
-        &views,
-        &stores,
-        &snapshot_config,
-    ))
+    let snapshot = build_snapshot(&items, &info, &views, &stores, &snapshot_config);
+    Ok(CartState {
+        items,
+        info,
+        stores,
+        snapshot,
+    })
 }
 
 pub async fn get_cart(State(state): State<AppState>, jar: CookieJar) -> BxResult {

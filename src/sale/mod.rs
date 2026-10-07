@@ -113,6 +113,13 @@ pub struct OrderStatus {
     pub notify: bool,
 }
 
+/// Привязки свойства (`b_sale_order_props_relation`); пустой список — без ограничения.
+#[derive(Debug, Clone, Default)]
+pub struct PropertyRelations {
+    pub payment_ids: Vec<i64>,
+    pub delivery_ids: Vec<i64>,
+}
+
 /// Все справочники оформления; списки — по сортировке и id.
 #[derive(Debug, Clone, Default)]
 pub struct SaleSettings {
@@ -124,12 +131,22 @@ pub struct SaleSettings {
     pub deliveries: Vec<Delivery>,
     pub pay_systems: Vec<PaySystem>,
     pub statuses: Vec<OrderStatus>,
+    /// id свойства → привязки к платёжкам и доставкам.
+    pub relations: HashMap<i64, PropertyRelations>,
 }
 
 /// Начальный статус заказа в Битриксе (`OrderStatus::getInitialStatus`).
 const INITIAL_STATUS: &str = "N";
 
 impl SaleSettings {
+    /// Участвует ли свойство в заказе с этими платёжкой и доставкой.
+    pub fn property_applies(&self, property_id: i64, payment_id: i64, delivery_id: i64) -> bool {
+        self.relations.get(&property_id).is_none_or(|r| {
+            (r.payment_ids.is_empty() || r.payment_ids.contains(&payment_id))
+                && (r.delivery_ids.is_empty() || r.delivery_ids.contains(&delivery_id))
+        })
+    }
+
     /// Статус нового заказа: `N`, если он есть, иначе первый по сортировке.
     pub fn default_status(&self) -> Option<&OrderStatus> {
         self.statuses
@@ -149,7 +166,22 @@ pub async fn load_settings(db: &PgPool) -> sqlx::Result<SaleSettings> {
     {
         variants.entry(v.property_id).or_default().push(v);
     }
+    let mut relations: HashMap<i64, PropertyRelations> = HashMap::new();
+    for (property, kind, entity) in sqlx::query_as::<_, (i64, String, i64)>(
+        "SELECT property_id, entity_type, entity_id FROM order_property_relations ORDER BY entity_id",
+    )
+    .fetch_all(db)
+    .await?
+    {
+        let r = relations.entry(property).or_default();
+        if kind == "P" {
+            r.payment_ids.push(entity);
+        } else {
+            r.delivery_ids.push(entity);
+        }
+    }
     Ok(SaleSettings {
+        relations,
         person_types: sqlx::query_as(
             "SELECT id, code, name, active, sort FROM person_types ORDER BY sort, id",
         )
@@ -205,6 +237,43 @@ mod tests {
             description: String::new(),
             notify: false,
         }
+    }
+
+    #[test]
+    fn property_applicable_by_relations() {
+        let s = SaleSettings {
+            relations: HashMap::from([
+                (
+                    7,
+                    PropertyRelations {
+                        payment_ids: vec![5],
+                        delivery_ids: vec![],
+                    },
+                ),
+                (
+                    19,
+                    PropertyRelations {
+                        payment_ids: vec![],
+                        delivery_ids: vec![20],
+                    },
+                ),
+                (
+                    2,
+                    PropertyRelations {
+                        payment_ids: vec![5],
+                        delivery_ids: vec![8, 19],
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+        assert!(s.property_applies(1, 7, 8)); // без привязок — всегда
+        assert!(s.property_applies(7, 5, 8));
+        assert!(!s.property_applies(7, 7, 8));
+        assert!(s.property_applies(19, 7, 20));
+        assert!(!s.property_applies(19, 7, 2));
+        assert!(s.property_applies(2, 5, 19));
+        assert!(!s.property_applies(2, 5, 2));
     }
 
     #[test]

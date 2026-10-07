@@ -13,6 +13,7 @@ mod forms;
 mod images;
 mod location;
 mod nav;
+mod order;
 pub mod project;
 mod query;
 pub mod registry;
@@ -43,6 +44,9 @@ pub fn router() -> Router<AppState> {
         .route("/cart/items/{id}/store", post(cart::set_store))
         .route("/cart/items/{id}/remove", post(cart::remove_item))
         .route("/cart/clear", post(cart::clear))
+        .route("/order/form", get(order::form))
+        .route("/order/summary", post(order::summary))
+        .route("/order/submit", post(order::submit))
         .route("/auth/login", post(auth::login))
         .route("/auth/session", get(auth::session))
         .route("/auth/logout", post(auth::logout))
@@ -71,6 +75,8 @@ pub struct BxError {
     status: StatusCode,
     code: Value,
     message: String,
+    /// `customData` ошибки (`null` — нет).
+    custom: Value,
 }
 
 impl BxError {
@@ -79,7 +85,13 @@ impl BxError {
             status: StatusCode::OK,
             code: Value::from(code),
             message: message.into(),
+            custom: Value::Null,
         }
+    }
+
+    pub fn with_custom(mut self, custom: Value) -> Self {
+        self.custom = custom;
+        self
     }
 
     pub fn with_status(status: StatusCode, code: &str, message: impl Into<String>) -> Self {
@@ -95,6 +107,7 @@ impl BxError {
             status,
             code: Value::from(status.as_u16()),
             message: message.into(),
+            custom: Value::Null,
         }
     }
 
@@ -118,7 +131,7 @@ impl IntoResponse for BxError {
         let body = json!({
             "status": "error",
             "data": null,
-            "errors": [{ "message": self.message, "code": self.code, "customData": null }],
+            "errors": [{ "message": self.message, "code": self.code, "customData": self.custom }],
         });
         (self.status, Json(body)).into_response()
     }

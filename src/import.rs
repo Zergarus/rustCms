@@ -169,6 +169,8 @@ struct Sale {
     variants: Vec<(i64, i64, String, String, i32)>,
     deliveries: Vec<DeliveryRow>,
     pay_systems: Vec<PaySystemRow>,
+    /// (свойство, 'P' | 'D', id платёжки или доставки)
+    relations: Vec<(i64, String, i64)>,
 }
 
 struct SalePropertyRow {
@@ -2173,6 +2175,20 @@ async fn read_sale(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
         ));
     }
 
+    if mysql_table_exists(my, "b_sale_order_props_relation").await? {
+        for row in sqlx::query(
+            "SELECT CAST(PROPERTY_ID AS SIGNED), CAST(ENTITY_TYPE AS CHAR), CAST(ENTITY_ID AS SIGNED)
+             FROM b_sale_order_props_relation WHERE ENTITY_TYPE IN ('P', 'D')",
+        )
+        .fetch_all(my)
+        .await?
+        {
+            if let (Some(property), Some(entity)) = (int_col(&row, 0), int_col(&row, 2)) {
+                sale.relations.push((property, str_col(&row, 1), entity));
+            }
+        }
+    }
+
     // Ограничения служб: (служба, тип 0 — доставка / 1 — оплата, класс, параметры)
     let restrictions: Vec<(i64, i64, String, String)> = sqlx::query(
         "SELECT CAST(SERVICE_ID AS SIGNED), CAST(SERVICE_TYPE AS SIGNED), CAST(CLASS_NAME AS CHAR),
@@ -2395,6 +2411,23 @@ async fn write_sale(tx: &mut sqlx::PgConnection, sale: &Sale) -> anyhow::Result<
         .bind(sort)
         .execute(&mut *tx)
         .await?;
+    }
+    sqlx::query("DELETE FROM order_property_relations WHERE property_id = ANY($1)")
+        .bind(&properties)
+        .execute(&mut *tx)
+        .await?;
+    for (property, kind, entity) in &sale.relations {
+        if properties.contains(property) {
+            sqlx::query(
+                "INSERT INTO order_property_relations (property_id, entity_type, entity_id)
+                 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            )
+            .bind(property)
+            .bind(kind)
+            .bind(entity)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
     for d in &sale.deliveries {
         sqlx::query(
