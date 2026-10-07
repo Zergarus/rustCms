@@ -122,6 +122,38 @@
   </fieldset>
   {% endif %}
 
+  {% if catalog %}
+  <fieldset>
+    <legend>Торговый каталог</legend>
+    <div class="grid-3">
+      <label class="check"><input type="checkbox" name="available" {% if form.available %}checked{% endif %}> Доступен для покупки</label>
+      {% for key, label in [("quantity_trace", "Учитывать количество"), ("can_buy_zero", "Покупка при нулевом остатке")] %}
+      <label>{{ label }}
+        <select name="{{ key }}">
+          {% for v, t in [("default", "По умолчанию"), ("Y", "Да"), ("N", "Нет")] %}
+          <option value="{{ v }}" {% if (form[key] or "default") == v %}selected{% endif %}>{{ t }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      {% endfor %}
+    </div>
+    <div class="grid-2">
+      <div class="field">
+        <span class="field-label">Цены</span>
+        {% for t in catalog.price_types %}
+        <label>{{ t[1] }}<input name="price_{{ t[0] }}" inputmode="decimal" value="{{ form['price_' ~ t[0]] }}" placeholder="нет цены"></label>
+        {% endfor %}
+      </div>
+      <div class="field">
+        <span class="field-label">Остатки по складам</span>
+        {% for st in catalog.stores %}
+        <label>{{ st[1] }}{% if not st[2] %} <span class="muted">(неактивен)</span>{% endif %}<input name="amount_{{ st[0] }}" inputmode="decimal" value="{{ form['amount_' ~ st[0]] }}" placeholder="нет записи"></label>
+        {% endfor %}
+      </div>
+    </div>
+  </fieldset>
+  {% endif %}
+
   </fieldset>
   <div class="form-actions">
     {% if can_write %}<button class="btn primary" type="submit">Сохранить</button>{% endif %}

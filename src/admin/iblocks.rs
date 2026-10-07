@@ -29,6 +29,7 @@ pub struct IblockForm {
     #[serde(default)]
     description: String,
     api_enabled: Option<String>,
+    is_catalog: Option<String>,
     #[serde(default)]
     sort: String,
 }
@@ -48,6 +49,7 @@ impl IblockForm {
             name: name.to_string(),
             description: self.description.trim().to_string(),
             api_enabled: self.api_enabled.is_some(),
+            is_catalog: self.is_catalog.is_some(),
             sort: parse_sort(&self.sort),
         })
     }
@@ -165,6 +167,7 @@ async fn render_edit(
         name: iblock.name.clone(),
         description: iblock.description.clone(),
         api_enabled: iblock.api_enabled.then(|| "on".into()),
+        is_catalog: iblock.is_catalog.then(|| "on".into()),
         sort: iblock.sort.to_string(),
     });
     render(

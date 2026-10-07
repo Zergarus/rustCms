@@ -175,6 +175,89 @@ pub async fn load(db: &PgPool, element_ids: &[i64]) -> sqlx::Result<HashMap<i64,
         .collect())
 }
 
+/// Вкладка «Торговый каталог» товара: цены по типам (`None` — удалить цену),
+/// остатки по складам, флаги (`None` — «по умолчанию»).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PurchaseInput {
+    pub prices: Vec<(i64, Option<f64>)>,
+    pub amounts: Vec<(i64, f64)>,
+    pub available: bool,
+    pub quantity_trace: Option<bool>,
+    pub can_buy_zero: Option<bool>,
+}
+
+/// Флаги товара как сохранены: (доступен, учёт количества, покупка при нуле); `None` — нет записи.
+pub async fn raw_flags(
+    db: &PgPool,
+    element_id: i64,
+) -> sqlx::Result<Option<(bool, Option<bool>, Option<bool>)>> {
+    sqlx::query_as("SELECT available, quantity_trace, can_buy_zero FROM catalog_products WHERE element_id = $1")
+        .bind(element_id)
+        .fetch_optional(db)
+        .await
+}
+
+/// Сохраняет цены, остатки и флаги товара; общий остаток — сумма по складам.
+pub async fn save_purchase(
+    db: &PgPool,
+    element_id: i64,
+    input: &PurchaseInput,
+) -> sqlx::Result<()> {
+    let mut tx = db.begin().await?;
+    let default_currency: String = sqlx::query_scalar(
+        "SELECT COALESCE((SELECT code FROM currencies ORDER BY code = 'RUB' DESC, code LIMIT 1), 'RUB')",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    for (type_id, value) in &input.prices {
+        // Валюта прежней цены сохраняется
+        let old: Option<String> = sqlx::query_scalar(
+            "DELETE FROM catalog_prices WHERE element_id = $1 AND price_type_id = $2 RETURNING currency",
+        )
+        .bind(element_id)
+        .bind(type_id)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .next();
+        if let Some(price) = value {
+            sqlx::query(
+                "INSERT INTO catalog_prices (element_id, price_type_id, price, currency) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(element_id)
+            .bind(type_id)
+            .bind(price)
+            .bind(old.unwrap_or_else(|| default_currency.clone()))
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    for (store_id, amount) in &input.amounts {
+        sqlx::query(
+            "INSERT INTO catalog_store_amounts (element_id, store_id, amount) VALUES ($1, $2, $3)
+             ON CONFLICT (element_id, store_id) DO UPDATE SET amount = EXCLUDED.amount",
+        )
+        .bind(element_id)
+        .bind(store_id)
+        .bind(amount)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO catalog_products (element_id, quantity, available, quantity_trace, can_buy_zero)
+         VALUES ($1, (SELECT COALESCE(sum(amount), 0) FROM catalog_store_amounts WHERE element_id = $1), $2, $3, $4)
+         ON CONFLICT (element_id) DO UPDATE SET quantity = EXCLUDED.quantity, available = EXCLUDED.available,
+             quantity_trace = EXCLUDED.quantity_trace, can_buy_zero = EXCLUDED.can_buy_zero",
+    )
+    .bind(element_id)
+    .bind(input.available)
+    .bind(input.quantity_trace)
+    .bind(input.can_buy_zero)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

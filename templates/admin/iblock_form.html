@@ -30,6 +30,10 @@
       <input type="checkbox" name="api_enabled" {% if form.api_enabled %}checked{% endif %}>
       Доступен в публичном API
     </label>
+    <label class="check">
+      <input type="checkbox" name="is_catalog" {% if form.is_catalog %}checked{% endif %}>
+      Торговый каталог — у элементов цены, остатки, покупка
+    </label>
   </div>
   <div class="form-actions">
     <button class="btn primary" type="submit">Сохранить</button>

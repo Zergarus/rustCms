@@ -119,6 +119,8 @@ pub struct IblockInput {
     pub description: String,
     pub api_enabled: bool,
     pub sort: i32,
+    /// Торговый каталог: у элементов цены, остатки, покупка.
+    pub is_catalog: bool,
 }
 
 #[derive(Debug)]

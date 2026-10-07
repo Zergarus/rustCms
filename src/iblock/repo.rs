@@ -48,14 +48,15 @@ pub async fn get_iblock_by_code(db: &PgPool, code: &str) -> sqlx::Result<Option<
 
 pub async fn create_iblock(db: &PgPool, input: &IblockInput) -> sqlx::Result<Iblock> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "INSERT INTO iblocks (code, name, description, api_enabled, sort)
-         VALUES ($1, $2, $3, $4, $5) RETURNING {IBLOCK_COLS}"
+        "INSERT INTO iblocks (code, name, description, api_enabled, sort, is_catalog)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING {IBLOCK_COLS}"
     )))
     .bind(&input.code)
     .bind(&input.name)
     .bind(&input.description)
     .bind(input.api_enabled)
     .bind(input.sort)
+    .bind(input.is_catalog)
     .fetch_one(db)
     .await
 }
@@ -63,7 +64,7 @@ pub async fn create_iblock(db: &PgPool, input: &IblockInput) -> sqlx::Result<Ibl
 pub async fn update_iblock(db: &PgPool, id: i64, input: &IblockInput) -> sqlx::Result<bool> {
     let res = sqlx::query(
         "UPDATE iblocks SET code = $2, name = $3, description = $4, api_enabled = $5,
-                            sort = $6, updated_at = now()
+                            sort = $6, is_catalog = $7, updated_at = now()
          WHERE id = $1",
     )
     .bind(id)
@@ -72,6 +73,7 @@ pub async fn update_iblock(db: &PgPool, id: i64, input: &IblockInput) -> sqlx::R
     .bind(&input.description)
     .bind(input.api_enabled)
     .bind(input.sort)
+    .bind(input.is_catalog)
     .execute(db)
     .await?;
     Ok(res.rows_affected() > 0)

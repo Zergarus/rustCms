@@ -13,6 +13,7 @@ use serde_json::Map;
 use super::{parse_sort, read_upload_form, render};
 use crate::{
     access::{Access, Level},
+    catalog::{self, PurchaseInput},
     error::{AppError, AppResult, is_unique_violation},
     files::{self, FileRecord},
     iblock::{
@@ -266,16 +267,132 @@ struct IblockContext {
     enums: Vec<PropertyEnum>,
     /// Разделы в порядке дерева.
     sections: Vec<Section>,
+    /// Для торгового каталога — типы цен и склады вкладки «Торговый каталог».
+    catalog: Option<CatalogContext>,
+}
+
+#[derive(Serialize)]
+struct CatalogContext {
+    /// (id, название)
+    price_types: Vec<(i64, String)>,
+    /// (id, название, активен)
+    stores: Vec<(i64, String, bool)>,
+}
+
+/// Вкладка «Торговый каталог» из полей формы: `price_<тип>`, `amount_<склад>`,
+/// `available`, `quantity_trace` / `can_buy_zero` (`Y` | `N` | `default`).
+fn purchase_input_from_form(
+    form: &FormValues,
+    price_types: &[i64],
+    stores: &[i64],
+) -> Result<PurchaseInput, String> {
+    let number = |raw: &str| {
+        raw.trim()
+            .replace(',', ".")
+            .replace(' ', "")
+            .parse::<f64>()
+            .ok()
+    };
+    let mut prices = Vec::new();
+    for t in price_types {
+        let raw = form.get(&format!("price_{t}"));
+        if raw.is_empty() {
+            prices.push((*t, None));
+        } else {
+            let v = number(raw)
+                .filter(|v| *v >= 0.0)
+                .ok_or("Цена: ожидается число")?;
+            prices.push((*t, Some(v)));
+        }
+    }
+    let mut amounts = Vec::new();
+    for st in stores {
+        let raw = form.get(&format!("amount_{st}"));
+        if !raw.is_empty() {
+            amounts.push((*st, number(raw).ok_or("Остаток: ожидается число")?));
+        }
+    }
+    let flag = |key: &str| match form.get(key) {
+        "Y" => Some(true),
+        "N" => Some(false),
+        _ => None,
+    };
+    Ok(PurchaseInput {
+        prices,
+        amounts,
+        available: form.0.contains_key("available"),
+        quantity_trace: flag("quantity_trace"),
+        can_buy_zero: flag("can_buy_zero"),
+    })
+}
+
+/// Текущие цены, остатки и флаги товара — в поля формы.
+async fn purchase_to_form(
+    state: &AppState,
+    element_id: i64,
+    form: &mut FormValues,
+) -> AppResult<()> {
+    let flag = |v: Option<bool>| match v {
+        Some(true) => "Y",
+        Some(false) => "N",
+        None => "default",
+    };
+    match catalog::raw_flags(&state.db, element_id).await? {
+        Some((available, trace, zero)) => {
+            if available {
+                form.set("available", "on");
+            }
+            form.set("quantity_trace", flag(trace));
+            form.set("can_buy_zero", flag(zero));
+        }
+        None => {
+            form.set("available", "on");
+            form.set("quantity_trace", "default");
+            form.set("can_buy_zero", "default");
+        }
+    }
+    for p in catalog::load_prices(&state.db, &[element_id])
+        .await?
+        .remove(&element_id)
+        .unwrap_or_default()
+    {
+        form.set(&format!("price_{}", p.type_id), p.price.to_string());
+    }
+    let amounts: Vec<(i64, f64)> = sqlx::query_as(
+        "SELECT store_id, amount::float8 FROM catalog_store_amounts WHERE element_id = $1",
+    )
+    .bind(element_id)
+    .fetch_all(&state.db)
+    .await?;
+    for (store, amount) in amounts {
+        form.set(&format!("amount_{store}"), amount.to_string());
+    }
+    Ok(())
 }
 
 async fn load_iblock(state: &AppState, id: i64) -> AppResult<IblockContext> {
     let iblock = repo::get_iblock(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
+    let catalog = if iblock.is_catalog {
+        Some(CatalogContext {
+            price_types: sqlx::query_as(
+                "SELECT id, name FROM catalog_price_types ORDER BY sort, id",
+            )
+            .fetch_all(&state.db)
+            .await?,
+            stores: sqlx::query_as("SELECT id, name, active FROM catalog_stores ORDER BY sort, id")
+                .fetch_all(&state.db)
+                .await?,
+        })
+    } else {
+        None
+    };
     Ok(IblockContext {
         properties: repo::list_properties(&state.db, id).await?,
         enums: repo::list_iblock_enums(&state.db, id).await?,
         sections: section_tree(repo::list_sections(&state.db, id).await?),
+        catalog,
         iblock,
     })
 }
@@ -298,6 +415,7 @@ async fn render_form(
 ) -> AppResult<Html<String>> {
     let IblockContext {
         iblock,
+        catalog,
         properties,
         enums,
         sections,
@@ -363,7 +481,7 @@ async fn render_form(
         "element_form.html",
         context! {
             user, iblock, properties, element_id, error, can_write, sections, enums, files, linked,
-            multi, form => form.first_values(),
+            multi, catalog, form => form.first_values(),
         },
     )
 }
@@ -452,6 +570,11 @@ pub async fn new_form(
     let mut form = FormValues::default();
     form.set("active", "on");
     form.set("sort", "500");
+    if ctx.catalog.is_some() {
+        form.set("available", "on");
+        form.set("quantity_trace", "default");
+        form.set("can_buy_zero", "default");
+    }
     if let Some(section) = q.section {
         form.set("section_id", section.to_string());
     }
@@ -480,7 +603,18 @@ async fn save(
     let mut form = FormValues::from_pairs(upload.fields);
     form.apply_uploads(upload.uploads, &ctx.properties);
 
+    // Вкладка каталога проверяется вместе с формой — до любой записи
+    let purchase = match &ctx.catalog {
+        Some(c) => {
+            let types: Vec<i64> = c.price_types.iter().map(|t| t.0).collect();
+            let stores: Vec<i64> = c.stores.iter().map(|s| s.0).collect();
+            Some(purchase_input_from_form(&form, &types, &stores))
+        }
+        None => None,
+    };
+    let purchase_error = purchase.as_ref().and_then(|p| p.as_ref().err().cloned());
     let result = match build_input(&form, &ctx.properties, &ctx.enums, &ctx.sections) {
+        Ok(_) if purchase_error.is_some() => Err(purchase_error.clone().unwrap_or_default()),
         Ok(input) if upload.rejected.is_empty() => {
             match check_references(state, &ctx.properties, &input).await? {
                 Ok(()) => Ok(input),
@@ -494,13 +628,16 @@ async fn save(
     let error = match result {
         Ok(input) => {
             let saved = match element_id {
-                Some(id) => repo::update_element(&state.db, id, &input).await,
-                None => repo::create_element(&state.db, ctx.iblock.id, &input)
+                Some(id) => repo::update_element(&state.db, id, &input)
                     .await
-                    .map(|_| ()),
+                    .map(|_| id),
+                None => repo::create_element(&state.db, ctx.iblock.id, &input).await,
             };
             match saved {
-                Ok(()) => {
+                Ok(saved_id) => {
+                    if let Some(Ok(p)) = &purchase {
+                        catalog::save_purchase(&state.db, saved_id, p).await?;
+                    }
                     let mut url = format!("/admin/iblocks/{}/elements", ctx.iblock.id);
                     if let Some(section) = input.section_id {
                         url.push_str(&format!("?section={section}"));
@@ -538,7 +675,10 @@ pub async fn edit_form(
         .ok_or(AppError::NotFound)?;
     user.require_iblock(element.iblock_id, Level::Read)?;
     let ctx = load_iblock(&state, element.iblock_id).await?;
-    let form = element_to_form(&element, &ctx.properties);
+    let mut form = element_to_form(&element, &ctx.properties);
+    if ctx.catalog.is_some() {
+        purchase_to_form(&state, id, &mut form).await?;
+    }
     render_form(&state, user, ctx, Some(id), form, None).await
 }
 
@@ -578,6 +718,32 @@ pub async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn purchase_input_from_form_fields() {
+        let form = FormValues::from_pairs(
+            [
+                ("price_3", "597,40"),
+                ("price_1", ""),
+                ("amount_5", "3"),
+                ("quantity_trace", "default"),
+                ("can_buy_zero", "N"),
+                ("available", "on"),
+            ]
+            .map(|(k, v)| (k.to_string(), v.to_string())),
+        );
+        let input = purchase_input_from_form(&form, &[3, 1], &[5]).unwrap();
+        assert_eq!(input.prices, vec![(3, Some(597.4)), (1, None)]);
+        assert_eq!(input.amounts, vec![(5, 3.0)]);
+        assert_eq!(input.quantity_trace, None);
+        assert_eq!(input.can_buy_zero, Some(false));
+        assert!(input.available);
+        let bad = FormValues::from_pairs([("price_3".to_string(), "abc".to_string())]);
+        assert_eq!(
+            purchase_input_from_form(&bad, &[3], &[]).unwrap_err(),
+            "Цена: ожидается число"
+        );
+    }
 
     fn prop(code: &str, kind: &str, required: bool) -> Property {
         Property {
