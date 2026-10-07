@@ -3,6 +3,7 @@ mod admin;
 mod api;
 mod auth;
 mod bxapi;
+mod catalog;
 mod config;
 mod error;
 mod files;

@@ -22,6 +22,7 @@ use super::{
     to_camel, to_snake,
 };
 use crate::{
+    catalog,
     files::{self, FileRecord},
     iblock::Property,
     state::AppState,
@@ -271,18 +272,6 @@ fn collapse_slashes(url: &str) -> String {
 // Пакетная загрузка связанных данных
 // ---------------------------------------------------------------------------
 
-#[derive(FromRow)]
-struct Price {
-    element_id: i64,
-    type_id: i64,
-    type_name: String,
-    is_base: bool,
-    price: f64,
-    currency: String,
-    quantity_from: Option<i32>,
-    quantity_to: Option<i32>,
-}
-
 #[derive(Default)]
 struct Loaded {
     files: HashMap<i64, FileRecord>,
@@ -290,7 +279,7 @@ struct Loaded {
     linked: HashMap<i64, Row>,
     /// Сериализованные связанные элементы по корню свойства: id → поля.
     related: HashMap<String, HashMap<i64, Map<String, Value>>>,
-    prices: HashMap<i64, Vec<Price>>,
+    prices: HashMap<i64, Vec<catalog::Price>>,
     stocks: HashMap<i64, Vec<(i64, f64)>>,
     quantities: HashMap<i64, f64>,
 }
@@ -416,23 +405,7 @@ impl Loaded {
         // Каталог: цены, склады, остатки
         if schema.iblock.is_catalog && !row_ids.is_empty() {
             if select.has("catalogPrice") {
-                let prices: Vec<Price> = sqlx::query_as(
-                    "SELECT p.element_id, p.price_type_id AS type_id, t.name AS type_name, t.is_base,
-                            p.price::float8 AS price, p.currency, p.quantity_from, p.quantity_to
-                     FROM catalog_prices p JOIN catalog_price_types t ON t.id = p.price_type_id
-                     WHERE p.element_id = ANY($1)
-                     ORDER BY p.element_id, t.sort, p.price_type_id, p.quantity_from NULLS FIRST",
-                )
-                .bind(&row_ids)
-                .fetch_all(&env.state.db)
-                .await?;
-                for price in prices {
-                    loaded
-                        .prices
-                        .entry(price.element_id)
-                        .or_default()
-                        .push(price);
-                }
+                loaded.prices = catalog::load_prices(&env.state.db, &row_ids).await?;
             }
             if select.has("stocks") {
                 let amounts: Vec<(i64, i64, f64)> = sqlx::query_as(
@@ -671,7 +644,7 @@ impl Loaded {
         let Some(prices) = self.prices.get(&element_id).filter(|p| !p.is_empty()) else {
             return Value::Array(Vec::new()); // Битрикс отдаёт пустой массив
         };
-        let main = prices.iter().find(|p| p.is_base).unwrap_or(&prices[0]);
+        let main = catalog::main_price(prices).unwrap_or(&prices[0]);
         let by_type: Vec<Value> = prices
             .iter()
             .map(|p| {
