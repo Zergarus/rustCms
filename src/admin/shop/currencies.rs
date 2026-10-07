@@ -60,6 +60,40 @@ pub fn preview(form: &CurrencyForm, value: f64) -> String {
     }
 }
 
+/// Пример для вывода в HTML: формат задаёт администратор, поэтому разметка
+/// экранируется, а сущности вида `&#8381;` и `&nbsp;` остаются сущностями.
+pub fn preview_html(form: &CurrencyForm, value: f64) -> String {
+    let escaped = preview(form, value)
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;");
+    let mut out = String::with_capacity(escaped.len());
+    let mut rest = escaped.as_str();
+    while let Some(pos) = rest.find("&amp;") {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos + 5..];
+        let entity = tail.find(';').map(|end| &tail[..end]).filter(|name| {
+            let name = name.strip_prefix('#').unwrap_or(name);
+            !name.is_empty() && name.len() <= 8 && name.chars().all(|c| c.is_ascii_alphanumeric())
+        });
+        match entity {
+            Some(name) => {
+                out.push('&');
+                out.push_str(name);
+                out.push(';');
+                rest = &tail[name.len() + 1..];
+            }
+            None => {
+                out.push_str("&amp;");
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 #[derive(sqlx::FromRow, Serialize)]
 struct CurrencyRow {
     code: String,
@@ -86,7 +120,7 @@ fn form_page(
     form: CurrencyForm,
     error: Option<String>,
 ) -> AppResult<Html<String>> {
-    let sample = preview(&form, 1234567.5);
+    let sample = preview_html(&form, 1234567.5);
     render(
         state,
         "shop/currency_form.html",
@@ -205,5 +239,21 @@ mod tests {
         };
         assert_eq!(preview(&form, 3949.0), "3&nbsp;949 &#8381;");
         assert_eq!(preview(&form, 597.4), "597.40 &#8381;");
+    }
+
+    #[test]
+    fn preview_html_escapes_markup() {
+        let form = CurrencyForm {
+            code: "RUB".into(),
+            format_string: "# <img src=x onerror=alert(1)> &#8381;".into(),
+            dec_point: ".".into(),
+            thousands_sep: "&nbsp;".into(),
+            decimals: "0".into(),
+            hide_zero: None,
+        };
+        assert_eq!(
+            preview_html(&form, 3949.0),
+            "3&nbsp;949 &lt;img src=x onerror=alert(1)&gt; &#8381;"
+        );
     }
 }

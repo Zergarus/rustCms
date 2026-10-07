@@ -305,6 +305,14 @@ fn purchase_input_from_form(
             prices.push((*t, Some(v)));
         }
     }
+    let quantity = match form.get("quantity") {
+        "" => None,
+        raw => Some(
+            number(raw)
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .ok_or("Доступное количество: ожидается число не меньше нуля")?,
+        ),
+    };
     let mut amounts = Vec::new();
     for st in stores {
         let raw = form.get(&format!("amount_{st}"));
@@ -320,6 +328,7 @@ fn purchase_input_from_form(
     Ok(PurchaseInput {
         prices,
         amounts,
+        quantity,
         available: form.0.contains_key("available"),
         quantity_trace: flag("quantity_trace"),
         can_buy_zero: flag("can_buy_zero"),
@@ -351,12 +360,38 @@ async fn purchase_to_form(
             form.set("can_buy_zero", "default");
         }
     }
-    for p in catalog::load_prices(&state.db, &[element_id])
+    let prices = catalog::load_prices(&state.db, &[element_id])
         .await?
         .remove(&element_id)
-        .unwrap_or_default()
-    {
-        form.set(&format!("price_{}", p.type_id), p.price.to_string());
+        .unwrap_or_default();
+    let tiered = catalog::tiered_price_types(&prices);
+    for p in &prices {
+        if tiered.contains(&p.type_id) {
+            // Диапазоны по количеству показываются только для чтения
+            let key = format!("tiered_{}", p.type_id);
+            let range = match (p.quantity_from, p.quantity_to) {
+                (Some(f), Some(t)) => format!("{f}–{t} шт.: "),
+                (Some(f), None) => format!("от {f} шт.: "),
+                (None, Some(t)) => format!("до {t} шт.: "),
+                (None, None) => String::new(),
+            };
+            let text = [form.get(&key), &format!("{range}{}", p.price)]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("; ");
+            form.set(&key, text);
+        } else {
+            form.set(&format!("price_{}", p.type_id), p.price.to_string());
+        }
+    }
+    let quantity: Option<f64> =
+        sqlx::query_scalar("SELECT quantity::float8 FROM catalog_products WHERE element_id = $1")
+            .bind(element_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if let Some(q) = quantity {
+        form.set("quantity", q.to_string());
     }
     let amounts: Vec<(i64, f64)> = sqlx::query_as(
         "SELECT store_id, amount::float8 FROM catalog_store_amounts WHERE element_id = $1",
@@ -606,7 +641,22 @@ async fn save(
     // Вкладка каталога проверяется вместе с формой — до любой записи
     let purchase = match &ctx.catalog {
         Some(c) => {
-            let types: Vec<i64> = c.price_types.iter().map(|t| t.0).collect();
+            // Цены с диапазонами по количеству вкладка не меняет
+            let tiered = match element_id {
+                Some(id) => catalog::tiered_price_types(
+                    &catalog::load_prices(&state.db, &[id])
+                        .await?
+                        .remove(&id)
+                        .unwrap_or_default(),
+                ),
+                None => Default::default(),
+            };
+            let types: Vec<i64> = c
+                .price_types
+                .iter()
+                .map(|t| t.0)
+                .filter(|t| !tiered.contains(t))
+                .collect();
             let stores: Vec<i64> = c.stores.iter().map(|s| s.0).collect();
             Some(purchase_input_from_form(&form, &types, &stores))
         }
@@ -743,6 +793,22 @@ mod tests {
             purchase_input_from_form(&bad, &[3], &[]).unwrap_err(),
             "Цена: ожидается число"
         );
+    }
+
+    #[test]
+    fn purchase_input_total_quantity() {
+        let form = FormValues::from_pairs([("quantity".to_string(), "50".to_string())]);
+        assert_eq!(
+            purchase_input_from_form(&form, &[], &[]).unwrap().quantity,
+            Some(50.0)
+        );
+        let empty = FormValues::from_pairs([("quantity".to_string(), String::new())]);
+        assert_eq!(
+            purchase_input_from_form(&empty, &[], &[]).unwrap().quantity,
+            None
+        );
+        let bad = FormValues::from_pairs([("quantity".to_string(), "-1".to_string())]);
+        assert!(purchase_input_from_form(&bad, &[], &[]).is_err());
     }
 
     fn prop(code: &str, kind: &str, required: bool) -> Property {

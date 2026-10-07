@@ -1,6 +1,6 @@
 //! Торговый каталог (аналог модуля `catalog`): цены, остатки и правила покупки товара.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sqlx::{FromRow, PgPool};
 
@@ -177,10 +177,27 @@ pub async fn load(db: &PgPool, element_ids: &[i64]) -> sqlx::Result<HashMap<i64,
 
 /// Вкладка «Торговый каталог» товара: цены по типам (`None` — удалить цену),
 /// остатки по складам, флаги (`None` — «по умолчанию»).
+/// Типы цен с диапазонами по количеству (несколько строк или границы диапазона):
+/// одной ценой в форме их не задать, вкладка товара их не меняет.
+pub fn tiered_price_types(prices: &[Price]) -> HashSet<i64> {
+    let mut rows: HashMap<i64, usize> = HashMap::new();
+    let mut tiered = HashSet::new();
+    for p in prices {
+        *rows.entry(p.type_id).or_default() += 1;
+        if p.quantity_from.is_some() || p.quantity_to.is_some() {
+            tiered.insert(p.type_id);
+        }
+    }
+    tiered.extend(rows.into_iter().filter(|(_, n)| *n > 1).map(|(t, _)| t));
+    tiered
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PurchaseInput {
     pub prices: Vec<(i64, Option<f64>)>,
     pub amounts: Vec<(i64, f64)>,
+    /// Общий остаток (`QUANTITY`); `None` — сумма остатков по складам.
+    pub quantity: Option<f64>,
     pub available: bool,
     pub quantity_trace: Option<bool>,
     pub can_buy_zero: Option<bool>,
@@ -197,7 +214,7 @@ pub async fn raw_flags(
         .await
 }
 
-/// Сохраняет цены, остатки и флаги товара; общий остаток — сумма по складам.
+/// Сохраняет цены, остатки и флаги товара; общий остаток не задан — сумма по складам.
 pub async fn save_purchase(
     db: &PgPool,
     element_id: i64,
@@ -245,7 +262,7 @@ pub async fn save_purchase(
     }
     sqlx::query(
         "INSERT INTO catalog_products (element_id, quantity, available, quantity_trace, can_buy_zero)
-         VALUES ($1, (SELECT COALESCE(sum(amount), 0) FROM catalog_store_amounts WHERE element_id = $1), $2, $3, $4)
+         VALUES ($1, COALESCE($5, (SELECT COALESCE(sum(amount), 0) FROM catalog_store_amounts WHERE element_id = $1)), $2, $3, $4)
          ON CONFLICT (element_id) DO UPDATE SET quantity = EXCLUDED.quantity, available = EXCLUDED.available,
              quantity_trace = EXCLUDED.quantity_trace, can_buy_zero = EXCLUDED.can_buy_zero",
     )
@@ -253,6 +270,7 @@ pub async fn save_purchase(
     .bind(input.available)
     .bind(input.quantity_trace)
     .bind(input.can_buy_zero)
+    .bind(input.quantity)
     .execute(&mut *tx)
     .await?;
     tx.commit().await
@@ -260,7 +278,7 @@ pub async fn save_purchase(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use super::*;
 
@@ -287,6 +305,22 @@ mod tests {
             amounts: amounts.iter().copied().collect::<HashMap<_, _>>(),
             total,
         }
+    }
+
+    #[test]
+    fn tiered_price_types_detects_ranges() {
+        let mut tier = price(2, false, 90.0);
+        tier.quantity_from = Some(10);
+        let mut ranged = price(4, false, 70.0);
+        ranged.quantity_to = Some(5);
+        let prices = [
+            price(1, true, 100.0),
+            price(2, false, 95.0),
+            tier,
+            price(3, false, 80.0),
+            ranged,
+        ];
+        assert_eq!(tiered_price_types(&prices), HashSet::from([2, 4]));
     }
 
     #[test]

@@ -141,10 +141,15 @@
       <div class="field">
         <span class="field-label">Цены</span>
         {% for t in catalog.price_types %}
+        {% if form['tiered_' ~ t[0]] %}
+        <label>{{ t[1] }}<input value="{{ form['tiered_' ~ t[0]] }}" readonly><small>Цены с диапазонами по количеству здесь не меняются</small></label>
+        {% else %}
         <label>{{ t[1] }}<input name="price_{{ t[0] }}" inputmode="decimal" value="{{ form['price_' ~ t[0]] }}" placeholder="нет цены"></label>
+        {% endif %}
         {% endfor %}
       </div>
       <div class="field">
+        <label>Доступное количество<input name="quantity" inputmode="decimal" value="{{ form.quantity }}" placeholder="сумма остатков по складам"></label>
         <span class="field-label">Остатки по складам</span>
         {% for st in catalog.stores %}
         <label>{{ st[1] }}{% if not st[2] %} <span class="muted">(неактивен)</span>{% endif %}<input name="amount_{{ st[0] }}" inputmode="decimal" value="{{ form['amount_' ~ st[0]] }}" placeholder="нет записи"></label>

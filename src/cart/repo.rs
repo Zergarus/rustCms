@@ -1,5 +1,7 @@
 //! Хранилище корзины: покупатели (`buyers`) и позиции (`cart_items`).
 
+use std::collections::HashSet;
+
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool};
 
@@ -231,6 +233,67 @@ pub async fn clear(db: &PgPool, buyer_id: i64) -> sqlx::Result<()> {
     touch(db, buyer_id).await
 }
 
+/// Куда прибавить добавляемый товар (контракт bxapi, 5.2).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AddTarget {
+    /// К существующей позиции; `set_store` — проставить ей склад.
+    Existing {
+        item_id: i64,
+        set_store: Option<i64>,
+    },
+    New,
+}
+
+/// Без склада — к позиции товара с любым складом; со складом — к позиции с этим
+/// складом, иначе к позиции без склада (склад деактивирован — тоже «без склада»).
+pub fn add_target(
+    items: &[CartItem],
+    element_id: i64,
+    store_id: Option<i64>,
+    active_stores: &HashSet<i64>,
+) -> AddTarget {
+    let mut rows = items.iter().filter(|i| i.element_id == element_id);
+    let found = match store_id {
+        None => rows.next().map(|i| (i.id, None)),
+        Some(store) => {
+            let rows: Vec<&CartItem> = rows.collect();
+            rows.iter()
+                .find(|i| i.store_id == Some(store))
+                .map(|i| (i.id, None))
+                .or_else(|| {
+                    rows.iter()
+                        .find(|i| !i.store_id.is_some_and(|s| active_stores.contains(&s)))
+                        .map(|i| (i.id, Some(store)))
+                })
+        }
+    };
+    match found {
+        Some((item_id, set_store)) => AddTarget::Existing { item_id, set_store },
+        None => AddTarget::New,
+    }
+}
+
+/// Прибавляет количество к позиции и, если задан, проставляет ей склад.
+pub async fn add_to_item(
+    db: &PgPool,
+    buyer_id: i64,
+    item_id: i64,
+    quantity: f64,
+    set_store: Option<i64>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE cart_items SET quantity = quantity + $3, store_id = COALESCE($4, store_id), updated_at = now()
+         WHERE buyer_id = $1 AND id = $2 AND order_id IS NULL",
+    )
+    .bind(buyer_id)
+    .bind(item_id)
+    .bind(quantity)
+    .bind(set_store)
+    .execute(db)
+    .await?;
+    touch(db, buyer_id).await
+}
+
 /// План объединения: тот же товар на том же складе — количество прибавляется к позиции
 /// пользователя, остальное переносится. Остатки не проверяются (их проверит заказ).
 pub fn merge_plan(guest: &[CartItem], user: &[CartItem]) -> Vec<MergeOp> {
@@ -314,6 +377,58 @@ mod tests {
             quantity: qty,
             name: String::new(),
         }
+    }
+
+    #[test]
+    fn add_without_store_goes_to_any_row_of_product() {
+        let items = [item(1, 7, Some(5), 1.0)];
+        assert_eq!(
+            add_target(&items, 7, None, &HashSet::from([5])),
+            AddTarget::Existing {
+                item_id: 1,
+                set_store: None
+            }
+        );
+        assert_eq!(
+            add_target(&items, 8, None, &HashSet::from([5])),
+            AddTarget::New
+        );
+    }
+
+    #[test]
+    fn add_with_store_prefers_same_store_then_storeless() {
+        let active = HashSet::from([5, 6]);
+        let items = [item(1, 7, None, 1.0), item(2, 7, Some(5), 1.0)];
+        assert_eq!(
+            add_target(&items, 7, Some(5), &active),
+            AddTarget::Existing {
+                item_id: 2,
+                set_store: None
+            }
+        );
+        assert_eq!(
+            add_target(&items, 7, Some(6), &active),
+            AddTarget::Existing {
+                item_id: 1,
+                set_store: Some(6)
+            }
+        );
+        assert_eq!(
+            add_target(&[item(2, 7, Some(5), 1.0)], 7, Some(6), &active),
+            AddTarget::New
+        );
+    }
+
+    #[test]
+    fn add_treats_inactive_store_row_as_storeless() {
+        let items = [item(3, 7, Some(9), 1.0)];
+        assert_eq!(
+            add_target(&items, 7, Some(5), &HashSet::from([5])),
+            AddTarget::Existing {
+                item_id: 3,
+                set_store: Some(5)
+            }
+        );
     }
 
     #[test]

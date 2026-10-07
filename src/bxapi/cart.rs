@@ -1,7 +1,7 @@
 //! Корзина по контракту bxapi: `cart`, `cart/items`, `cart/items/{id}/quantity|store|remove`,
 //! `cart/clear`. Каждый ответ — полный снимок корзины.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::{
     body::Bytes,
@@ -24,7 +24,7 @@ use super::{
 use crate::{
     cart::{
         CartItem, ProductView, SnapshotConfig, StoreInfo,
-        repo::{self, Owner},
+        repo::{self, AddTarget, Owner},
         snapshot::build_snapshot,
     },
     catalog::{self, PurchaseInfo, check_quantity},
@@ -313,18 +313,28 @@ pub async fn add_item(State(state): State<AppState>, jar: CookieJar, body: Bytes
         }
     };
     let buyer = repo::ensure_buyer(&state.db, &owner).await?;
-    let existing: f64 = repo::items(&state.db, buyer)
-        .await?
-        .iter()
-        .filter(|i| i.element_id == product_id && i.store_id == store_id)
-        .map(|i| i.quantity)
-        .sum();
-    check_quantity(info, store_id, existing + quantity).map_err(change_failed)?;
-    let name: String = sqlx::query_scalar("SELECT name FROM iblock_elements WHERE id = $1")
-        .bind(product_id)
-        .fetch_one(&state.db)
-        .await?;
-    repo::add(&state.db, buyer, product_id, store_id, quantity, &name).await?;
+    let items = repo::items(&state.db, buyer).await?;
+    let active: HashSet<i64> = stores.iter().filter(|s| s.active).map(|s| s.id).collect();
+    match repo::add_target(&items, product_id, store_id, &active) {
+        AddTarget::Existing { item_id, set_store } => {
+            let item = items
+                .iter()
+                .find(|i| i.id == item_id)
+                .ok_or_else(item_not_found)?;
+            // Склад позиции после добавления; деактивированный — как без склада
+            let store = set_store.or(item.store_id.filter(|s| active.contains(s)));
+            check_quantity(info, store, item.quantity + quantity).map_err(change_failed)?;
+            repo::add_to_item(&state.db, buyer, item_id, quantity, set_store).await?;
+        }
+        AddTarget::New => {
+            check_quantity(info, store_id, quantity).map_err(change_failed)?;
+            let name: String = sqlx::query_scalar("SELECT name FROM iblock_elements WHERE id = $1")
+                .bind(product_id)
+                .fetch_one(&state.db)
+                .await?;
+            repo::add(&state.db, buyer, product_id, store_id, quantity, &name).await?;
+        }
+    }
     Ok((jar, success(snapshot(&state, Some(buyer)).await?)).into_response())
 }
 
