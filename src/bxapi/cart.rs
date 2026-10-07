@@ -118,12 +118,16 @@ struct StoreRow {
     email: String,
     schedule: String,
     extra: sqlx::types::Json<Map<String, Value>>,
+    image: Option<String>,
 }
 
 /// Склады с полями по настройкам проекта; UF-поля — строками, как отдаёт Битрикс.
 async fn load_stores(state: &AppState) -> Result<Vec<StoreInfo>, BxError> {
     let rows: Vec<StoreRow> = sqlx::query_as(
-        "SELECT id, name, active, address, phone, email, schedule, extra FROM catalog_stores ORDER BY sort, id",
+        "SELECT s.id, s.name, s.active, s.address, s.phone, s.email, s.schedule, s.extra,
+                '/upload/' || f.path AS image
+         FROM catalog_stores s LEFT JOIN files f ON f.id = s.image_id
+         ORDER BY s.sort, s.id",
     )
     .fetch_all(&state.db)
     .await?;
@@ -155,6 +159,7 @@ async fn load_stores(state: &AppState) -> Result<Vec<StoreInfo>, BxError> {
                 name: r.name,
                 active: r.active,
                 fields,
+                image: r.image,
             }
         })
         .collect())

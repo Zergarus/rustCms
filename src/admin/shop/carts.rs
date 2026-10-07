@@ -70,6 +70,7 @@ async fn stores(state: &AppState) -> sqlx::Result<Vec<StoreInfo>> {
             name,
             active,
             fields: Default::default(),
+            image: None,
         })
         .collect())
 }

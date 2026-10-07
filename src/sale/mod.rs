@@ -1,6 +1,8 @@
 //! Оформление и заказы (аналог модуля `sale`): справочники оформления, форма,
 //! проверки, остатки, заказ, письма.
 
+pub mod form;
+
 use std::collections::HashMap;
 
 use serde::Serialize;

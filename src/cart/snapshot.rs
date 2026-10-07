@@ -36,7 +36,7 @@ pub fn item_hash(
 }
 
 /// Объект склада: id, название, поля карточки и UF.
-fn store_json(store: &StoreInfo) -> Map<String, Value> {
+pub fn store_json(store: &StoreInfo) -> Map<String, Value> {
     let mut obj = Map::new();
     obj.insert("id".into(), json!(store.id));
     obj.insert("name".into(), json!(store.name));
@@ -201,6 +201,7 @@ mod tests {
             name: format!("Склад {id}"),
             active,
             fields,
+            image: None,
         }
     }
 

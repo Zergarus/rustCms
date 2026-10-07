@@ -24,6 +24,8 @@ pub struct StoreInfo {
     pub name: String,
     pub active: bool,
     pub fields: Map<String, Value>,
+    /// Фото склада (`/upload/...`) — в пунктах самовывоза формы заказа, не в корзине.
+    pub image: Option<String>,
 }
 
 /// Отображение товара в позиции: берётся из сериализации элемента.
