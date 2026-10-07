@@ -152,6 +152,64 @@ struct Data {
     locations: Vec<LocationRow>,
     mail_templates: Vec<MailTemplateRow>,
     options: Vec<(String, String, String)>,
+    sale: Sale,
+}
+
+/// Настройки оформления заказа (модуль `sale`).
+#[derive(Default)]
+struct Sale {
+    /// (код, название, сортировка, описание, уведомлять)
+    statuses: Vec<(String, String, i32, String, bool)>,
+    /// (id, код, название, активен, сортировка)
+    person_types: Vec<(i64, String, String, bool, i32)>,
+    /// (id, тип плательщика, название, сортировка, код блока)
+    groups: Vec<(i64, i64, String, i32, String)>,
+    properties: Vec<SalePropertyRow>,
+    /// (id, свойство, значение, название, сортировка)
+    variants: Vec<(i64, i64, String, String, i32)>,
+    deliveries: Vec<DeliveryRow>,
+    pay_systems: Vec<PaySystemRow>,
+}
+
+struct SalePropertyRow {
+    id: i64,
+    person_type_id: i64,
+    group_id: Option<i64>,
+    code: String,
+    name: String,
+    kind: &'static str,
+    required: bool,
+    util: bool,
+    /// is_email, is_phone, is_payer, is_profile_name, is_location, is_address, is_zip
+    flags: [bool; 7],
+    default_value: String,
+    description: String,
+    sort: i32,
+    active: bool,
+}
+
+struct DeliveryRow {
+    id: i64,
+    code: String,
+    name: String,
+    description: String,
+    active: bool,
+    public: bool,
+    sort: i32,
+    price: f64,
+    currency: String,
+    stores: Vec<i64>,
+}
+
+struct PaySystemRow {
+    id: i64,
+    code: String,
+    name: String,
+    description: String,
+    active: bool,
+    sort: i32,
+    api_type: &'static str,
+    group_ids: Vec<i64>,
 }
 
 /// Пользователь сайта из `b_user`.
@@ -202,6 +260,7 @@ struct StoreRow {
     schedule: String,
     /// UF-поля склада (`uf_city_id`...).
     extra: Map<String, Value>,
+    image_id: Option<i64>,
 }
 
 /// Почтовый шаблон `b_event_message`.
@@ -277,6 +336,7 @@ pub async fn run(db: &PgPool, opts: Options) -> anyhow::Result<()> {
     stage("торговый каталог", read_catalog(&my, &mut data)).await?;
     stage("местоположения", read_locations(&my, &mut data)).await?;
     stage("почтовые шаблоны и настройки", read_mail(&my, &mut data)).await?;
+    stage("настройки заказов", read_sale(&my, &mut data)).await?;
 
     let props = resolve_properties(&mut data);
     let (linked, missing) = link_files(&data, &opts)?;
@@ -1145,6 +1205,152 @@ fn php_unserialize_list(raw: &str) -> Vec<String> {
     items
 }
 
+/// Разбор PHP-сериализации с вложенными массивами: массив — объект с ключами-строками
+/// (порядок сохраняется), скаляры — строки. `None` — строка не разобрана.
+fn php_value(raw: &str) -> Option<Value> {
+    fn parse(s: &str, i: &mut usize) -> Option<Value> {
+        let b = s.as_bytes();
+        let kind = *b.get(*i)?;
+        match kind {
+            b's' => {
+                let rest = &s[*i + 2..];
+                let (len, _) = rest.split_once(':')?;
+                let len: usize = len.parse().ok()?;
+                let start = *i + 2 + len.to_string().len() + 2;
+                let end = start + len;
+                let v = s.get(start..end)?.to_string();
+                *i = end + 2;
+                Some(Value::String(v))
+            }
+            b'i' | b'd' | b'b' => {
+                let end = *i + s[*i..].find(';')?;
+                let v = s[*i + 2..end].to_string();
+                *i = end + 1;
+                Some(Value::String(v))
+            }
+            b'N' => {
+                *i += 2;
+                Some(Value::Null)
+            }
+            b'a' => {
+                let rest = &s[*i + 2..];
+                let (count, _) = rest.split_once(':')?;
+                let count: usize = count.parse().ok()?;
+                *i += 2 + count.to_string().len() + 2;
+                let mut map = Map::new();
+                for _ in 0..count {
+                    let key = match parse(s, i)? {
+                        Value::String(k) => k,
+                        _ => return None,
+                    };
+                    let value = parse(s, i)?;
+                    map.insert(key, value);
+                }
+                // закрывающая `}`
+                *i += 1;
+                Some(Value::Object(map))
+            }
+            _ => None,
+        }
+    }
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let mut i = 0;
+    parse(raw, &mut i)
+}
+
+/// Код блока формы по названию группы свойств — как эвристика модуля bxapi.
+fn sale_block_code(name: &str, id: i64) -> String {
+    let lower = name.trim().to_lowercase();
+    for (needle, code) in [
+        ("покупатель", "buyer"),
+        ("плательщик", "buyer"),
+        ("получатель", "recipient"),
+        ("доставка", "delivery"),
+        ("оплата", "payment"),
+        ("комментарий", "comment"),
+        ("адрес", "address"),
+    ] {
+        if !lower.is_empty() && lower.contains(needle) {
+            return code.to_string();
+        }
+    }
+    let slug: String = lower
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let slug: Vec<&str> = slug.split('_').filter(|p| !p.is_empty()).collect();
+    if slug.is_empty() {
+        format!("group_{id}")
+    } else {
+        slug.join("_")
+    }
+}
+
+/// Вид поля по типу свойства заказа Битрикса.
+fn sale_prop_kind(bitrix_type: &str, multiline: bool) -> &'static str {
+    match bitrix_type {
+        "STRING" if multiline => "textarea",
+        "NUMBER" => "number",
+        "Y/N" => "checkbox",
+        "ENUM" | "RADIO" => "select",
+        "DATE" => "date",
+        "FILE" => "file",
+        "LOCATION" => "location",
+        "ADDRESS" => "address",
+        _ => "text",
+    }
+}
+
+/// Цена службы доставки из `CONFIG`: `MAIN.PRICE` (настраиваемая), иначе первый тариф
+/// `MAIN[0]` (`SimpleHandler`); служба «Без доставки» — 0.
+fn delivery_price(class_name: &str, config: &str) -> f64 {
+    if class_name.ends_with("EmptyDeliveryService") {
+        return 0.0;
+    }
+    let Some(main) = php_value(config).and_then(|v| v.get("MAIN").cloned()) else {
+        return 0.0;
+    };
+    main.get("PRICE")
+        .or_else(|| main.get("0"))
+        .and_then(Value::as_str)
+        .and_then(|p| p.trim().parse().ok())
+        .unwrap_or(0.0)
+}
+
+/// Числовые id из массива `PARAMS[key]` ограничения или услуги (`STORES`, `GROUPS`).
+fn param_ids(params: &str, key: &str) -> Vec<i64> {
+    php_value(params)
+        .and_then(|v| v.get(key).cloned())
+        .and_then(|v| match v {
+            Value::Object(m) => Some(
+                m.values()
+                    .filter_map(|x| x.as_str().and_then(|s| s.trim().parse().ok()))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Тип платёжки для API по обработчику: счета — `document`, остальное — `other`.
+fn pay_api_type(action_file: &str) -> &'static str {
+    let name = action_file.rsplit('/').next().unwrap_or("").to_lowercase();
+    if name.starts_with("bill") || name.ends_with("bill") {
+        "document"
+    } else {
+        "other"
+    }
+}
+
 /// Почтовые шаблоны и нужные CMS настройки ядра.
 async fn read_mail(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
     for row in sqlx::query(
@@ -1458,7 +1664,8 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
     for row in sqlx::query(
         "SELECT CAST(ID AS SIGNED), CAST(TITLE AS CHAR), CAST(ACTIVE AS CHAR), CAST(SORT AS SIGNED),
                 CAST(IFNULL(ADDRESS, '') AS CHAR), CAST(IFNULL(PHONE, '') AS CHAR),
-                CAST(IFNULL(EMAIL, '') AS CHAR), CAST(IFNULL(SCHEDULE, '') AS CHAR)
+                CAST(IFNULL(EMAIL, '') AS CHAR), CAST(IFNULL(SCHEDULE, '') AS CHAR),
+                CAST(IMAGE_ID AS SIGNED)
          FROM b_catalog_store ORDER BY ID",
     )
     .fetch_all(my)
@@ -1474,6 +1681,7 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
             email: str_col(&row, 6),
             schedule: str_col(&row, 7),
             extra: Map::new(),
+            image_id: id_col(&row, 8),
         });
     }
     let store_uf = read_uf(my, "CAT_STORE", "b_uts_cat_store", "b_utm_cat_store").await?;
@@ -1830,6 +2038,7 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
     }
 
     write_catalog(&mut *tx, &data.catalog).await?;
+    write_sale(&mut *tx, &data.sale).await?;
 
     // Последовательности — после максимальных перенесённых id
     for (table, seq) in [
@@ -1842,10 +2051,400 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
         ("catalog_price_types", "catalog_price_types_id_seq"),
         ("catalog_prices", "catalog_prices_id_seq"),
         ("catalog_stores", "catalog_stores_id_seq"),
+        ("person_types", "person_types_id_seq"),
+        ("order_property_groups", "order_property_groups_id_seq"),
+        ("order_properties", "order_properties_id_seq"),
+        ("order_property_variants", "order_property_variants_id_seq"),
+        ("deliveries", "deliveries_id_seq"),
+        ("pay_systems", "pay_systems_id_seq"),
     ] {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT setval('{seq}', GREATEST((SELECT MAX(id) FROM {table}), 1))"
         )))
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Настройки оформления: статусы, типы плательщика, свойства, доставки, платёжки.
+async fn read_sale(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
+    if !mysql_table_exists(my, "b_sale_person_type").await? {
+        return Ok(());
+    }
+    let sale = &mut data.sale;
+    for row in sqlx::query(
+        "SELECT CAST(s.ID AS CHAR), CAST(IFNULL(l.NAME, s.ID) AS CHAR), CAST(s.SORT AS SIGNED),
+                CAST(IFNULL(l.DESCRIPTION, '') AS CHAR), CAST(s.NOTIFY AS CHAR)
+         FROM b_sale_status s LEFT JOIN b_sale_status_lang l ON l.STATUS_ID = s.ID AND l.LID = 'ru'
+         WHERE s.TYPE = 'O' ORDER BY s.SORT, s.ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        sale.statuses.push((
+            str_col(&row, 0),
+            str_col(&row, 1),
+            int_col(&row, 2).unwrap_or(100) as i32,
+            str_col(&row, 3),
+            str_col(&row, 4) == "Y",
+        ));
+    }
+    for row in sqlx::query(
+        "SELECT CAST(ID AS SIGNED), CAST(IFNULL(CODE, '') AS CHAR), CAST(NAME AS CHAR),
+                CAST(ACTIVE AS CHAR), CAST(SORT AS SIGNED)
+         FROM b_sale_person_type ORDER BY ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        sale.person_types.push((
+            int_col(&row, 0).context("b_sale_person_type.ID")?,
+            str_col(&row, 1),
+            str_col(&row, 2),
+            str_col(&row, 3) == "Y",
+            int_col(&row, 4).unwrap_or(100) as i32,
+        ));
+    }
+    for row in sqlx::query(
+        "SELECT CAST(ID AS SIGNED), CAST(PERSON_TYPE_ID AS SIGNED), CAST(NAME AS CHAR), CAST(SORT AS SIGNED)
+         FROM b_sale_order_props_group ORDER BY ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        let id = int_col(&row, 0).context("b_sale_order_props_group.ID")?;
+        let name = str_col(&row, 2);
+        sale.groups.push((
+            id,
+            int_col(&row, 1).unwrap_or(0),
+            name.clone(),
+            int_col(&row, 3).unwrap_or(100) as i32,
+            sale_block_code(&name, id),
+        ));
+    }
+    for row in sqlx::query(
+        "SELECT CAST(ID AS SIGNED), CAST(PERSON_TYPE_ID AS SIGNED), CAST(PROPS_GROUP_ID AS SIGNED),
+                CAST(IFNULL(CODE, '') AS CHAR), CAST(NAME AS CHAR), CAST(TYPE AS CHAR),
+                CAST(REQUIRED AS CHAR), CAST(UTIL AS CHAR), CAST(IS_EMAIL AS CHAR),
+                CAST(IS_PHONE AS CHAR), CAST(IS_PAYER AS CHAR), CAST(IS_PROFILE_NAME AS CHAR),
+                CAST(IS_LOCATION AS CHAR), CAST(IS_ADDRESS AS CHAR), CAST(IS_ZIP AS CHAR),
+                CAST(IFNULL(DEFAULT_VALUE, '') AS CHAR), CAST(IFNULL(DESCRIPTION, '') AS CHAR),
+                CAST(SORT AS SIGNED), CAST(ACTIVE AS CHAR), CAST(IFNULL(SETTINGS, '') AS CHAR)
+         FROM b_sale_order_props ORDER BY ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        let yes = |i: usize| str_col(&row, i) == "Y";
+        let multiline = php_value(&str_col(&row, 19))
+            .and_then(|v| v.get("MULTILINE").and_then(Value::as_str).map(|m| m == "Y"))
+            .unwrap_or(false);
+        sale.properties.push(SalePropertyRow {
+            id: int_col(&row, 0).context("b_sale_order_props.ID")?,
+            person_type_id: int_col(&row, 1).unwrap_or(0),
+            group_id: id_col(&row, 2),
+            code: str_col(&row, 3),
+            name: str_col(&row, 4),
+            kind: sale_prop_kind(&str_col(&row, 5), multiline),
+            required: yes(6),
+            util: yes(7),
+            flags: [yes(8), yes(9), yes(10), yes(11), yes(12), yes(13), yes(14)],
+            default_value: str_col(&row, 15),
+            description: str_col(&row, 16),
+            sort: int_col(&row, 17).unwrap_or(100) as i32,
+            active: yes(18),
+        });
+    }
+    for row in sqlx::query(
+        "SELECT CAST(ID AS SIGNED), CAST(ORDER_PROPS_ID AS SIGNED), CAST(VALUE AS CHAR),
+                CAST(NAME AS CHAR), CAST(SORT AS SIGNED)
+         FROM b_sale_order_props_variant ORDER BY ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        sale.variants.push((
+            int_col(&row, 0).context("b_sale_order_props_variant.ID")?,
+            int_col(&row, 1).unwrap_or(0),
+            str_col(&row, 2),
+            str_col(&row, 3),
+            int_col(&row, 4).unwrap_or(100) as i32,
+        ));
+    }
+
+    // Ограничения служб: (служба, тип 0 — доставка / 1 — оплата, класс, параметры)
+    let restrictions: Vec<(i64, i64, String, String)> = sqlx::query(
+        "SELECT CAST(SERVICE_ID AS SIGNED), CAST(SERVICE_TYPE AS SIGNED), CAST(CLASS_NAME AS CHAR),
+                CAST(IFNULL(PARAMS, '') AS CHAR)
+         FROM b_sale_service_rstr",
+    )
+    .fetch_all(my)
+    .await?
+    .iter()
+    .map(|r| {
+        (
+            int_col(r, 0).unwrap_or(0),
+            int_col(r, 1).unwrap_or(-1),
+            str_col(r, 2),
+            str_col(r, 3),
+        )
+    })
+    .collect();
+    let mut pickup: HashMap<i64, Vec<i64>> = HashMap::new();
+    for row in sqlx::query(
+        "SELECT CAST(DELIVERY_ID AS SIGNED), CAST(IFNULL(PARAMS, '') AS CHAR)
+         FROM b_sale_delivery_es WHERE ACTIVE = 'Y' AND CLASS_NAME LIKE '%ExtraServices%Store'",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        pickup
+            .entry(int_col(&row, 0).unwrap_or(0))
+            .or_default()
+            .extend(param_ids(&str_col(&row, 1), "STORES"));
+    }
+    for row in sqlx::query(
+        "SELECT CAST(ID AS SIGNED), CAST(IFNULL(CODE, '') AS CHAR), CAST(NAME AS CHAR),
+                CAST(IFNULL(DESCRIPTION, '') AS CHAR), CAST(ACTIVE AS CHAR), CAST(SORT AS SIGNED),
+                CAST(CLASS_NAME AS CHAR), CAST(IFNULL(CONFIG, '') AS CHAR), CAST(IFNULL(CURRENCY, '') AS CHAR)
+         FROM b_sale_delivery_srv ORDER BY ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        let id = int_col(&row, 0).context("b_sale_delivery_srv.ID")?;
+        let class = str_col(&row, 6);
+        // Группы служб — папки в админке Битрикса, не способы доставки
+        if class.ends_with(r"\Group") {
+            continue;
+        }
+        let hidden = restrictions.iter().any(|(sid, kind, cls, params)| {
+            *sid == id
+                && *kind == 0
+                && cls.ends_with("ByPublicMode")
+                && php_value(params)
+                    .and_then(|v| v.get("PUBLIC_SHOW").and_then(Value::as_str).map(|p| p == "N"))
+                    .unwrap_or(false)
+        });
+        let currency = str_col(&row, 8);
+        sale.deliveries.push(DeliveryRow {
+            id,
+            code: str_col(&row, 1),
+            name: str_col(&row, 2),
+            description: str_col(&row, 3),
+            active: str_col(&row, 4) == "Y",
+            public: !hidden,
+            sort: int_col(&row, 5).unwrap_or(100) as i32,
+            price: delivery_price(&class, &str_col(&row, 7)),
+            currency: if currency.is_empty() { "RUB".into() } else { currency },
+            stores: pickup.remove(&id).unwrap_or_default(),
+        });
+    }
+    for row in sqlx::query(
+        "SELECT CAST(ID AS SIGNED), CAST(IFNULL(CODE, '') AS CHAR), CAST(NAME AS CHAR),
+                CAST(IFNULL(DESCRIPTION, '') AS CHAR), CAST(ACTIVE AS CHAR), CAST(SORT AS SIGNED),
+                CAST(IFNULL(ACTION_FILE, '') AS CHAR)
+         FROM b_sale_pay_system_action ORDER BY ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        let id = int_col(&row, 0).context("b_sale_pay_system_action.ID")?;
+        let group_ids = restrictions
+            .iter()
+            .filter(|(sid, kind, _, _)| *sid == id && *kind == 1)
+            .flat_map(|(_, _, _, params)| param_ids(params, "GROUPS"))
+            .collect();
+        sale.pay_systems.push(PaySystemRow {
+            id,
+            code: str_col(&row, 1),
+            name: str_col(&row, 2),
+            description: str_col(&row, 3),
+            active: str_col(&row, 4) == "Y",
+            sort: int_col(&row, 5).unwrap_or(100) as i32,
+            api_type: pay_api_type(&str_col(&row, 6)),
+            group_ids,
+        });
+    }
+    Ok(())
+}
+
+/// Настройки оформления обновляются по id (на них могут ссылаться заказы), варианты
+/// свойств и склады доставок — перезаписываются.
+async fn write_sale(tx: &mut sqlx::PgConnection, sale: &Sale) -> anyhow::Result<()> {
+    for (code, name, sort, description, notify) in &sale.statuses {
+        sqlx::query(
+            "INSERT INTO order_statuses (code, name, sort, description, notify) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, sort = EXCLUDED.sort,
+                 description = EXCLUDED.description, notify = EXCLUDED.notify",
+        )
+        .bind(code)
+        .bind(name)
+        .bind(sort)
+        .bind(description)
+        .bind(notify)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for (id, code, name, active, sort) in &sale.person_types {
+        sqlx::query(
+            "INSERT INTO person_types (id, code, name, active, sort) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (id) DO UPDATE SET code = EXCLUDED.code, name = EXCLUDED.name,
+                 active = EXCLUDED.active, sort = EXCLUDED.sort",
+        )
+        .bind(id)
+        .bind(code)
+        .bind(name)
+        .bind(active)
+        .bind(sort)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let person_types: HashSet<i64> = sale.person_types.iter().map(|p| p.0).collect();
+    for (id, person_type, name, sort, block) in &sale.groups {
+        if !person_types.contains(person_type) {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO order_property_groups (id, person_type_id, name, sort, block_code)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (id) DO UPDATE SET person_type_id = EXCLUDED.person_type_id,
+                 name = EXCLUDED.name, sort = EXCLUDED.sort, block_code = EXCLUDED.block_code",
+        )
+        .bind(id)
+        .bind(person_type)
+        .bind(name)
+        .bind(sort)
+        .bind(block)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let groups: HashSet<i64> = sale.groups.iter().map(|g| g.0).collect();
+    for p in sale
+        .properties
+        .iter()
+        .filter(|p| person_types.contains(&p.person_type_id))
+    {
+        let [
+            is_email,
+            is_phone,
+            is_payer,
+            is_profile_name,
+            is_location,
+            is_address,
+            is_zip,
+        ] = p.flags;
+        sqlx::query(
+            "INSERT INTO order_properties (id, person_type_id, group_id, code, name, kind, required, util,
+                 is_email, is_phone, is_payer, is_profile_name, is_location, is_address, is_zip,
+                 default_value, description, sort, active)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+             ON CONFLICT (id) DO UPDATE SET person_type_id = EXCLUDED.person_type_id,
+                 group_id = EXCLUDED.group_id, code = EXCLUDED.code, name = EXCLUDED.name,
+                 kind = EXCLUDED.kind, required = EXCLUDED.required, util = EXCLUDED.util,
+                 is_email = EXCLUDED.is_email, is_phone = EXCLUDED.is_phone, is_payer = EXCLUDED.is_payer,
+                 is_profile_name = EXCLUDED.is_profile_name, is_location = EXCLUDED.is_location,
+                 is_address = EXCLUDED.is_address, is_zip = EXCLUDED.is_zip,
+                 default_value = EXCLUDED.default_value, description = EXCLUDED.description,
+                 sort = EXCLUDED.sort, active = EXCLUDED.active",
+        )
+        .bind(p.id)
+        .bind(p.person_type_id)
+        .bind(p.group_id.filter(|g| groups.contains(g)))
+        .bind(&p.code)
+        .bind(&p.name)
+        .bind(p.kind)
+        .bind(p.required)
+        .bind(p.util)
+        .bind(is_email)
+        .bind(is_phone)
+        .bind(is_payer)
+        .bind(is_profile_name)
+        .bind(is_location)
+        .bind(is_address)
+        .bind(is_zip)
+        .bind(&p.default_value)
+        .bind(&p.description)
+        .bind(p.sort)
+        .bind(p.active)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let properties: Vec<i64> = sale
+        .properties
+        .iter()
+        .filter(|p| person_types.contains(&p.person_type_id))
+        .map(|p| p.id)
+        .collect();
+    sqlx::query("DELETE FROM order_property_variants WHERE property_id = ANY($1)")
+        .bind(&properties)
+        .execute(&mut *tx)
+        .await?;
+    for (id, property, value, name, sort) in &sale.variants {
+        if !properties.contains(property) {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO order_property_variants (id, property_id, value, name, sort) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(id)
+        .bind(property)
+        .bind(value)
+        .bind(name)
+        .bind(sort)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for d in &sale.deliveries {
+        sqlx::query(
+            "INSERT INTO deliveries (id, code, name, description, active, public, sort, price, currency)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (id) DO UPDATE SET code = EXCLUDED.code, name = EXCLUDED.name,
+                 description = EXCLUDED.description, active = EXCLUDED.active, public = EXCLUDED.public,
+                 sort = EXCLUDED.sort, price = EXCLUDED.price, currency = EXCLUDED.currency",
+        )
+        .bind(d.id)
+        .bind(&d.code)
+        .bind(&d.name)
+        .bind(&d.description)
+        .bind(d.active)
+        .bind(d.public)
+        .bind(d.sort)
+        .bind(d.price)
+        .bind(&d.currency)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM delivery_stores WHERE delivery_id = $1")
+            .bind(d.id)
+            .execute(&mut *tx)
+            .await?;
+        // Склад мог не перенестись (удалён в Битриксе) — такие пропускаются
+        sqlx::query(
+            "INSERT INTO delivery_stores (delivery_id, store_id)
+             SELECT $1, id FROM catalog_stores WHERE id = ANY($2) ON CONFLICT DO NOTHING",
+        )
+        .bind(d.id)
+        .bind(&d.stores)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for p in &sale.pay_systems {
+        sqlx::query(
+            "INSERT INTO pay_systems (id, code, name, description, active, sort, api_type, group_ids)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (id) DO UPDATE SET code = EXCLUDED.code, name = EXCLUDED.name,
+                 description = EXCLUDED.description, active = EXCLUDED.active, sort = EXCLUDED.sort,
+                 api_type = EXCLUDED.api_type, group_ids = EXCLUDED.group_ids",
+        )
+        .bind(p.id)
+        .bind(&p.code)
+        .bind(&p.name)
+        .bind(&p.description)
+        .bind(p.active)
+        .bind(p.sort)
+        .bind(p.api_type)
+        .bind(&p.group_ids)
         .execute(&mut *tx)
         .await?;
     }
@@ -1904,6 +2503,17 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
         });
         qb.build().execute(&mut *tx).await?;
     }
+    // Картинка склада — только если файл перенесён
+    for st in c.stores.iter().filter(|st| st.image_id.is_some()) {
+        sqlx::query(
+            "UPDATE catalog_stores SET image_id = $2
+             WHERE id = $1 AND EXISTS (SELECT 1 FROM files WHERE id = $2)",
+        )
+        .bind(st.id)
+        .bind(st.image_id)
+        .execute(&mut *tx)
+        .await?;
+    }
     for chunk in c.amounts.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
             "INSERT INTO catalog_store_amounts (element_id, store_id, amount) ",
@@ -1947,6 +2557,69 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sale_block_code_by_group_name() {
+        assert_eq!(sale_block_code("Покупатель", 1), "buyer");
+        assert_eq!(sale_block_code("Данные покупателя", 9), "group_9");
+        assert_eq!(sale_block_code("Плательщик", 2), "buyer");
+        assert_eq!(sale_block_code("Получатель", 3), "recipient");
+        assert_eq!(sale_block_code("Комментарий", 4), "comment");
+        assert_eq!(sale_block_code("Свойства заказа", 7), "group_7");
+        assert_eq!(sale_block_code("Main info", 8), "main_info");
+    }
+
+    #[test]
+    fn sale_prop_kinds() {
+        assert_eq!(sale_prop_kind("STRING", false), "text");
+        assert_eq!(sale_prop_kind("STRING", true), "textarea");
+        assert_eq!(sale_prop_kind("Y/N", false), "checkbox");
+        assert_eq!(sale_prop_kind("ENUM", false), "select");
+        assert_eq!(sale_prop_kind("LOCATION", false), "location");
+        assert_eq!(sale_prop_kind("WHATEVER", false), "text");
+    }
+
+    #[test]
+    fn delivery_price_from_config() {
+        let configurable = r#"a:1:{s:4:"MAIN";a:3:{s:8:"CURRENCY";s:3:"RUB";s:5:"PRICE";s:3:"300";s:6:"PERIOD";a:0:{}}}"#;
+        assert_eq!(
+            delivery_price(r"\Bitrix\Sale\Delivery\Services\Configurable", configurable),
+            300.0
+        );
+        let simple = r#"a:1:{s:4:"MAIN";a:4:{s:8:"CURRENCY";s:3:"RUB";i:0;s:3:"300";i:1;s:0:"";i:2;s:0:"";}}"#;
+        assert_eq!(
+            delivery_price(r"\Sale\Handlers\Delivery\SimpleHandler", simple),
+            300.0
+        );
+        assert_eq!(
+            delivery_price(r"\Bitrix\Sale\Delivery\Services\EmptyDeliveryService", ""),
+            0.0
+        );
+    }
+
+    #[test]
+    fn param_ids_from_serialized() {
+        assert_eq!(
+            param_ids(
+                r#"a:1:{s:6:"STORES";a:3:{i:0;s:1:"3";i:1;s:1:"1";i:2;s:1:"4";}}"#,
+                "STORES"
+            ),
+            vec![3, 1, 4]
+        );
+        assert_eq!(
+            param_ids(r#"a:1:{s:6:"GROUPS";a:1:{i:0;s:2:"21";}}"#, "GROUPS"),
+            vec![21]
+        );
+        assert!(param_ids("a:0:{}", "GROUPS").is_empty());
+    }
+
+    #[test]
+    fn pay_api_types() {
+        assert_eq!(pay_api_type("custombill"), "document");
+        assert_eq!(pay_api_type("bill"), "document");
+        assert_eq!(pay_api_type("billkz"), "document");
+        assert_eq!(pay_api_type("yandexcheckout"), "other");
+    }
 
     #[test]
     fn bitrix_flag_values() {
