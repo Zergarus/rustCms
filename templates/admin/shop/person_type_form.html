@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "person-types" %}
+{% block title %}{% if id %}{{ form.name }}{% else %}Новый тип плательщика{% endif %}{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="breadcrumbs"><a href="/admin/shop/person-types">Типы плательщика</a> /</div>
+<h1>{% if id %}{{ form.name }}{% else %}Новый тип плательщика{% endif %}</h1>
+<form class="card form" method="post" action="{% if id %}/admin/shop/person-types/{{ id }}{% else %}/admin/shop/person-types{% endif %}">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <div class="grid-2">
+    <label>Название *<input name="name" value="{{ form.name }}" required></label>
+    <label>Код<input name="code" value="{{ form.code }}"></label>
+  </div>
+  <div class="grid-2">
+    <label>Сортировка<input name="sort" type="number" value="{{ form.sort }}"></label>
+    <label class="check"><input type="checkbox" name="active" {% if form.active %}checked{% endif %}> Активен</label>
+  </div>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/shop/person-types">Отмена</a>
+  </div>
+</form>
+{% endblock %}

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "statuses" %}
+{% block title %}Статусы заказа{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="page-head">
+  <h1>Статусы заказа <span class="muted count">{{ items|length }}</span></h1>
+  <a class="btn primary" href="/admin/shop/statuses/new">Добавить статус</a>
+</div>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>Код</th><th>Название</th><th>Сорт.</th><th>Письмо</th><th>Заказов</th><th></th></tr></thead>
+    <tbody>
+      {% for s in items %}
+      <tr>
+        <td><code>{{ s.code }}</code></td>
+        <td><a href="/admin/shop/statuses/{{ s.code }}">{{ s.name }}</a></td>
+        <td>{{ s.sort }}</td>
+        <td>{% if s.notify %}<span class="badge ok">да</span>{% endif %}</td>
+        <td>{{ s.orders }}</td>
+        <td class="actions">
+          <form method="post" action="/admin/shop/statuses/{{ s.code }}/delete" hx-confirm="Удалить статус «{{ s.name }}»?">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

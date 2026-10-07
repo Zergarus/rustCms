@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "deliveries" %}
+{% block title %}Службы доставки{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="page-head">
+  <h1>Службы доставки <span class="muted count">{{ items|length }}</span></h1>
+  <a class="btn primary" href="/admin/shop/deliveries/new">Добавить службу</a>
+</div>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>ID</th><th>Название</th><th>Цена</th><th>Склады самовывоза</th><th>Активна</th><th>Видна покупателю</th><th>Сорт.</th><th></th></tr></thead>
+    <tbody>
+      {% for d in items %}
+      <tr{% if not d.active %} class="muted"{% endif %}>
+        <td class="muted">{{ d.id }}</td>
+        <td><a href="/admin/shop/deliveries/{{ d.id }}">{{ d.name }}</a></td>
+        <td>{{ d.price }} {{ d.currency }}</td>
+        <td>{{ d.stores }}</td>
+        <td>{% if d.active %}<span class="badge ok">да</span>{% endif %}</td>
+        <td>{% if d.public %}<span class="badge ok">да</span>{% endif %}</td>
+        <td>{{ d.sort }}</td>
+        <td class="actions">
+          <form method="post" action="/admin/shop/deliveries/{{ d.id }}/delete" hx-confirm="Удалить службу «{{ d.name }}»?">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

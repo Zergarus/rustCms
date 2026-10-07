@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "person-types" %}
+{% block title %}{% if id %}{{ form.name }}{% else %}Новое свойство заказа{% endif %}{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="breadcrumbs"><a href="/admin/shop/person-types">Типы плательщика</a> / <a href="/admin/shop/person-types/{{ person_type }}/props">{{ person_type_name }}</a> /</div>
+<h1>{% if id %}{{ form.name }}{% else %}Новое свойство заказа{% endif %}</h1>
+<form class="card form" method="post" action="{% if id %}/admin/shop/order-props/{{ id }}{% else %}/admin/shop/person-types/{{ person_type }}/props{% endif %}">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <div class="grid-3">
+    <label>Название *<input name="name" value="{{ form.name }}" required></label>
+    <label>Код *<input name="code" value="{{ form.code }}" required pattern="[A-Za-z0-9_]+"></label>
+    <label>Тип поля
+      <select name="kind">{% for k in kinds %}<option value="{{ k[0] }}" {% if form.kind == k[0] %}selected{% endif %}>{{ k[1] }}</option>{% endfor %}</select>
+    </label>
+  </div>
+  <div class="grid-3">
+    <label>Группа
+      <select name="group_id"><option value="">— без группы —</option>{% for g in groups %}<option value="{{ g[0] }}" {% if form.group_id == g[0]|string %}selected{% endif %}>{{ g[1] }}</option>{% endfor %}</select>
+    </label>
+    <label>Значение по умолчанию<input name="default_value" value="{{ form.default_value }}"></label>
+    <label>Сортировка<input name="sort" type="number" value="{{ form.sort }}"></label>
+  </div>
+  <div class="grid-3">
+    <label class="check"><input type="checkbox" name="active" {% if form.active %}checked{% endif %}> Активно</label>
+    <label class="check"><input type="checkbox" name="required" {% if form.required %}checked{% endif %}> Обязательное</label>
+    <label class="check"><input type="checkbox" name="util" {% if form.util %}checked{% endif %}> Служебное — покупателю не показывается</label>
+  </div>
+  <fieldset>
+    <legend>Назначение</legend>
+    <div class="grid-3">
+      {% for f in flags %}<label class="check"><input type="checkbox" name="flags" value="{{ f[0] }}" {% if f[0] in form.flags %}checked{% endif %}> {{ f[1] }}</label>{% endfor %}
+    </div>
+  </fieldset>
+  <label>Варианты списка<textarea name="variants" rows="4" placeholder="OOO=ООО">{{ form.variants }}</textarea><small>По строке на вариант: «ЗНАЧЕНИЕ=Название»; только для типа «Список»</small></label>
+  <label>Описание<textarea name="description" rows="2">{{ form.description }}</textarea></label>
+  <fieldset>
+    <legend>Привязка — свойство участвует в заказе только при выбранных оплате и доставке (ничего не отмечено — всегда)</legend>
+    <div class="grid-2">
+      <div class="field"><span class="field-label">Платёжные системы</span>
+        {% for p in payments %}<label class="check"><input type="checkbox" name="payment_ids" value="{{ p[0] }}" {% if p[0] in form.payment_ids %}checked{% endif %}> {{ p[1] }}</label>{% endfor %}
+      </div>
+      <div class="field"><span class="field-label">Доставки</span>
+        {% for d in deliveries %}<label class="check"><input type="checkbox" name="delivery_ids" value="{{ d[0] }}" {% if d[0] in form.delivery_ids %}checked{% endif %}> {{ d[1] }}</label>{% endfor %}
+      </div>
+    </div>
+  </fieldset>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/shop/person-types/{{ person_type }}/props">Отмена</a>
+  </div>
+</form>
+{% endblock %}

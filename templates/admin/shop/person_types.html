@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "person-types" %}
+{% block title %}Типы плательщика{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="page-head">
+  <h1>Типы плательщика <span class="muted count">{{ items|length }}</span></h1>
+  <a class="btn primary" href="/admin/shop/person-types/new">Добавить тип</a>
+</div>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>ID</th><th>Название</th><th>Код</th><th>Активен</th><th>Сорт.</th><th>Свойств</th><th>Заказов</th><th></th></tr></thead>
+    <tbody>
+      {% for t in items %}
+      <tr>
+        <td class="muted">{{ t.id }}</td>
+        <td><a href="/admin/shop/person-types/{{ t.id }}/props">{{ t.name }}</a></td>
+        <td><code>{{ t.code }}</code></td>
+        <td>{% if t.active %}<span class="badge ok">да</span>{% else %}<span class="muted">нет</span>{% endif %}</td>
+        <td>{{ t.sort }}</td>
+        <td>{{ t.properties }}</td>
+        <td>{{ t.orders }}</td>
+        <td class="actions">
+          <a href="/admin/shop/person-types/{{ t.id }}">Изменить</a>
+          <form method="post" action="/admin/shop/person-types/{{ t.id }}/delete" hx-confirm="Удалить тип «{{ t.name }}» со всеми свойствами?">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "deliveries" %}
+{% block title %}{% if id %}{{ form.name }}{% else %}Новая служба доставки{% endif %}{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="breadcrumbs"><a href="/admin/shop/deliveries">Службы доставки</a> /</div>
+<h1>{% if id %}{{ form.name }}{% else %}Новая служба доставки{% endif %}</h1>
+<form class="card form" method="post" action="{% if id %}/admin/shop/deliveries/{{ id }}{% else %}/admin/shop/deliveries{% endif %}">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <div class="grid-2">
+    <label>Название *<input name="name" value="{{ form.name }}" required></label>
+    <label>Код<input name="code" value="{{ form.code }}"></label>
+  </div>
+  <div class="grid-3">
+    <label>Цена<input name="price" inputmode="decimal" value="{{ form.price }}"></label>
+    <label>Валюта<input name="currency" value="{{ form.currency }}" maxlength="3"></label>
+    <label>Сортировка<input name="sort" type="number" value="{{ form.sort }}"></label>
+  </div>
+  <div class="grid-2">
+    <label class="check"><input type="checkbox" name="active" {% if form.active %}checked{% endif %}> Активна</label>
+    <label class="check"><input type="checkbox" name="public" {% if form.public %}checked{% endif %}> Видна покупателю</label>
+  </div>
+  <label>Описание<textarea name="description" rows="2">{{ form.description }}</textarea></label>
+  <div class="field">
+    <span class="field-label">Склады самовывоза (пункты выдачи)</span>
+    {% for s in stores %}<label class="check"><input type="checkbox" name="store_ids" value="{{ s[0] }}" {% if s[0] in form.store_ids %}checked{% endif %}> {{ s[1] }}{% if not s[2] %} <span class="muted">(неактивен)</span>{% endif %}</label>{% endfor %}
+  </div>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/shop/deliveries">Отмена</a>
+  </div>
+</form>
+{% endblock %}

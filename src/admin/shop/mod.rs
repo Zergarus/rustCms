@@ -3,8 +3,13 @@
 
 pub mod carts;
 pub mod currencies;
+pub mod deliveries;
+pub mod order_props;
+pub mod pay_systems;
+pub mod person_types;
 pub mod price_types;
 pub mod settings;
+pub mod statuses;
 pub mod stores;
 
 use axum::{
@@ -19,6 +24,19 @@ use crate::{
     error::AppResult,
     state::AppState,
 };
+
+/// `?used=N` после отказа в удалении: справочник используется в заказах.
+#[derive(Deserialize)]
+pub struct UsedQuery {
+    used: Option<i64>,
+}
+
+impl UsedQuery {
+    fn message(&self) -> Option<String> {
+        self.used
+            .map(|n| format!("Нельзя удалить — используется в заказах: {n}. Снимите активность."))
+    }
+}
 
 pub(crate) fn require_shop(user: &Access) -> AppResult<()> {
     user.require(SHOP_MANAGE)

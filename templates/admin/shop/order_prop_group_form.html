@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "person-types" %}
+{% block title %}{% if id %}{{ form.name }}{% else %}Новая группа свойств{% endif %}{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="breadcrumbs"><a href="/admin/shop/person-types">Типы плательщика</a> / <a href="/admin/shop/person-types/{{ person_type }}/props">{{ person_type_name }}</a> /</div>
+<h1>{% if id %}{{ form.name }}{% else %}Новая группа свойств{% endif %}</h1>
+<form class="card form" method="post" action="{% if id %}/admin/shop/order-prop-groups/{{ id }}{% else %}/admin/shop/person-types/{{ person_type }}/groups{% endif %}">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <div class="grid-3">
+    <label>Название *<input name="name" value="{{ form.name }}" required></label>
+    <label>Блок формы<input name="block_code" value="{{ form.block_code }}" list="block-codes"><small>buyer, recipient, delivery, payment, comment, address или свой; пусто — group_&lt;id&gt;</small></label>
+    <label>Сортировка<input name="sort" type="number" value="{{ form.sort }}"></label>
+  </div>
+  <datalist id="block-codes">{% for c in block_codes %}<option value="{{ c }}">{% endfor %}</datalist>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/shop/person-types/{{ person_type }}/props">Отмена</a>
+  </div>
+</form>
+{% endblock %}

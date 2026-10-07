@@ -76,6 +76,87 @@ pub fn router(state: AppState) -> Router<AppState> {
             get(shop::stores::edit_form).post(shop::stores::update),
         )
         .route("/shop/locations", get(shop::locations))
+        .route(
+            "/shop/statuses",
+            get(shop::statuses::list).post(shop::statuses::create),
+        )
+        .route("/shop/statuses/new", get(shop::statuses::new_form))
+        .route(
+            "/shop/statuses/{code}",
+            get(shop::statuses::edit_form).post(shop::statuses::update),
+        )
+        .route("/shop/statuses/{code}/delete", post(shop::statuses::delete))
+        .route(
+            "/shop/person-types",
+            get(shop::person_types::list).post(shop::person_types::create),
+        )
+        .route("/shop/person-types/new", get(shop::person_types::new_form))
+        .route(
+            "/shop/person-types/{id}",
+            get(shop::person_types::edit_form).post(shop::person_types::update),
+        )
+        .route(
+            "/shop/person-types/{id}/delete",
+            post(shop::person_types::delete),
+        )
+        .route(
+            "/shop/person-types/{id}/props",
+            get(shop::order_props::page).post(shop::order_props::prop_create),
+        )
+        .route(
+            "/shop/person-types/{id}/props/new",
+            get(shop::order_props::prop_new),
+        )
+        .route(
+            "/shop/person-types/{id}/groups",
+            post(shop::order_props::group_create),
+        )
+        .route(
+            "/shop/person-types/{id}/groups/new",
+            get(shop::order_props::group_new),
+        )
+        .route(
+            "/shop/order-prop-groups/{id}",
+            get(shop::order_props::group_edit).post(shop::order_props::group_update),
+        )
+        .route(
+            "/shop/order-prop-groups/{id}/delete",
+            post(shop::order_props::group_delete),
+        )
+        .route(
+            "/shop/order-props/{id}",
+            get(shop::order_props::prop_edit).post(shop::order_props::prop_update),
+        )
+        .route(
+            "/shop/order-props/{id}/delete",
+            post(shop::order_props::prop_delete),
+        )
+        .route(
+            "/shop/deliveries",
+            get(shop::deliveries::list).post(shop::deliveries::create),
+        )
+        .route("/shop/deliveries/new", get(shop::deliveries::new_form))
+        .route(
+            "/shop/deliveries/{id}",
+            get(shop::deliveries::edit_form).post(shop::deliveries::update),
+        )
+        .route(
+            "/shop/deliveries/{id}/delete",
+            post(shop::deliveries::delete),
+        )
+        .route(
+            "/shop/pay-systems",
+            get(shop::pay_systems::list).post(shop::pay_systems::create),
+        )
+        .route("/shop/pay-systems/new", get(shop::pay_systems::new_form))
+        .route(
+            "/shop/pay-systems/{id}",
+            get(shop::pay_systems::edit_form).post(shop::pay_systems::update),
+        )
+        .route(
+            "/shop/pay-systems/{id}/delete",
+            post(shop::pay_systems::delete),
+        )
         .route("/shop/carts", get(shop::carts::list))
         .route("/shop/carts/{id}", get(shop::carts::view))
         .route(

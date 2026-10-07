@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "pay-systems" %}
+{% block title %}Платёжные системы{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="page-head">
+  <h1>Платёжные системы <span class="muted count">{{ items|length }}</span></h1>
+  <a class="btn primary" href="/admin/shop/pay-systems/new">Добавить платёжную систему</a>
+</div>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>ID</th><th>Название</th><th>Тип для API</th><th>Доступна группам</th><th>Активна</th><th>Сорт.</th><th></th></tr></thead>
+    <tbody>
+      {% for p in items %}
+      <tr{% if not p.active %} class="muted"{% endif %}>
+        <td class="muted">{{ p.id }}</td>
+        <td><a href="/admin/shop/pay-systems/{{ p.id }}">{{ p.name }}</a></td>
+        <td><code>{{ p.api_type }}</code></td>
+        <td>{{ p.groups or "всем" }}</td>
+        <td>{% if p.active %}<span class="badge ok">да</span>{% endif %}</td>
+        <td>{{ p.sort }}</td>
+        <td class="actions">
+          <form method="post" action="/admin/shop/pay-systems/{{ p.id }}/delete" hx-confirm="Удалить платёжную систему «{{ p.name }}»?">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

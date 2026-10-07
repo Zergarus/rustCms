@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "person-types" %}
+{% block title %}Свойства заказа — {{ person_type_name }}{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="breadcrumbs"><a href="/admin/shop/person-types">Типы плательщика</a> / <a href="/admin/shop/person-types/{{ person_type }}">{{ person_type_name }}</a> /</div>
+<div class="page-head">
+  <h1>Свойства заказа — {{ person_type_name }}</h1>
+  <div>
+    <a class="btn" href="/admin/shop/person-types/{{ person_type }}/groups/new">Добавить группу</a>
+    <a class="btn primary" href="/admin/shop/person-types/{{ person_type }}/props/new">Добавить свойство</a>
+  </div>
+</div>
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>Группа</th><th>Блок формы</th><th>Сорт.</th><th></th></tr></thead>
+    <tbody>
+      {% for g in groups %}
+      <tr>
+        <td><a href="/admin/shop/order-prop-groups/{{ g.id }}">{{ g.name }}</a></td>
+        <td><code>{{ g.block_code or ("group_" ~ g.id) }}</code></td>
+        <td>{{ g.sort }}</td>
+        <td class="actions">
+          <form method="post" action="/admin/shop/order-prop-groups/{{ g.id }}/delete" hx-confirm="Удалить группу «{{ g.name }}»? Свойства останутся без группы.">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>ID</th><th>Название</th><th>Код</th><th>Тип</th><th>Группа</th><th>Обяз.</th><th>Привязки</th><th>Сорт.</th><th></th></tr></thead>
+    <tbody>
+      {% for p in props %}
+      <tr{% if not p.active %} class="muted"{% endif %}>
+        <td class="muted">{{ p.id }}</td>
+        <td><a href="/admin/shop/order-props/{{ p.id }}">{{ p.name }}</a>{% if p.util %} <span class="muted">(служебное)</span>{% endif %}</td>
+        <td><code>{{ p.code }}</code></td>
+        <td>{% for k in kinds %}{% if k[0] == p.kind %}{{ k[1] }}{% endif %}{% endfor %}</td>
+        <td>{% for g in groups %}{% if g.id == p.group_id %}{{ g.name }}{% endif %}{% endfor %}</td>
+        <td>{% if p.required %}<span class="badge ok">да</span>{% endif %}</td>
+        <td class="muted">{{ p.relations }}</td>
+        <td>{{ p.sort }}</td>
+        <td class="actions">
+          <form method="post" action="/admin/shop/order-props/{{ p.id }}/delete" hx-confirm="Удалить свойство «{{ p.name }}»?">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

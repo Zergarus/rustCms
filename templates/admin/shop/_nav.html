@@ -1,6 +1,8 @@
 {#- Вкладки раздела «Магазин»; tab — код текущей -#}
 <nav class="shop-nav">
-  {% for t in [("stores", "Склады"), ("carts", "Корзины"), ("price-types", "Типы цен"), ("currencies", "Валюты"), ("settings", "Настройки каталога")] %}
+  {% for t in [("orders", "Заказы", "orders.manage"), ("stores", "Склады", "shop.manage"), ("carts", "Корзины", "shop.manage"), ("price-types", "Типы цен", "shop.manage"), ("currencies", "Валюты", "shop.manage"), ("settings", "Настройки каталога", "shop.manage"), ("statuses", "Статусы", "shop.manage"), ("person-types", "Типы плательщика", "shop.manage"), ("deliveries", "Доставки", "shop.manage"), ("pay-systems", "Платёжные системы", "shop.manage")] %}
+  {% if t[2] in user.permissions %}
   <a href="/admin/shop/{{ t[0] }}" class="{% if tab == t[0] %}active{% endif %}">{{ t[1] }}</a>
+  {% endif %}
   {% endfor %}
 </nav>
