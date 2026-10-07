@@ -86,6 +86,10 @@ pub fn router(state: AppState) -> Router<AppState> {
             post(shop::orders::save_properties),
         )
         .route(
+            "/shop/orders/{id}/items",
+            post(shop::order_edit::save_items),
+        )
+        .route(
             "/shop/statuses",
             get(shop::statuses::list).post(shop::statuses::create),
         )

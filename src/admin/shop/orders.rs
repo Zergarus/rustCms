@@ -266,6 +266,20 @@ pub(crate) async fn card(
         sqlx::query_as("SELECT code, name FROM order_statuses ORDER BY sort, code")
             .fetch_all(&state.db)
             .await?;
+    let store_list: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, name FROM catalog_stores ORDER BY sort, id")
+            .fetch_all(&state.db)
+            .await?;
+    let deliveries: Vec<(i64, String, f64)> = sqlx::query_as(
+        "SELECT id, name, price::float8 FROM deliveries ORDER BY active DESC, sort, id",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    let pay_systems: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, name FROM pay_systems ORDER BY active DESC, sort, id")
+            .fetch_all(&state.db)
+            .await?;
+    let version = super::order_edit::version(&order.updated_at);
     let person_type: String = sqlx::query_scalar("SELECT name FROM person_types WHERE id = $1")
         .bind(order.person_type_id)
         .fetch_optional(&state.db)
@@ -274,7 +288,8 @@ pub(crate) async fn card(
     render(
         state,
         "shop/order.html",
-        context! { user, order, fields, extra, stores, statuses, person_type, error, notice },
+        context! { user, order, fields, extra, stores, statuses, person_type, error, notice,
+            store_list, deliveries, pay_systems, version },
     )
 }
 

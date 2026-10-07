@@ -55,29 +55,46 @@
   </div>
 </div>
 
-<div class="card table-wrap">
+<form class="card form table-wrap" method="post" action="/admin/shop/orders/{{ order.id }}/items">
   <h2>Состав заказа</h2>
+  <input type="hidden" name="version" value="{{ version }}">
   <table>
-    <thead><tr><th>Товар</th><th>Склад</th><th>Кол-во</th><th>Цена</th><th>Сумма</th></tr></thead>
+    <thead><tr><th>Товар</th><th>Склад</th><th>Кол-во</th><th>Цена</th><th>Сумма</th><th>Удалить</th></tr></thead>
     <tbody>
       {% for i in order.items %}
       <tr>
         <td><a href="/admin/elements/{{ i.element_id }}">{{ i.name }}</a>{% if i.custom_price %} <span class="muted">(своя цена)</span>{% endif %}</td>
-        <td>{% if i.store_id %}{{ stores[i.store_id|string] or i.store_id }}{% else %}<span class="muted">—</span>{% endif %}</td>
-        <td>{{ i.quantity }}</td>
-        <td>{{ i.price }}</td>
+        <td><select name="item_{{ i.id }}_store"><option value="">—</option>{% for st in store_list %}<option value="{{ st[0] }}" {% if i.store_id == st[0] %}selected{% endif %}>{{ st[1] }}</option>{% endfor %}</select></td>
+        <td><input name="item_{{ i.id }}_quantity" value="{{ i.quantity }}" inputmode="decimal" size="5"></td>
+        <td><input name="item_{{ i.id }}_price" value="{{ i.price }}" inputmode="decimal" size="8"></td>
         <td>{{ (i.price * i.quantity)|round(2) }}</td>
+        <td><input type="checkbox" name="item_{{ i.id }}_remove"></td>
       </tr>
       {% endfor %}
+      <tr>
+        <td><input name="add_element" placeholder="id товара" inputmode="numeric"></td>
+        <td><select name="add_store"><option value="">—</option>{% for st in store_list %}<option value="{{ st[0] }}">{{ st[1] }}</option>{% endfor %}</select></td>
+        <td><input name="add_quantity" value="1" inputmode="decimal" size="5"></td>
+        <td colspan="3" class="muted">цена — текущая основная цена товара</td>
+      </tr>
     </tbody>
     <tfoot>
-      <tr><td colspan="4">Товары</td><td>{{ order.goods_price }} {{ order.currency }}</td></tr>
-      <tr><td colspan="4">Доставка</td><td>{{ order.delivery_price }} {{ order.currency }}</td></tr>
-      <tr><td colspan="4"><b>Итого</b></td><td><b>{{ order.price }} {{ order.currency }}</b></td></tr>
+      <tr><td colspan="4">Товары</td><td colspan="2">{{ order.goods_price }} {{ order.currency }}</td></tr>
+      <tr><td colspan="4">Доставка</td><td colspan="2">{{ order.delivery_price }} {{ order.currency }}</td></tr>
+      <tr><td colspan="4"><b>Итого</b></td><td colspan="2"><b>{{ order.price }} {{ order.currency }}</b></td></tr>
     </tfoot>
   </table>
-  {% block composition %}{% endblock %}
-</div>
+  <div class="grid-3">
+    <label>Доставка
+      <select name="delivery_id">{% for d in deliveries %}<option value="{{ d[0] }}" {% if order.shipment and order.shipment.delivery_id == d[0] %}selected{% endif %}>{{ d[1] }}</option>{% endfor %}</select>
+    </label>
+    <label>Стоимость доставки<input name="delivery_price" value="{{ order.delivery_price }}" inputmode="decimal"></label>
+    <label>Платёжная система
+      <select name="pay_system_id">{% for p in pay_systems %}<option value="{{ p[0] }}" {% if order.payment and order.payment.pay_system_id == p[0] %}selected{% endif %}>{{ p[1] }}</option>{% endfor %}</select>
+    </label>
+  </div>
+  <div class="form-actions"><button class="btn primary" type="submit">Сохранить состав</button>{% if order.canceled %} <span class="muted">Заказ отменён — остатки не меняются</span>{% endif %}</div>
+</form>
 
 <form class="card form" method="post" action="/admin/shop/orders/{{ order.id }}/props">
   <h2>Свойства заказа</h2>
