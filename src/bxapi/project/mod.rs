@@ -5,12 +5,17 @@
 //! каталоге `projects/` (`projects/<имя>.rs` с функцией `pub fn project() -> Project`),
 //! подключаются при сборке (см. `build.rs`) и выбираются переменной `BXAPI_PROJECT`.
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+};
 
 use serde_json::{Map, Value};
 
 use super::BxError;
-use crate::state::AppState;
+use crate::{cart::CartItem, catalog::PurchaseInfo, sale::Delivery, state::AppState};
 
 /// Модули проектов из `projects/`, найденные при сборке.
 mod installed {
@@ -163,6 +168,37 @@ impl Default for CartConfig {
     }
 }
 
+/// Сужает доставки по составу корзины (аналог ограничений служб доставки Битрикса,
+/// например «по наличию на складе»). Возвращает id доступных служб.
+pub trait DeliveryFilter: Send + Sync {
+    fn allowed(
+        &self,
+        deliveries: &[Delivery],
+        items: &[CartItem],
+        info: &HashMap<i64, PurchaseInfo>,
+    ) -> HashSet<i64>;
+}
+
+/// Оформление заказа (`bxapi.order`).
+#[derive(Default)]
+pub struct OrderConfig {
+    /// Типы плательщика — id или код; пусто — все активные.
+    pub person_type_whitelist: Vec<&'static str>,
+    /// Пусто — все активные доставки.
+    pub delivery_whitelist: Vec<i64>,
+    /// Пусто — все активные платёжки.
+    pub payment_whitelist: Vec<i64>,
+    /// Коды свойств, скрытых из формы.
+    pub property_blacklist: Vec<&'static str>,
+    /// Порядок блоков формы по коду.
+    pub block_order: Vec<&'static str>,
+    /// Группы пользователей, создаваемых при оформлении гостем.
+    pub guest_group_ids: Vec<i64>,
+    /// Тип платёжки в API вместо заданного в админке (`payment_rules`).
+    pub payment_types: Vec<(i64, &'static str)>,
+    pub delivery_filter: Option<Arc<dyn DeliveryFilter>>,
+}
+
 pub struct Project {
     /// Разрешённые ширины ресайза (`bxapi.images.widths`); пусто — любые.
     pub image_widths: Vec<u32>,
@@ -185,6 +221,7 @@ pub struct Project {
     pub forms: Vec<FormConfig>,
     pub form_guards: Vec<Arc<dyn FormGuard>>,
     pub cart: CartConfig,
+    pub order: OrderConfig,
 }
 
 impl Project {
@@ -284,6 +321,7 @@ impl Default for Project {
             forms: default_forms(),
             form_guards: Vec::new(),
             cart: CartConfig::default(),
+            order: OrderConfig::default(),
         }
     }
 }

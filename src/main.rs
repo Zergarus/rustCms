@@ -13,6 +13,7 @@ mod iblock;
 mod import;
 mod mail;
 mod passwords;
+mod sale;
 mod state;
 mod uploads;
 mod users;

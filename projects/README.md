@@ -29,3 +29,6 @@
 Декоратор — тип с `impl crate::bxapi::project::Decorator`, группа поиска —
 `impl crate::bxapi::project::SearchGroup`; регистрируются в полях
 `detail_decorators`, `list_decorators`, `search_groups` структуры `Project`.
+Корзина и оформление заказа (аналог `bxapi.basket` и `bxapi.order`) — поля `cart`
+(`CartConfig`) и `order` (`OrderConfig`; ограничение доставок по корзине — `impl
+crate::bxapi::project::DeliveryFilter` в `order.delivery_filter`).
