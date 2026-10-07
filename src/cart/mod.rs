@@ -1,6 +1,7 @@
 //! Корзина покупателя (аналог `b_sale_fuser` + `b_sale_basket`): позиции, расчёт
 //! снимка для API и хранилище.
 
+pub mod repo;
 pub mod snapshot;
 
 use serde_json::{Map, Value};
