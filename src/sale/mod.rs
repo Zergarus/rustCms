@@ -2,6 +2,9 @@
 //! проверки, остатки, заказ, письма.
 
 pub mod form;
+pub mod guest;
+pub mod mail;
+pub mod repo;
 pub mod stock;
 pub mod validate;
 
