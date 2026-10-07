@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgConnection, PgPool};
 
 /// Цена товара одного типа.
 #[derive(Debug, Clone, PartialEq)]
@@ -81,6 +81,14 @@ pub async fn load_prices(
     db: &PgPool,
     element_ids: &[i64],
 ) -> sqlx::Result<HashMap<i64, Vec<Price>>> {
+    let mut conn = db.acquire().await?;
+    load_prices_on(&mut conn, element_ids).await
+}
+
+async fn load_prices_on(
+    db: &mut PgConnection,
+    element_ids: &[i64],
+) -> sqlx::Result<HashMap<i64, Vec<Price>>> {
     let rows: Vec<PriceRow> = sqlx::query_as(
         "SELECT p.element_id, p.price_type_id AS type_id, t.name AS type_name, t.is_base,
                 p.price::float8 AS price, p.currency, p.quantity_from, p.quantity_to
@@ -118,7 +126,7 @@ struct ProductRow {
 }
 
 /// Флаг каталога по умолчанию из `options` (`Y`/`N`).
-async fn default_flag(db: &PgPool, name: &str, fallback: bool) -> sqlx::Result<bool> {
+async fn default_flag(db: &mut PgConnection, name: &str, fallback: bool) -> sqlx::Result<bool> {
     let value: Option<String> =
         sqlx::query_scalar("SELECT value FROM options WHERE module = 'catalog' AND name = $1")
             .bind(name)
@@ -130,6 +138,45 @@ async fn default_flag(db: &PgPool, name: &str, fallback: bool) -> sqlx::Result<b
 /// Данные покупки для товаров пачкой. Товара без строки в `catalog_products` —
 /// флаги по умолчанию и общий остаток 0.
 pub async fn load(db: &PgPool, element_ids: &[i64]) -> sqlx::Result<HashMap<i64, PurchaseInfo>> {
+    let mut conn = db.acquire().await?;
+    load_on(&mut conn, element_ids).await
+}
+
+/// То же, что [`load`], но в транзакции и с блокировкой строк товаров и остатков
+/// (в порядке id — два оформления не заблокируют друг друга). Товару без строки в
+/// `catalog_products` она создаётся, чтобы было что блокировать.
+pub async fn load_locked(
+    tx: &mut PgConnection,
+    element_ids: &[i64],
+) -> sqlx::Result<HashMap<i64, PurchaseInfo>> {
+    sqlx::query(
+        "INSERT INTO catalog_products (element_id)
+         SELECT id FROM iblock_elements WHERE id = ANY($1) ON CONFLICT DO NOTHING",
+    )
+    .bind(element_ids)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "SELECT element_id FROM catalog_products WHERE element_id = ANY($1)
+         ORDER BY element_id FOR UPDATE",
+    )
+    .bind(element_ids)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "SELECT element_id FROM catalog_store_amounts WHERE element_id = ANY($1)
+         ORDER BY element_id, store_id FOR UPDATE",
+    )
+    .bind(element_ids)
+    .execute(&mut *tx)
+    .await?;
+    load_on(tx, element_ids).await
+}
+
+async fn load_on(
+    db: &mut PgConnection,
+    element_ids: &[i64],
+) -> sqlx::Result<HashMap<i64, PurchaseInfo>> {
     if element_ids.is_empty() {
         return Ok(HashMap::new());
     }
@@ -144,9 +191,9 @@ pub async fn load(db: &PgPool, element_ids: &[i64]) -> sqlx::Result<HashMap<i64,
          WHERE e.id = ANY($1)",
     )
     .bind(element_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?;
-    let mut prices = load_prices(db, element_ids).await?;
+    let mut prices = load_prices_on(&mut *db, element_ids).await?;
     let mut amounts: HashMap<i64, HashMap<i64, f64>> = HashMap::new();
     for (element, store, amount) in sqlx::query_as::<_, (i64, i64, f64)>(
         "SELECT element_id, store_id, amount::float8 FROM catalog_store_amounts WHERE element_id = ANY($1)",
