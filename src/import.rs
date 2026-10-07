@@ -181,6 +181,15 @@ type GroupRow = (i64, String, String, String, i32);
 /// Местоположение: (id, код, родитель, тип, название, сортировка, глубина).
 type LocationRow = (i64, String, Option<i64>, String, String, i32, i32);
 
+/// Товар как в `b_catalog_product`; флаги `None` — «по умолчанию».
+struct ProductRow {
+    element_id: i64,
+    quantity: f64,
+    available: bool,
+    quantity_trace: Option<bool>,
+    can_buy_zero: Option<bool>,
+}
+
 /// Склад как в `b_catalog_store`.
 struct StoreRow {
     id: i64,
@@ -191,6 +200,8 @@ struct StoreRow {
     phone: String,
     email: String,
     schedule: String,
+    /// UF-поля склада (`uf_city_id`...).
+    extra: Map<String, Value>,
 }
 
 /// Почтовый шаблон `b_event_message`.
@@ -208,6 +219,8 @@ struct MailTemplateRow {
 
 /// Настройки ядра, которые нужны CMS (без паролей и ключей из b_option).
 const OPTIONS: &[(&str, &str)] = &[
+    ("catalog", "default_quantity_trace"),
+    ("catalog", "default_can_buy_zero"),
     ("main", "email_from"),
     ("main", "server_name"),
     ("main", "site_name"),
@@ -225,8 +238,7 @@ struct Catalog {
     stores: Vec<StoreRow>,
     /// (элемент, склад, количество)
     amounts: Vec<(i64, i64, f64)>,
-    /// (элемент, общий остаток)
-    products: Vec<(i64, f64)>,
+    products: Vec<ProductRow>,
     /// (валюта, формат, десятичный разделитель, разделитель тысяч, знаков, скрывать нули)
     currencies: Vec<(String, String, String, String, i32, bool)>,
 }
@@ -964,14 +976,25 @@ async fn read_users(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// UF-поля пользователей (`b_uts_user`, множественные — `b_utm_user` или сериализованный
-/// массив в `b_uts_user`) → id пользователя → { uf_код: значение }.
+/// UF-поля пользователей → id пользователя → { uf_код: значение }.
 async fn read_user_fields(my: &MySqlPool) -> anyhow::Result<HashMap<i64, Map<String, Value>>> {
+    read_uf(my, "USER", "b_uts_user", "b_utm_user").await
+}
+
+/// UF-поля сущности `entity` (`b_uts_*`, множественные — `b_utm_*` или сериализованный
+/// массив в `b_uts_*`) → id записи → { uf_код: значение }. Нет таблицы — пусто.
+async fn read_uf(
+    my: &MySqlPool,
+    entity: &str,
+    uts_table: &str,
+    utm_table: &str,
+) -> anyhow::Result<HashMap<i64, Map<String, Value>>> {
     let fields: Vec<(i64, String, String, bool)> = sqlx::query(
         "SELECT CAST(ID AS SIGNED), CAST(FIELD_NAME AS CHAR), CAST(USER_TYPE_ID AS CHAR),
                 CAST(MULTIPLE AS CHAR)
-         FROM b_user_field WHERE ENTITY_ID = 'USER' ORDER BY SORT, ID",
+         FROM b_user_field WHERE ENTITY_ID = ? ORDER BY SORT, ID",
     )
+    .bind(entity)
     .fetch_all(my)
     .await?
     .iter()
@@ -986,7 +1009,11 @@ async fn read_user_fields(my: &MySqlPool) -> anyhow::Result<HashMap<i64, Map<Str
     .filter(|(_, name, ..)| is_safe_column(name))
     .collect();
     let mut out: HashMap<i64, Map<String, Value>> = HashMap::new();
-    if fields.is_empty() {
+    if fields.is_empty()
+        || !is_safe_column(uts_table)
+        || !is_safe_column(utm_table)
+        || !mysql_table_exists(my, uts_table).await?
+    {
         return Ok(out);
     }
     let convert = |user_type: &str, raw: &str| -> Option<Value> {
@@ -1007,7 +1034,7 @@ async fn read_user_fields(my: &MySqlPool) -> anyhow::Result<HashMap<i64, Map<Str
         .map(|(_, n, ..)| format!("CAST(`{n}` AS CHAR)"))
         .collect();
     let sql = format!(
-        "SELECT CAST(VALUE_ID AS SIGNED), {} FROM b_uts_user",
+        "SELECT CAST(VALUE_ID AS SIGNED), {} FROM {uts_table}",
         columns.join(", ")
     );
     for row in sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(my).await? {
@@ -1031,13 +1058,17 @@ async fn read_user_fields(my: &MySqlPool) -> anyhow::Result<HashMap<i64, Map<Str
     }
     // Строки множественных полей, если они есть, точнее сериализованного кеша
     let mut multi: HashMap<(i64, String), Vec<Value>> = HashMap::new();
-    for row in sqlx::query(
-        "SELECT CAST(VALUE_ID AS SIGNED), CAST(FIELD_ID AS SIGNED), CAST(VALUE AS CHAR)
-         FROM b_utm_user ORDER BY ID",
-    )
-    .fetch_all(my)
-    .await?
-    {
+    let utm_rows = if mysql_table_exists(my, utm_table).await? {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT CAST(VALUE_ID AS SIGNED), CAST(FIELD_ID AS SIGNED), CAST(VALUE AS CHAR)
+             FROM {utm_table} ORDER BY ID"
+        )))
+        .fetch_all(my)
+        .await?
+    } else {
+        Vec::new()
+    };
+    for row in utm_rows {
         let field_id = int_col(&row, 1).unwrap_or_default();
         let Some((_, name, user_type, _)) = fields.iter().find(|(id, ..)| *id == field_id) else {
             continue;
@@ -1442,7 +1473,14 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
             phone: str_col(&row, 5),
             email: str_col(&row, 6),
             schedule: str_col(&row, 7),
+            extra: Map::new(),
         });
+    }
+    let store_uf = read_uf(my, "CAT_STORE", "b_uts_cat_store", "b_utm_cat_store").await?;
+    for st in &mut c.stores {
+        if let Some(extra) = store_uf.get(&st.id) {
+            st.extra = extra.clone();
+        }
     }
 
     for row in sqlx::query(
@@ -1461,15 +1499,23 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
     }
 
     for row in sqlx::query(
-        "SELECT CAST(ID AS SIGNED), CAST(IFNULL(QUANTITY, 0) AS CHAR) FROM b_catalog_product",
+        "SELECT CAST(ID AS SIGNED), CAST(IFNULL(QUANTITY, 0) AS CHAR),
+                CAST(IFNULL(AVAILABLE, 'Y') AS CHAR), CAST(IFNULL(QUANTITY_TRACE, 'D') AS CHAR),
+                CAST(IFNULL(CAN_BUY_ZERO, 'D') AS CHAR)
+         FROM b_catalog_product",
     )
     .fetch_all(my)
     .await?
     {
         let element = int_col(&row, 0).unwrap_or_default();
         if elements.contains(&element) {
-            c.products
-                .push((element, str_col(&row, 1).parse().unwrap_or(0.0)));
+            c.products.push(ProductRow {
+                element_id: element,
+                quantity: str_col(&row, 1).parse().unwrap_or(0.0),
+                available: str_col(&row, 2) != "N",
+                quantity_trace: bitrix_flag(&str_col(&row, 3)),
+                can_buy_zero: bitrix_flag(&str_col(&row, 4)),
+            });
         }
     }
 
@@ -1593,6 +1639,24 @@ fn number(raw: &str) -> Option<Value> {
         Some(Value::from(f as i64))
     } else {
         Some(Value::from(f))
+    }
+}
+
+/// Есть ли таблица в базе Битрикса (`name` — проверенное имя таблицы).
+async fn mysql_table_exists(my: &MySqlPool, name: &str) -> anyhow::Result<bool> {
+    let found: Option<String> =
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SHOW TABLES LIKE '{name}'")))
+            .fetch_optional(my)
+            .await?;
+    Ok(found.is_some())
+}
+
+/// Флаг товара Битрикса: `Y`/`N`; `D` и пусто — «по умолчанию» из настроек каталога.
+fn bitrix_flag(raw: &str) -> Option<bool> {
+    match raw.trim() {
+        "Y" => Some(true),
+        "N" => Some(false),
+        _ => None,
     }
 }
 
@@ -1825,7 +1889,7 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
     }
     for chunk in c.stores.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO catalog_stores (id, name, active, sort, address, phone, email, schedule) ",
+            "INSERT INTO catalog_stores (id, name, active, sort, address, phone, email, schedule, extra) ",
         );
         qb.push_values(chunk, |mut b, st| {
             b.push_bind(st.id)
@@ -1835,7 +1899,8 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
                 .push_bind(&st.address)
                 .push_bind(&st.phone)
                 .push_bind(&st.email)
-                .push_bind(&st.schedule);
+                .push_bind(&st.schedule)
+                .push_bind(sqlx::types::Json(&st.extra));
         });
         qb.build().execute(&mut *tx).await?;
     }
@@ -1850,10 +1915,15 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
         qb.build().execute(&mut *tx).await?;
     }
     for chunk in c.products.chunks(BATCH) {
-        let mut qb =
-            QueryBuilder::<Postgres>::new("INSERT INTO catalog_products (element_id, quantity) ");
-        qb.push_values(chunk, |mut b, (el, qty)| {
-            b.push_bind(el).push_bind(qty);
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO catalog_products (element_id, quantity, available, quantity_trace, can_buy_zero) ",
+        );
+        qb.push_values(chunk, |mut b, p| {
+            b.push_bind(p.element_id)
+                .push_bind(p.quantity)
+                .push_bind(p.available)
+                .push_bind(p.quantity_trace)
+                .push_bind(p.can_buy_zero);
         });
         qb.build().execute(&mut *tx).await?;
     }
@@ -1877,6 +1947,14 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bitrix_flag_values() {
+        assert_eq!(bitrix_flag("Y"), Some(true));
+        assert_eq!(bitrix_flag("N"), Some(false));
+        assert_eq!(bitrix_flag("D"), None);
+        assert_eq!(bitrix_flag(""), None);
+    }
 
     #[test]
     fn php_arrays() {
