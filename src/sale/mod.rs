@@ -2,6 +2,7 @@
 //! проверки, остатки, заказ, письма.
 
 pub mod form;
+pub mod validate;
 
 use std::collections::HashMap;
 
