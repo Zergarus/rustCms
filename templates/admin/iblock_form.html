@@ -44,13 +44,17 @@
   {% if properties %}
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Название</th><th>Код</th><th>Тип</th><th>Обяз.</th><th>Сорт.</th><th></th></tr></thead>
+      <thead><tr><th>Название</th><th>Код</th><th>Тип</th><th>Множ.</th><th>Обяз.</th><th>Сорт.</th><th></th></tr></thead>
       <tbody>
         {% for p in properties %}
         <tr>
-          <td>{{ p.name }}</td>
+          <td><a href="/admin/properties/{{ p.id }}">{{ p.name }}</a></td>
           <td><code>{{ p.code }}</code></td>
-          <td>{% for k in kinds %}{% if k.code == p.kind %}{{ k.name }}{% endif %}{% endfor %}</td>
+          <td>
+            {% for k in kinds %}{% if k.code == p.kind %}{{ k.name }}{% endif %}{% endfor %}
+            {% if p.link_iblock_id %}{% for i in iblocks %}{% if i.id == p.link_iblock_id %}<span class="muted">→ {{ i.name }}</span>{% endif %}{% endfor %}{% endif %}
+          </td>
+          <td>{% if p.multiple %}да{% endif %}</td>
           <td>{% if p.is_required %}да{% endif %}</td>
           <td>{{ p.sort }}</td>
           <td class="actions">
@@ -80,7 +84,19 @@
         </select>
       </label>
       <label>Сорт.<input name="sort" type="number" value="{{ prop_form.sort }}"></label>
+      <label>Привязка к инфоблоку
+        <select name="link_iblock_id">
+          <option value="">— любой —</option>
+          {% for i in iblocks %}
+          <option value="{{ i.id }}" {% if prop_form.link_iblock_id == i.id|string %}selected{% endif %}>{{ i.name }}</option>
+          {% endfor %}
+        </select>
+        <small>Только для типа «Привязка к элементу»</small>
+      </label>
+    </div>
+    <div class="grid-2">
       <label class="check"><input type="checkbox" name="is_required" {% if prop_form.is_required %}checked{% endif %}> Обязательное</label>
+      <label class="check"><input type="checkbox" name="multiple" {% if prop_form.multiple %}checked{% endif %}> Множественное</label>
     </div>
     <button class="btn" type="submit">Добавить</button>
   </form>

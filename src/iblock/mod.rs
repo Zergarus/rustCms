@@ -3,6 +3,8 @@
 pub mod props;
 pub mod repo;
 
+use std::collections::{HashMap, HashSet};
+
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -16,6 +18,12 @@ pub struct Iblock {
     pub description: String,
     pub api_enabled: bool,
     pub sort: i32,
+    /// Шаблоны URL как в Битриксе: `#SITE_DIR#/catalog/#SECTION_CODE_PATH#/#ELEMENT_ID#/`.
+    pub detail_page_url: String,
+    pub section_page_url: String,
+    pub list_page_url: String,
+    /// Торговый каталог: у элементов есть цены и остатки.
+    pub is_catalog: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -37,18 +45,67 @@ pub struct Property {
     pub kind: String,
     pub is_required: bool,
     pub sort: i32,
+    pub multiple: bool,
+    /// Для привязки к элементу: инфоблок, из которого выбираются элементы.
+    pub link_iblock_id: Option<i64>,
+    /// `directory` — привязка по внешнему коду элемента (бывший справочник HL-блока).
+    pub user_type: String,
+}
+
+/// Вариант значения свойства-списка.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct PropertyEnum {
+    pub id: i64,
+    pub property_id: i64,
+    pub value: String,
+    pub xml_id: String,
+    pub sort: i32,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct Section {
+    pub id: i64,
+    pub iblock_id: i64,
+    pub parent_id: Option<i64>,
+    pub code: String,
+    pub xml_id: String,
+    pub name: String,
+    pub active: bool,
+    pub sort: i32,
+    pub depth_level: i32,
+    pub description: String,
+    pub picture_id: Option<i64>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug)]
+pub struct SectionInput {
+    pub parent_id: Option<i64>,
+    pub code: String,
+    pub xml_id: String,
+    pub name: String,
+    pub active: bool,
+    pub sort: i32,
+    pub description: String,
+    pub picture_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct Element {
     pub id: i64,
     pub iblock_id: i64,
+    pub section_id: Option<i64>,
     pub code: String,
+    pub xml_id: String,
     pub name: String,
     pub active: bool,
     pub sort: i32,
     pub preview_text: String,
     pub detail_text: String,
+    pub preview_picture_id: Option<i64>,
+    pub detail_picture_id: Option<i64>,
     pub published_at: Option<DateTime<Utc>>,
     pub properties: Json<Map<String, Value>>,
     pub created_at: DateTime<Utc>,
@@ -71,18 +128,63 @@ pub struct PropertyInput {
     pub kind: String,
     pub is_required: bool,
     pub sort: i32,
+    pub multiple: bool,
+    pub link_iblock_id: Option<i64>,
 }
 
 #[derive(Debug)]
 pub struct ElementInput {
+    pub section_id: Option<i64>,
     pub code: String,
+    pub xml_id: String,
     pub name: String,
     pub active: bool,
     pub sort: i32,
     pub preview_text: String,
     pub detail_text: String,
+    pub preview_picture_id: Option<i64>,
+    pub detail_picture_id: Option<i64>,
     pub published_at: Option<DateTime<Utc>>,
     pub properties: Map<String, Value>,
+}
+
+/// Упорядочивает разделы деревом: родитель, затем его потомки (для списков и
+/// выпадающих меню, отступ — по `depth_level`). Порядок братьев сохраняется из входа.
+pub fn section_tree(sections: Vec<Section>) -> Vec<Section> {
+    let mut children: HashMap<Option<i64>, Vec<Section>> = HashMap::new();
+    let known: HashSet<i64> = sections.iter().map(|s| s.id).collect();
+    for s in sections {
+        // Родитель из другого инфоблока или удалённый — показываем как корень
+        let parent = s.parent_id.filter(|p| known.contains(p));
+        children.entry(parent).or_default().push(s);
+    }
+    let mut out = Vec::with_capacity(known.len());
+    let mut stack: Vec<Section> = children.remove(&None).unwrap_or_default();
+    stack.reverse();
+    while let Some(s) = stack.pop() {
+        if let Some(mut kids) = children.remove(&Some(s.id)) {
+            kids.reverse();
+            stack.extend(kids);
+        }
+        out.push(s);
+    }
+    out
+}
+
+/// Id раздела и всех его потомков — куда нельзя переносить раздел.
+pub fn section_subtree_ids(sections: &[Section], root: i64) -> HashSet<i64> {
+    let mut ids = HashSet::from([root]);
+    loop {
+        let before = ids.len();
+        for s in sections {
+            if s.parent_id.is_some_and(|p| ids.contains(&p)) {
+                ids.insert(s.id);
+            }
+        }
+        if ids.len() == before {
+            return ids;
+        }
+    }
 }
 
 /// Символьный код: латиница в нижнем регистре, цифры, `_` и `-`.
@@ -92,6 +194,16 @@ pub fn is_valid_code(code: &str) -> bool {
         && code
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// Символьный код элемента или раздела: как у инфоблока, но допускает
+/// заглавные буквы (в данных из Битрикса встречаются коды вида `01M`).
+pub fn is_valid_slug(code: &str) -> bool {
+    !code.is_empty()
+        && code.len() <= 255
+        && code
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Генерация символьного кода из названия, как в Битриксе: «Новая статья» → `novaya-statya`.
@@ -167,5 +279,45 @@ mod tests {
         assert!(!is_valid_code("News"));
         assert!(!is_valid_code(""));
         assert!(!is_valid_code("новости"));
+        assert!(is_valid_slug("01M"));
+        assert!(!is_valid_slug("a b"));
+    }
+
+    fn section(id: i64, parent_id: Option<i64>) -> Section {
+        Section {
+            id,
+            iblock_id: 1,
+            parent_id,
+            code: String::new(),
+            xml_id: String::new(),
+            name: id.to_string(),
+            active: true,
+            sort: 500,
+            depth_level: 1,
+            description: String::new(),
+            picture_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn tree_order_and_subtree() {
+        let sections = vec![
+            section(3, Some(1)),
+            section(1, None),
+            section(2, None),
+            section(4, Some(3)),
+            section(5, Some(1)),
+        ];
+        let order: Vec<i64> = section_tree(sections.clone())
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(order, [1, 3, 4, 5, 2]);
+        assert_eq!(
+            section_subtree_ids(&sections, 1),
+            HashSet::from([1, 3, 4, 5])
+        );
     }
 }

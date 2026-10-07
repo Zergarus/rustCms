@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% set section = "iblocks" %}
+{% block title %}{% if section_id %}{{ form.name }}{% else %}Новый раздел{% endif %}{% endblock %}
+{% block content %}
+{% set back = "/admin/iblocks/" ~ iblock.id ~ "/elements" ~ ("?section=" ~ form.parent_id if form.parent_id else "") %}
+<div class="breadcrumbs">
+  <a href="/admin/iblocks">Инфоблоки</a> /
+  <a href="/admin/iblocks/{{ iblock.id }}/elements">{{ iblock.name }}</a> /
+</div>
+<h1>{% if section_id %}{{ form.name }}{% else %}Новый раздел{% endif %}</h1>
+
+<form class="card form" method="post" enctype="multipart/form-data"
+      action="{% if section_id %}/admin/sections/{{ section_id }}{% else %}/admin/iblocks/{{ iblock.id }}/sections{% endif %}">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <div class="grid-2">
+    <label>Название *
+      <input name="name" value="{{ form.name }}" required>
+    </label>
+    <label>Символьный код
+      <input name="code" value="{{ form.code }}" pattern="[A-Za-z0-9_\-]+" placeholder="создастся из названия">
+    </label>
+  </div>
+  <div class="grid-2">
+    <label>Родительский раздел
+      <select name="parent_id">
+        <option value="">— верхний уровень —</option>
+        {% for s in sections if s.id not in forbidden %}
+        <option value="{{ s.id }}" {% if form.parent_id == s.id|string %}selected{% endif %}>{{ "· " * (s.depth_level - 1) }}{{ s.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Внешний код (XML_ID)
+      <input name="xml_id" value="{{ form.xml_id }}">
+    </label>
+  </div>
+  <div class="grid-2">
+    <label class="check">
+      <input type="checkbox" name="active" {% if form.active %}checked{% endif %}> Активен
+    </label>
+    <label>Сортировка
+      <input name="sort" type="number" value="{{ form.sort }}">
+    </label>
+  </div>
+  <div class="field">
+    <span class="field-label">Картинка</span>
+    {% if picture %}
+    <label class="check file-item">
+      <input type="checkbox" name="picture_id" value="{{ picture.id }}" checked>
+      <img src="{{ picture.url }}" alt="" class="thumb">
+      <a href="{{ picture.url }}" target="_blank" rel="noopener">{{ picture.name or picture.url }}</a>
+    </label>
+    {% endif %}
+    <input type="file" name="upload_picture_id" accept="image/*">
+  </div>
+  <label>Описание
+    <textarea name="description" rows="5">{{ form.description }}</textarea>
+  </label>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="{{ back }}">Отмена</a>
+  </div>
+</form>
+
+{% if section_id %}
+<section class="card danger-zone">
+  <h2>Удаление</h2>
+  <p class="muted">Раздел будет удалён вместе с подразделами. Элементы останутся в инфоблоке без раздела.</p>
+  <form method="post" action="/admin/sections/{{ section_id }}/delete"
+        hx-confirm="Удалить раздел «{{ form.name }}» вместе с подразделами?">
+    <button class="btn danger" type="submit">Удалить раздел</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

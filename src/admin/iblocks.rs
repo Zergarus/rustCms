@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::{
     Extension, Form,
     extract::{Path, State},
@@ -10,7 +12,11 @@ use super::{parse_sort, render};
 use crate::{
     access::{Access, IBLOCKS_MANAGE, Level},
     error::{AppError, AppResult, is_unique_violation},
-    iblock::{IblockInput, PropertyInput, is_valid_code, props, repo},
+    iblock::{
+        IblockInput, Property, PropertyEnum, PropertyInput, is_valid_code, props,
+        repo::{self, EnumInput},
+        slugify,
+    },
     state::AppState,
 };
 
@@ -58,6 +64,9 @@ pub struct PropertyForm {
     is_required: Option<String>,
     #[serde(default)]
     sort: String,
+    multiple: Option<String>,
+    #[serde(default)]
+    link_iblock_id: String,
 }
 
 impl PropertyForm {
@@ -70,15 +79,24 @@ impl PropertyForm {
         if !is_valid_code(code) {
             return Err("Код свойства: только латиница в нижнем регистре, цифры, «_» и «-»".into());
         }
-        if !props::is_valid_kind(&self.kind) {
-            return Err("Неизвестный тип свойства".into());
+        let kind = props::kind(&self.kind).ok_or("Неизвестный тип свойства")?;
+        let multiple = self.multiple.is_some();
+        if multiple && !kind.multiple {
+            return Err(format!("Тип «{}» не может быть множественным", kind.name));
         }
+        let link_iblock_id = match self.link_iblock_id.trim() {
+            "" => None,
+            _ if kind.code != "element" => None,
+            raw => Some(raw.parse().map_err(|_| "Неверный инфоблок привязки")?),
+        };
         Ok(PropertyInput {
             code: code.to_string(),
             name: name.to_string(),
             kind: self.kind.clone(),
             is_required: self.is_required.is_some(),
             sort: parse_sort(&self.sort),
+            multiple,
+            link_iblock_id,
         })
     }
 }
@@ -160,6 +178,7 @@ async fn render_edit(
             properties,
             prop_form,
             prop_error,
+            iblocks => repo::list_iblocks(&state.db).await?,
             kinds => Value::from_serialize(props::KINDS),
         },
     )
@@ -231,7 +250,11 @@ pub async fn add_property(
     user.require(IBLOCKS_MANAGE)?;
     let error = match form.validate() {
         Ok(input) => match repo::create_property(&state.db, id, &input).await {
-            Ok(()) => return Ok(Redirect::to(&format!("/admin/iblocks/{id}")).into_response()),
+            // У списка сразу переходим к вариантам значений
+            Ok(prop_id) if input.kind == "list" => {
+                return Ok(Redirect::to(&format!("/admin/properties/{prop_id}")).into_response());
+            }
+            Ok(_) => return Ok(Redirect::to(&format!("/admin/iblocks/{id}")).into_response()),
             Err(e) if is_unique_violation(&e) => "Свойство с таким кодом уже есть".into(),
             Err(e) => return Err(e.into()),
         },
@@ -251,4 +274,243 @@ pub async fn delete_property(
         .await?
         .ok_or(AppError::NotFound)?;
     Ok(Redirect::to(&format!("/admin/iblocks/{iblock_id}")))
+}
+
+/// Страница свойства: основные настройки и (для списка) варианты значений.
+async fn render_property(
+    state: &AppState,
+    user: Access,
+    property: Property,
+    form: Option<PropertyForm>,
+    error: Option<String>,
+    enum_error: Option<String>,
+) -> AppResult<Html<String>> {
+    let iblock = repo::get_iblock(&state.db, property.iblock_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let form = form.unwrap_or_else(|| PropertyForm {
+        code: property.code.clone(),
+        name: property.name.clone(),
+        kind: property.kind.clone(),
+        is_required: property.is_required.then(|| "on".into()),
+        sort: property.sort.to_string(),
+        multiple: property.multiple.then(|| "on".into()),
+        link_iblock_id: property
+            .link_iblock_id
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+    });
+    let enums = repo::list_enums(&state.db, property.id).await?;
+    let kind = props::kind(&property.kind).map(|k| k.name);
+    render(
+        state,
+        "property_form.html",
+        context! {
+            user, iblock, property, form, error, enums, enum_error, kind,
+            new_rows => NEW_ENUM_ROWS,
+            iblocks => repo::list_iblocks(&state.db).await?,
+        },
+    )
+}
+
+/// Сколько пустых строк для новых вариантов показывать в форме списка.
+const NEW_ENUM_ROWS: usize = 5;
+
+async fn load_property(state: &AppState, user: &Access, id: i64) -> AppResult<Property> {
+    user.require(IBLOCKS_MANAGE)?;
+    repo::get_property(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound)
+}
+
+pub async fn property_form(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+) -> AppResult<Html<String>> {
+    let property = load_property(&state, &user, id).await?;
+    render_property(&state, user, property, None, None, None).await
+}
+
+/// Код и тип свойства не меняются: от них зависят уже сохранённые значения.
+pub async fn update_property(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+    Form(mut form): Form<PropertyForm>,
+) -> AppResult<Response> {
+    let property = load_property(&state, &user, id).await?;
+    form.code = property.code.clone();
+    form.kind = property.kind.clone();
+    form.multiple = property.multiple.then(|| "on".into());
+    let error = match form.validate() {
+        Ok(input) => {
+            repo::update_property(&state.db, id, &input).await?;
+            let url = format!("/admin/iblocks/{}", property.iblock_id);
+            return Ok(Redirect::to(&url).into_response());
+        }
+        Err(msg) => msg,
+    };
+    let page = render_property(&state, user, property, Some(form), Some(error), None);
+    Ok(page.await?.into_response())
+}
+
+/// Разбирает строки вариантов из формы: поля `enum_<поле>_<номер строки>`.
+/// Пустые новые строки пропускаются; пустой XML_ID генерируется из значения.
+fn parse_enums(
+    fields: &HashMap<String, String>,
+    existing: &[PropertyEnum],
+) -> Result<(Vec<EnumInput>, Vec<i64>), String> {
+    let mut rows: Vec<usize> = fields
+        .keys()
+        .filter_map(|k| k.strip_prefix("enum_value_")?.parse().ok())
+        .collect();
+    rows.sort_unstable();
+
+    let get = |field: &str, row: usize| {
+        fields
+            .get(&format!("enum_{field}_{row}"))
+            .map(|s| s.trim())
+            .unwrap_or("")
+    };
+    let mut items = Vec::new();
+    let mut delete = Vec::new();
+    let mut errors = Vec::new();
+    for row in rows {
+        let id = match get("id", row) {
+            "" => None,
+            raw => match raw.parse::<i64>() {
+                Ok(id) if existing.iter().any(|e| e.id == id) => Some(id),
+                _ => return Err("Вариант не найден — обновите страницу".into()),
+            },
+        };
+        if let Some(id) = id
+            && !get("delete", row).is_empty()
+        {
+            delete.push(id);
+            continue;
+        }
+        let value = get("value", row);
+        if value.is_empty() {
+            if id.is_some() {
+                errors.push("Значение варианта не может быть пустым".to_string());
+            }
+            continue;
+        }
+        let xml_id = match get("xml_id", row) {
+            "" => match slugify(value) {
+                slug if slug.is_empty() => format!("value-{}", items.len() + 1),
+                slug => slug,
+            },
+            xml_id => xml_id.to_string(),
+        };
+        if items.iter().any(|i: &EnumInput| i.xml_id == xml_id) {
+            errors.push(format!("XML_ID «{xml_id}» повторяется"));
+        }
+        items.push(EnumInput {
+            id,
+            value: value.to_string(),
+            xml_id,
+            sort: parse_sort(get("sort", row)),
+            is_default: !get("default", row).is_empty(),
+        });
+    }
+    if errors.is_empty() {
+        Ok((items, delete))
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+pub async fn save_enums(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+    Form(fields): Form<HashMap<String, String>>,
+) -> AppResult<Response> {
+    let property = load_property(&state, &user, id).await?;
+    if property.kind != "list" {
+        return Err(AppError::BadRequest("свойство не является списком".into()));
+    }
+    let existing = repo::list_enums(&state.db, id).await?;
+    let error = match parse_enums(&fields, &existing) {
+        Ok((items, delete)) => {
+            match repo::save_enums(&state.db, &property, &items, &delete).await {
+                Ok(()) => {
+                    return Ok(Redirect::to(&format!("/admin/properties/{id}")).into_response());
+                }
+                Err(e) if is_unique_violation(&e) => {
+                    "XML_ID вариантов должны быть уникальны".into()
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(msg) => msg,
+    };
+    let page = render_property(&state, user, property, None, None, Some(error));
+    Ok(page.await?.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enums_parsing() {
+        let existing = [PropertyEnum {
+            id: 7,
+            property_id: 1,
+            value: "Б/у".into(),
+            xml_id: "used".into(),
+            sort: 100,
+            is_default: false,
+        }];
+        let fields: HashMap<String, String> = [
+            ("enum_id_0", "7"),
+            ("enum_value_0", "Б/у"),
+            ("enum_xml_id_0", "used"),
+            ("enum_sort_0", "100"),
+            ("enum_id_1", ""),
+            ("enum_value_1", "Новый"),
+            ("enum_xml_id_1", ""),
+            ("enum_default_1", "on"),
+            ("enum_value_2", ""),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let (items, delete) = parse_enums(&fields, &existing).unwrap();
+        assert!(delete.is_empty());
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, Some(7));
+        assert_eq!(items[1].xml_id, "novyy");
+        assert!(items[1].is_default);
+
+        let mut deleting = fields.clone();
+        deleting.insert("enum_delete_0".into(), "on".into());
+        let (items, delete) = parse_enums(&deleting, &existing).unwrap();
+        assert_eq!(delete, [7]);
+        assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn property_validation() {
+        let form = |kind: &str, multiple: bool| PropertyForm {
+            code: "p".into(),
+            name: "P".into(),
+            kind: kind.into(),
+            multiple: multiple.then(|| "on".into()),
+            link_iblock_id: "3".into(),
+            ..Default::default()
+        };
+        assert!(form("boolean", true).validate().is_err());
+        assert_eq!(
+            form("element", true).validate().unwrap().link_iblock_id,
+            Some(3)
+        );
+        assert_eq!(
+            form("string", false).validate().unwrap().link_iblock_id,
+            None
+        );
+    }
 }

@@ -1,6 +1,18 @@
 {% extends "base.html" %}
 {% set section = "iblocks" %}
 {% block title %}{% if element_id %}{{ form.name }}{% else %}Новый элемент{% endif %}{% endblock %}
+
+{#- Уже загруженные файлы поля: отмеченный чекбокс — оставить, снятый — убрать -#}
+{% macro file_list(key, ids) %}
+  {% for id in ids %}{% set f = files[id] %}{% if f %}
+  <label class="check file-item">
+    <input type="checkbox" name="{{ key }}" value="{{ f.id }}" checked>
+    {% if f.is_image %}<img src="{{ f.url }}" alt="" class="thumb">{% endif %}
+    <a href="{{ f.url }}" target="_blank" rel="noopener">{{ f.name or f.url }}</a>
+  </label>
+  {% endif %}{% endfor %}
+{% endmacro %}
+
 {% block content %}
 <div class="breadcrumbs">
   <a href="/admin/iblocks">Инфоблоки</a> /
@@ -8,7 +20,7 @@
 </div>
 <h1>{% if element_id %}{{ form.name }}{% else %}Новый элемент{% endif %}</h1>
 
-<form class="card form" method="post"
+<form class="card form" method="post" enctype="multipart/form-data"
       action="{% if element_id %}/admin/elements/{{ element_id }}{% else %}/admin/iblocks/{{ iblock.id }}/elements{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}
   {% if not can_write %}<div class="notice">Только просмотр: у вас нет прав на изменение элементов этого инфоблока.</div>{% endif %}
@@ -19,7 +31,20 @@
       <input name="name" value="{{ form.name }}" required>
     </label>
     <label>Символьный код
-      <input name="code" value="{{ form.code }}" pattern="[a-z0-9_\-]+" placeholder="создастся из названия">
+      <input name="code" value="{{ form.code }}" pattern="[A-Za-z0-9_\-]+" placeholder="создастся из названия">
+    </label>
+  </div>
+  <div class="grid-2">
+    <label>Раздел
+      <select name="section_id">
+        <option value="">— без раздела —</option>
+        {% for s in sections %}
+        <option value="{{ s.id }}" {% if form.section_id == s.id|string %}selected{% endif %}>{{ "· " * (s.depth_level - 1) }}{{ s.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Внешний код (XML_ID)
+      <input name="xml_id" value="{{ form.xml_id }}">
     </label>
   </div>
   <div class="grid-3">
@@ -34,6 +59,17 @@
       <small>Пусто — опубликован сразу. В будущем — появится в API в это время.</small>
     </label>
   </div>
+
+  <div class="grid-2">
+    {% for key, label in [("preview_picture_id", "Картинка анонса"), ("detail_picture_id", "Детальная картинка")] %}
+    <div class="field">
+      <span class="field-label">{{ label }}</span>
+      {{ file_list(key, multi[key] or []) }}
+      <input type="file" name="upload_{{ key }}" accept="image/*">
+    </div>
+    {% endfor %}
+  </div>
+
   <label>Анонс
     <textarea name="preview_text" rows="3">{{ form.preview_text }}</textarea>
   </label>
@@ -50,10 +86,29 @@
         <label class="check">
           <input type="checkbox" name="{{ key }}" {% if form[key] %}checked{% endif %}> {{ p.name }}
         </label>
+      {% elif p.kind == "file" %}
+        <div class="field">
+          <span class="field-label">{{ p.name }}{% if p.is_required %} *{% endif %}</span>
+          {{ file_list(key, multi[key]) }}
+          <input type="file" name="upload_{{ key }}" {% if p.multiple %}multiple{% endif %}>
+        </div>
       {% else %}
         <label>{{ p.name }}{% if p.is_required %} *{% endif %}
-          {% if p.kind == "text" %}
+          {% if p.kind == "list" %}
+            <select name="{{ key }}" {% if p.multiple %}multiple size="{{ [enums[p.code]|length, 8]|min }}"{% endif %}>
+              {% if not p.multiple %}<option value="">—</option>{% endif %}
+              {% for e in enums[p.code] %}
+              <option value="{{ e.id }}" {% if e.id|string in multi[key] %}selected{% endif %}>{{ e.value }}</option>
+              {% endfor %}
+            </select>
+          {% elif p.kind == "element" %}
+            <input name="{{ key }}" value="{{ form[key] }}" placeholder="id элемента{% if p.multiple %}, через запятую{% endif %}">
+            {% if linked[key] %}<small>{% for id, name in linked[key] %}{{ id }} — {{ name }}{% if not loop.last %}; {% endif %}{% endfor %}</small>{% endif %}
+          {% elif p.kind == "text" %}
             <textarea name="{{ key }}" rows="4">{{ form[key] }}</textarea>
+          {% elif p.multiple %}
+            <textarea name="{{ key }}" rows="3">{{ form[key] }}</textarea>
+            <small>По одному значению на строку</small>
           {% elif p.kind == "number" %}
             <input name="{{ key }}" inputmode="decimal" value="{{ form[key] }}">
           {% elif p.kind == "date" %}
@@ -70,7 +125,7 @@
   </fieldset>
   <div class="form-actions">
     {% if can_write %}<button class="btn primary" type="submit">Сохранить</button>{% endif %}
-    <a class="btn" href="/admin/iblocks/{{ iblock.id }}/elements">{% if can_write %}Отмена{% else %}Назад{% endif %}</a>
+    <a class="btn" href="/admin/iblocks/{{ iblock.id }}/elements{% if form.section_id %}?section={{ form.section_id }}{% endif %}">{% if can_write %}Отмена{% else %}Назад{% endif %}</a>
   </div>
 </form>
 {% endblock %}

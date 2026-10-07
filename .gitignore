@@ -1,3 +1,7 @@
 /target
 .env
 .claude/
+/upload
+# Модули конкретных проектов (см. projects/README.md)
+/projects/*
+!/projects/README.md

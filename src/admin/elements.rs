@@ -1,31 +1,116 @@
 use std::collections::HashMap;
 
 use axum::{
-    Extension, Form,
-    extract::{Path, Query, State},
+    Extension,
+    extract::{Multipart, Path, Query, State},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use chrono::NaiveDateTime;
 use minijinja::context;
+use serde::{Deserialize, Serialize};
 use serde_json::Map;
 
-use super::{PageQuery, parse_sort, render};
+use super::{parse_sort, read_upload_form, render};
 use crate::{
     access::{Access, Level},
     error::{AppError, AppResult, is_unique_violation},
-    iblock::{Element, ElementInput, Iblock, Property, is_valid_code, props, repo, slugify},
+    files::{self, FileRecord},
+    iblock::{
+        Element, ElementInput, Iblock, Property, PropertyEnum, Section, is_valid_slug, props, repo,
+        section_tree, slugify,
+    },
     state::AppState,
 };
 
 const PER_PAGE: i64 = 50;
 const DATETIME_FORMAT: &str = "%Y-%m-%dT%H:%M";
+/// Картинки элемента — одиночные файловые поля.
+const PICTURE_FIELDS: [&str; 2] = ["preview_picture_id", "detail_picture_id"];
 
-/// Поля формы элемента: name, code, active, sort, preview_text, detail_text,
-/// published_at и `prop_<код>` для каждого свойства.
-type FormValues = HashMap<String, String>;
+/// Значения формы элемента: name, code, xml_id, section_id, active, sort, preview_text,
+/// detail_text, published_at, preview_picture_id, detail_picture_id и `prop_<код>`.
+/// Ключ может повторяться (множественный список, файлы).
+#[derive(Debug, Default)]
+struct FormValues(HashMap<String, Vec<String>>);
 
-fn build_input(form: &FormValues, properties: &[Property]) -> Result<ElementInput, String> {
-    let get = |key: &str| form.get(key).map(|s| s.trim()).unwrap_or("");
+impl FormValues {
+    fn from_pairs(pairs: impl IntoIterator<Item = (String, String)>) -> Self {
+        let mut form = Self::default();
+        for (key, value) in pairs {
+            form.0.entry(key).or_default().push(value);
+        }
+        form
+    }
+
+    fn get(&self, key: &str) -> &str {
+        self.0
+            .get(key)
+            .and_then(|v| v.first())
+            .map(|s| s.trim())
+            .unwrap_or("")
+    }
+
+    fn all(&self, key: &str) -> Vec<&str> {
+        self.0
+            .get(key)
+            .map(|v| v.iter().map(String::as_str).collect())
+            .unwrap_or_default()
+    }
+
+    fn set(&mut self, key: &str, value: impl Into<String>) {
+        self.0.insert(key.to_string(), vec![value.into()]);
+    }
+
+    /// Первые значения — для обычных полей в шаблоне.
+    fn first_values(&self) -> HashMap<&str, &str> {
+        self.0
+            .iter()
+            .filter_map(|(k, v)| Some((k.as_str(), v.first()?.as_str())))
+            .collect()
+    }
+
+    /// Раскладывает загруженные файлы по полям: `upload_<поле>` → `<поле>`.
+    /// В одиночное поле новый файл встаёт вместо старого, в множественное — добавляется.
+    fn apply_uploads(&mut self, uploads: Vec<(String, FileRecord)>, properties: &[Property]) {
+        for (field, file) in uploads {
+            let Some(key) = field.strip_prefix("upload_") else {
+                continue;
+            };
+            let prop = properties
+                .iter()
+                .find(|p| p.kind == "file" && key == format!("prop_{}", p.code));
+            if prop.is_none() && !PICTURE_FIELDS.contains(&key) {
+                continue;
+            }
+            let values = self.0.entry(key.to_string()).or_default();
+            if !prop.is_some_and(|p| p.multiple) {
+                values.clear();
+            }
+            values.push(file.id.to_string());
+        }
+    }
+}
+
+fn parse_optional_id(raw: &str, what: &str, errors: &mut Vec<String>) -> Option<i64> {
+    match raw {
+        "" => None,
+        raw => match raw.parse::<i64>() {
+            Ok(id) if id > 0 => Some(id),
+            _ => {
+                errors.push(format!("{what}: неверный id"));
+                None
+            }
+        },
+    }
+}
+
+fn build_input(
+    form: &FormValues,
+    properties: &[Property],
+    enums: &[PropertyEnum],
+    sections: &[Section],
+) -> Result<ElementInput, String> {
+    let get = |key: &str| form.get(key);
     let mut errors = Vec::new();
 
     let name = get("name");
@@ -36,9 +121,17 @@ fn build_input(form: &FormValues, properties: &[Property]) -> Result<ElementInpu
         "" => slugify(name),
         code => code.to_string(),
     };
-    if !name.is_empty() && !is_valid_code(&code) {
-        errors.push("Код: только латиница в нижнем регистре, цифры, «_» и «-»".into());
+    if !code.is_empty() && !is_valid_slug(&code) {
+        errors.push("Код: только латиница, цифры, «_» и «-»".into());
     }
+    let section_id = parse_optional_id(get("section_id"), "Раздел", &mut errors);
+    if section_id.is_some_and(|id| !sections.iter().any(|s| s.id == id)) {
+        errors.push("Раздел не найден в этом инфоблоке".into());
+    }
+    let preview_picture_id =
+        parse_optional_id(get("preview_picture_id"), "Картинка анонса", &mut errors);
+    let detail_picture_id =
+        parse_optional_id(get("detail_picture_id"), "Детальная картинка", &mut errors);
     let published_at = match get("published_at") {
         "" => None,
         raw => match NaiveDateTime::parse_from_str(raw, DATETIME_FORMAT) {
@@ -52,8 +145,13 @@ fn build_input(form: &FormValues, properties: &[Property]) -> Result<ElementInpu
 
     let mut values = Map::new();
     for prop in properties {
-        let raw = form.get(&format!("prop_{}", prop.code)).map(String::as_str);
-        match props::parse_value(prop, raw) {
+        let prop_enums: Vec<PropertyEnum> = enums
+            .iter()
+            .filter(|e| e.property_id == prop.id)
+            .cloned()
+            .collect();
+        let raws = form.all(&format!("prop_{}", prop.code));
+        match props::parse_value(prop, &raws, &prop_enums) {
             Ok(value) => {
                 values.insert(prop.code.clone(), value);
             }
@@ -65,123 +163,369 @@ fn build_input(form: &FormValues, properties: &[Property]) -> Result<ElementInpu
         return Err(errors.join("; "));
     }
     Ok(ElementInput {
+        section_id,
         code,
+        xml_id: get("xml_id").to_string(),
         name: name.to_string(),
-        active: form.contains_key("active"),
+        active: form.0.contains_key("active"),
         sort: parse_sort(get("sort")),
         preview_text: get("preview_text").to_string(),
         detail_text: get("detail_text").to_string(),
+        preview_picture_id,
+        detail_picture_id,
         published_at,
         properties: values,
     })
 }
 
-fn element_to_form(element: &Element) -> FormValues {
-    let mut form = FormValues::from([
-        ("name".into(), element.name.clone()),
-        ("code".into(), element.code.clone()),
-        ("sort".into(), element.sort.to_string()),
-        ("preview_text".into(), element.preview_text.clone()),
-        ("detail_text".into(), element.detail_text.clone()),
-    ]);
+/// Проверки, которым нужна БД: привязанные элементы и файлы существуют.
+async fn check_references(
+    state: &AppState,
+    properties: &[Property],
+    input: &ElementInput,
+) -> AppResult<Result<(), String>> {
+    let mut errors = Vec::new();
+    let mut file_ids: Vec<i64> = [input.preview_picture_id, input.detail_picture_id]
+        .into_iter()
+        .flatten()
+        .collect();
+    for prop in properties {
+        let Some(value) = input.properties.get(&prop.code) else {
+            continue;
+        };
+        let ids = props::ids(value);
+        match prop.kind.as_str() {
+            "element" if !ids.is_empty() => {
+                let found = repo::element_names(&state.db, &ids, prop.link_iblock_id).await?;
+                let missing: Vec<String> = ids
+                    .iter()
+                    .filter(|id| !found.iter().any(|(f, _)| f == *id))
+                    .map(i64::to_string)
+                    .collect();
+                if !missing.is_empty() {
+                    errors.push(format!(
+                        "«{}»: нет элементов с id {}",
+                        prop.name,
+                        missing.join(", ")
+                    ));
+                }
+            }
+            "file" => file_ids.extend(ids),
+            _ => {}
+        }
+    }
+    let found = files::get_many(&state.db, &file_ids).await?;
+    if file_ids.iter().any(|id| !found.iter().any(|f| f.id == *id)) {
+        errors.push("Часть файлов не найдена — загрузите их заново".into());
+    }
+    Ok(if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    })
+}
+
+fn element_to_form(element: &Element, properties: &[Property]) -> FormValues {
+    let mut form = FormValues::default();
+    form.set("name", &element.name);
+    form.set("code", &element.code);
+    form.set("xml_id", &element.xml_id);
+    form.set("sort", element.sort.to_string());
+    form.set("preview_text", &element.preview_text);
+    form.set("detail_text", &element.detail_text);
     if element.active {
-        form.insert("active".into(), "on".into());
+        form.set("active", "on");
+    }
+    for (key, id) in [
+        ("section_id", element.section_id),
+        ("preview_picture_id", element.preview_picture_id),
+        ("detail_picture_id", element.detail_picture_id),
+    ] {
+        if let Some(id) = id {
+            form.set(key, id.to_string());
+        }
     }
     if let Some(dt) = element.published_at {
-        form.insert(
-            "published_at".into(),
-            dt.format(DATETIME_FORMAT).to_string(),
-        );
+        form.set("published_at", dt.format(DATETIME_FORMAT).to_string());
     }
-    for (code, value) in element.properties.iter() {
-        if let Some(v) = props::to_form_value(value) {
-            form.insert(format!("prop_{code}"), v);
+    for prop in properties {
+        if let Some(value) = element.properties.get(&prop.code) {
+            form.0.insert(
+                format!("prop_{}", prop.code),
+                props::to_form_values(prop, value),
+            );
         }
     }
     form
 }
 
-async fn load_iblock(state: &AppState, id: i64) -> AppResult<(Iblock, Vec<Property>)> {
+/// Всё, что нужно форме элемента кроме самих значений.
+struct IblockContext {
+    iblock: Iblock,
+    properties: Vec<Property>,
+    enums: Vec<PropertyEnum>,
+    /// Разделы в порядке дерева.
+    sections: Vec<Section>,
+}
+
+async fn load_iblock(state: &AppState, id: i64) -> AppResult<IblockContext> {
     let iblock = repo::get_iblock(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let properties = repo::list_properties(&state.db, id).await?;
-    Ok((iblock, properties))
+    Ok(IblockContext {
+        properties: repo::list_properties(&state.db, id).await?,
+        enums: repo::list_iblock_enums(&state.db, id).await?,
+        sections: section_tree(repo::list_sections(&state.db, id).await?),
+        iblock,
+    })
 }
 
-fn render_form(
+#[derive(Serialize)]
+struct FileView {
+    id: i64,
+    url: String,
+    name: String,
+    is_image: bool,
+}
+
+async fn render_form(
     state: &AppState,
     user: Access,
-    iblock: Iblock,
-    properties: Vec<Property>,
+    ctx: IblockContext,
     element_id: Option<i64>,
     form: FormValues,
     error: Option<String>,
 ) -> AppResult<Html<String>> {
+    let IblockContext {
+        iblock,
+        properties,
+        enums,
+        sections,
+    } = ctx;
+
+    // Файлы и подписи привязанных элементов для текущих значений формы
+    let mut file_ids: Vec<i64> = PICTURE_FIELDS
+        .iter()
+        .filter_map(|key| form.get(key).parse().ok())
+        .collect();
+    let mut linked = HashMap::new();
+    for prop in &properties {
+        let key = format!("prop_{}", prop.code);
+        match prop.kind.as_str() {
+            "file" => file_ids.extend(form.all(&key).iter().filter_map(|s| s.parse::<i64>().ok())),
+            "element" => {
+                let ids: Vec<i64> = form
+                    .get(&key)
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                let names = repo::element_names(&state.db, &ids, prop.link_iblock_id).await?;
+                linked.insert(key, names);
+            }
+            _ => {}
+        }
+    }
+    let files: HashMap<String, FileView> = files::get_many(&state.db, &file_ids)
+        .await?
+        .into_iter()
+        .map(|f| {
+            let view = FileView {
+                id: f.id,
+                url: f.url(),
+                is_image: f.is_image(),
+                name: f.original_name,
+            };
+            (f.id.to_string(), view)
+        })
+        .collect();
+
+    let enums: HashMap<String, Vec<PropertyEnum>> = properties
+        .iter()
+        .map(|p| {
+            let items = enums
+                .iter()
+                .filter(|e| e.property_id == p.id)
+                .cloned()
+                .collect();
+            (p.code.clone(), items)
+        })
+        .collect();
+    // Все значения по ключу (для списков и файлов); пустые — чтобы шаблону не проверять наличие
+    let mut multi: HashMap<String, Vec<String>> = properties
+        .iter()
+        .map(|p| (format!("prop_{}", p.code), Vec::new()))
+        .collect();
+    multi.extend(form.0.iter().map(|(k, v)| (k.clone(), v.clone())));
+
     let can_write = user.iblock_level(iblock.id) >= Level::Write;
     render(
         state,
         "element_form.html",
-        context! { user, iblock, properties, element_id, form, error, can_write },
+        context! {
+            user, iblock, properties, element_id, error, can_write, sections, enums, files, linked,
+            multi, form => form.first_values(),
+        },
     )
 }
 
+#[derive(Deserialize)]
+pub struct ListQuery {
+    page: Option<i64>,
+    section: Option<i64>,
+}
+
+/// Список элементов по разделам, как в Битриксе: подразделы текущего раздела,
+/// затем его элементы. В корне — разделы верхнего уровня и элементы без раздела.
 pub async fn list(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
-    Query(q): Query<PageQuery>,
+    Query(q): Query<ListQuery>,
 ) -> AppResult<Html<String>> {
     user.require_iblock(id, Level::Read)?;
     let iblock = repo::get_iblock(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let page = q.page();
-    let (items, total) =
-        repo::list_elements(&state.db, id, PER_PAGE, (page - 1) * PER_PAGE).await?;
+    let all_sections = repo::list_sections(&state.db, id).await?;
+    let current = match q.section {
+        Some(sid) => Some(
+            all_sections
+                .iter()
+                .find(|s| s.id == sid)
+                .cloned()
+                .ok_or(AppError::NotFound)?,
+        ),
+        None => None,
+    };
+    let current_id = current.as_ref().map(|s| s.id);
+
+    // Цепочка родителей для хлебных крошек
+    let mut chain = Vec::new();
+    let mut cursor = current.as_ref();
+    while let Some(s) = cursor {
+        chain.push(s.clone());
+        cursor = s
+            .parent_id
+            .and_then(|p| all_sections.iter().find(|x| x.id == p));
+    }
+    chain.reverse();
+
+    let subsections: Vec<Section> = all_sections
+        .iter()
+        .filter(|s| s.parent_id == current_id)
+        .cloned()
+        .collect();
+
+    let page = q.page.unwrap_or(1).clamp(1, 1_000_000);
+    let (items, total) = repo::list_elements(
+        &state.db,
+        id,
+        Some(current_id.unwrap_or(0)),
+        PER_PAGE,
+        (page - 1) * PER_PAGE,
+    )
+    .await?;
     let pages = ((total + PER_PAGE - 1) / PER_PAGE).max(1);
     render(
         &state,
         "elements.html",
-        context! { can_write => user.iblock_level(id) >= Level::Write, user, iblock, items, total, page, pages },
+        context! {
+            can_write => user.iblock_level(id) >= Level::Write,
+            user, iblock, items, total, page, pages, subsections, chain,
+        },
     )
+}
+
+#[derive(Deserialize)]
+pub struct NewQuery {
+    section: Option<i64>,
 }
 
 pub async fn new_form(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
+    Query(q): Query<NewQuery>,
 ) -> AppResult<Html<String>> {
     user.require_iblock(id, Level::Write)?;
-    let (iblock, properties) = load_iblock(&state, id).await?;
-    let form = FormValues::from([
-        ("active".into(), "on".into()),
-        ("sort".into(), "500".into()),
-    ]);
-    render_form(&state, user, iblock, properties, None, form, None)
+    let ctx = load_iblock(&state, id).await?;
+    let mut form = FormValues::default();
+    form.set("active", "on");
+    form.set("sort", "500");
+    if let Some(section) = q.section {
+        form.set("section_id", section.to_string());
+    }
+    // Варианты списков «по умолчанию»
+    for prop in ctx.properties.iter().filter(|p| p.kind == "list") {
+        let defaults: Vec<String> = ctx
+            .enums
+            .iter()
+            .filter(|e| e.property_id == prop.id && e.is_default)
+            .map(|e| e.id.to_string())
+            .collect();
+        form.0.insert(format!("prop_{}", prop.code), defaults);
+    }
+    render_form(&state, user, ctx, None, form, None).await
+}
+
+/// Разбирает отправленную форму и сохраняет элемент (`element_id` = None — создание).
+async fn save(
+    state: &AppState,
+    user: Access,
+    ctx: IblockContext,
+    element_id: Option<i64>,
+    multipart: Multipart,
+) -> AppResult<Response> {
+    let upload = read_upload_form(state, multipart, "iblock").await?;
+    let mut form = FormValues::from_pairs(upload.fields);
+    form.apply_uploads(upload.uploads, &ctx.properties);
+
+    let result = match build_input(&form, &ctx.properties, &ctx.enums, &ctx.sections) {
+        Ok(input) if upload.rejected.is_empty() => {
+            match check_references(state, &ctx.properties, &input).await? {
+                Ok(()) => Ok(input),
+                Err(e) => Err(e),
+            }
+        }
+        Ok(_) => Err(upload.rejected.join("; ")),
+        Err(e) if upload.rejected.is_empty() => Err(e),
+        Err(e) => Err(format!("{e}; {}", upload.rejected.join("; "))),
+    };
+    let error = match result {
+        Ok(input) => {
+            let saved = match element_id {
+                Some(id) => repo::update_element(&state.db, id, &input).await,
+                None => repo::create_element(&state.db, ctx.iblock.id, &input)
+                    .await
+                    .map(|_| ()),
+            };
+            match saved {
+                Ok(()) => {
+                    let mut url = format!("/admin/iblocks/{}/elements", ctx.iblock.id);
+                    if let Some(section) = input.section_id {
+                        url.push_str(&format!("?section={section}"));
+                    }
+                    return Ok(Redirect::to(&url).into_response());
+                }
+                Err(e) if is_unique_violation(&e) => "Элемент с таким кодом уже есть".into(),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(msg) => msg,
+    };
+    let page = render_form(state, user, ctx, element_id, form, Some(error)).await?;
+    Ok(page.into_response())
 }
 
 pub async fn create(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
-    Form(fields): Form<Vec<(String, String)>>,
+    multipart: Multipart,
 ) -> AppResult<Response> {
     user.require_iblock(id, Level::Write)?;
-    let (iblock, properties) = load_iblock(&state, id).await?;
-    let form: FormValues = fields.into_iter().collect();
-    let error = match build_input(&form, &properties) {
-        Ok(input) => match repo::create_element(&state.db, id, &input).await {
-            Ok(_) => {
-                return Ok(Redirect::to(&format!("/admin/iblocks/{id}/elements")).into_response());
-            }
-            Err(e) if is_unique_violation(&e) => "Элемент с таким кодом уже есть".into(),
-            Err(e) => return Err(e.into()),
-        },
-        Err(msg) => msg,
-    };
-    let page = render_form(&state, user, iblock, properties, None, form, Some(error))?;
-    Ok(page.into_response())
+    let ctx = load_iblock(&state, id).await?;
+    save(&state, user, ctx, None, multipart).await
 }
 
 pub async fn edit_form(
@@ -193,44 +537,23 @@ pub async fn edit_form(
         .await?
         .ok_or(AppError::NotFound)?;
     user.require_iblock(element.iblock_id, Level::Read)?;
-    let (iblock, properties) = load_iblock(&state, element.iblock_id).await?;
-    let form = element_to_form(&element);
-    render_form(&state, user, iblock, properties, Some(id), form, None)
+    let ctx = load_iblock(&state, element.iblock_id).await?;
+    let form = element_to_form(&element, &ctx.properties);
+    render_form(&state, user, ctx, Some(id), form, None).await
 }
 
 pub async fn update(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
-    Form(fields): Form<Vec<(String, String)>>,
+    multipart: Multipart,
 ) -> AppResult<Response> {
     let element = repo::get_element(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
     user.require_iblock(element.iblock_id, Level::Write)?;
-    let (iblock, properties) = load_iblock(&state, element.iblock_id).await?;
-    let form: FormValues = fields.into_iter().collect();
-    let error = match build_input(&form, &properties) {
-        Ok(input) => match repo::update_element(&state.db, id, &input).await {
-            Ok(()) => {
-                let url = format!("/admin/iblocks/{}/elements", element.iblock_id);
-                return Ok(Redirect::to(&url).into_response());
-            }
-            Err(e) if is_unique_violation(&e) => "Элемент с таким кодом уже есть".into(),
-            Err(e) => return Err(e.into()),
-        },
-        Err(msg) => msg,
-    };
-    let page = render_form(
-        &state,
-        user,
-        iblock,
-        properties,
-        Some(id),
-        form,
-        Some(error),
-    )?;
-    Ok(page.into_response())
+    let ctx = load_iblock(&state, element.iblock_id).await?;
+    save(&state, user, ctx, Some(id), multipart).await
 }
 
 pub async fn delete(
@@ -245,9 +568,11 @@ pub async fn delete(
     let iblock_id = repo::delete_element(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    Ok(Redirect::to(&format!(
-        "/admin/iblocks/{iblock_id}/elements"
-    )))
+    let mut url = format!("/admin/iblocks/{iblock_id}/elements");
+    if let Some(section) = element.section_id {
+        url.push_str(&format!("?section={section}"));
+    }
+    Ok(Redirect::to(&url))
 }
 
 #[cfg(test)]
@@ -263,20 +588,29 @@ mod tests {
             kind: kind.into(),
             is_required: required,
             sort: 500,
+            multiple: false,
+            link_iblock_id: None,
+            user_type: String::new(),
         }
+    }
+
+    fn form(pairs: &[(&str, &str)]) -> FormValues {
+        FormValues::from_pairs(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())))
     }
 
     #[test]
     fn autogenerates_code_and_parses_props() {
-        let form = FormValues::from([
-            ("name".into(), "Первая новость".into()),
-            ("active".into(), "on".into()),
-            ("published_at".into(), "2026-09-27T10:30".into()),
-            ("prop_price".into(), "99.5".into()),
+        let form = form(&[
+            ("name", "Первая новость"),
+            ("active", "on"),
+            ("published_at", "2026-09-27T10:30"),
+            ("prop_price", "99.5"),
         ]);
         let input = build_input(
             &form,
             &[prop("price", "number", true), prop("hot", "boolean", false)],
+            &[],
+            &[],
         )
         .unwrap();
         assert_eq!(input.code, "pervaya-novost");
@@ -284,13 +618,50 @@ mod tests {
         assert_eq!(input.properties["price"], serde_json::json!(99.5));
         assert_eq!(input.properties["hot"], serde_json::json!(false));
         assert!(input.published_at.is_some());
+        assert_eq!(input.section_id, None);
     }
 
     #[test]
     fn collects_errors() {
-        let form = FormValues::from([("name".into(), "".into())]);
-        let err = build_input(&form, &[prop("price", "number", true)]).unwrap_err();
+        let form = form(&[("name", ""), ("section_id", "7")]);
+        let err = build_input(&form, &[prop("price", "number", true)], &[], &[]).unwrap_err();
         assert!(err.contains("Укажите название"));
         assert!(err.contains("обязательное"));
+        assert!(err.contains("Раздел"));
+    }
+
+    #[test]
+    fn uploads_replace_single_and_append_multiple() {
+        let mut photos = prop("photos", "file", false);
+        photos.multiple = true;
+        let props = [photos, prop("doc", "file", false)];
+        let mut form = form(&[
+            ("preview_picture_id", "1"),
+            ("prop_photos", "2"),
+            ("prop_doc", "3"),
+        ]);
+        let file = |id: i64| FileRecord {
+            id,
+            path: String::new(),
+            original_name: String::new(),
+            content_type: String::new(),
+            size: 0,
+            width: None,
+            height: None,
+            created_at: chrono::Utc::now(),
+        };
+        form.apply_uploads(
+            vec![
+                ("upload_preview_picture_id".into(), file(10)),
+                ("upload_prop_photos".into(), file(11)),
+                ("upload_prop_doc".into(), file(12)),
+                ("upload_prop_unknown".into(), file(13)),
+            ],
+            &props,
+        );
+        assert_eq!(form.all("preview_picture_id"), ["10"]);
+        assert_eq!(form.all("prop_photos"), ["2", "11"]);
+        assert_eq!(form.all("prop_doc"), ["12"]);
+        assert!(form.all("prop_unknown").is_empty());
     }
 }

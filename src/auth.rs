@@ -47,6 +47,7 @@ pub async fn create_user(
 }
 
 /// Проверяет логин/пароль. `None` — если пользователя нет или пароль неверный.
+/// Понимает и хеши, перенесённые из Битрикса (см. [`crate::passwords`]).
 pub async fn verify_login(db: &PgPool, login: &str, password: String) -> AppResult<Option<User>> {
     let row: Option<(i64, String)> =
         sqlx::query_as("SELECT id, password_hash FROM users WHERE login = $1")
@@ -56,13 +57,21 @@ pub async fn verify_login(db: &PgPool, login: &str, password: String) -> AppResu
     let Some((id, hash)) = row else {
         return Ok(None);
     };
-    let ok = tokio::task::spawn_blocking(move || {
-        password_auth::verify_password(password, &hash).is_ok()
-    })
-    .await
-    .map_err(anyhow::Error::from)?;
-    if !ok {
+    let (verified, password) =
+        tokio::task::spawn_blocking(move || (crate::passwords::verify(&password, &hash), password))
+            .await
+            .map_err(anyhow::Error::from)?;
+    if !verified.ok {
         return Ok(None);
+    }
+    if verified.rehash {
+        // Хеш из Битрикса → argon2
+        let hash = hash_password(password).await?;
+        sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
+            .bind(id)
+            .bind(hash)
+            .execute(db)
+            .await?;
     }
     let user = sqlx::query_as::<_, User>(
         "SELECT id, login, email, is_admin, active FROM users WHERE id = $1",

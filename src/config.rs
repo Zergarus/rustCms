@@ -10,6 +10,10 @@ pub struct Config {
     pub cors_origins: Vec<String>,
     pub templates_dir: PathBuf,
     pub static_dir: PathBuf,
+    /// Каталог загруженных файлов, отдаётся по /upload/.
+    pub upload_dir: PathBuf,
+    /// Сайт, откуда докачивать отсутствующие файлы `/upload/*` (после переноса из Битрикса).
+    pub upload_origin_url: Option<String>,
     /// Ставить флаг Secure на cookie сессии (включать за HTTPS).
     pub cookie_secure: bool,
 }
@@ -26,6 +30,10 @@ impl Config {
                 .collect(),
             templates_dir: var_or("TEMPLATES_DIR", "templates").into(),
             static_dir: var_or("STATIC_DIR", "static").into(),
+            upload_dir: var_or("UPLOAD_DIR", "upload").into(),
+            upload_origin_url: env::var("UPLOAD_ORIGIN_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
             cookie_secure: var_or("COOKIE_SECURE", "false") == "true",
         })
     }

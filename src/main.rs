@@ -2,21 +2,32 @@ mod access;
 mod admin;
 mod api;
 mod auth;
+mod bxapi;
 mod config;
 mod error;
+mod files;
 mod groups;
 mod iblock;
+mod import;
+mod passwords;
 mod state;
+mod uploads;
 mod users;
 
 use std::{io::Write, sync::Arc, time::Duration};
 
 use anyhow::{Context, bail};
-use axum::{Router, http::HeaderValue, response::Redirect, routing::get};
+use axum::{
+    Router,
+    http::{HeaderValue, header},
+    response::Redirect,
+    routing::get,
+};
 use minijinja::{Environment, path_loader};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower_http::{
     cors::{Any, CorsLayer},
+    set_header::SetResponseHeaderLayer,
     trace::TraceLayer,
 };
 use tracing_subscriber::EnvFilter;
@@ -28,7 +39,12 @@ const USAGE: &str = "\
   cms [serve]                 запустить сервер (по умолчанию)
   cms migrate                 применить миграции и выйти
   cms create-admin <login>    создать администратора или сменить ему пароль
-                              (пароль спрашивается в консоли или берётся из CMS_ADMIN_PASSWORD)";
+                              (пароль спрашивается в консоли или берётся из CMS_ADMIN_PASSWORD)
+  cms import-bitrix <mysql-url> [--upload <каталог>] [--replace] [--api-code ID=код ...]
+                              перенести инфоблоки, HL-блоки, каталог и пользователей из базы
+                              Битрикса; --upload — каталог upload сайта (файлы линкуются в
+                              UPLOAD_DIR), --replace — удалить уже существующие инфоблоки,
+                              --api-code — apiCode инфоблока, если API_CODE в базе не заполнен";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -60,6 +76,10 @@ async fn main() -> anyhow::Result<()> {
             let login = args.get(1).context(USAGE)?;
             create_admin(&db, login).await
         }
+        "import-bitrix" => {
+            let opts = import_options(&args[1..], &config).context(USAGE)?;
+            import::run(&db, opts).await
+        }
         other => bail!("неизвестная команда `{other}`\n\n{USAGE}"),
     }
 }
@@ -73,6 +93,42 @@ async fn connect(config: &Config) -> anyhow::Result<PgPool> {
         .context("не удалось подключиться к PostgreSQL")?;
     sqlx::migrate!().run(&db).await.context("ошибка миграций")?;
     Ok(db)
+}
+
+fn import_options(args: &[String], config: &Config) -> anyhow::Result<import::Options> {
+    let mut mysql_url = None;
+    let mut bitrix_upload = None;
+    let mut replace = false;
+    let mut api_codes = Vec::new();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--replace" => replace = true,
+            "--api-code" => {
+                let raw = it.next().context("--api-code без значения")?;
+                let (id, code) = raw
+                    .split_once('=')
+                    .context("--api-code: ожидается ID=код")?;
+                let id = id
+                    .trim()
+                    .parse()
+                    .context("--api-code: ID должен быть числом")?;
+                api_codes.push((id, code.trim().to_string()));
+            }
+            "--upload" => bitrix_upload = Some(it.next().context("--upload без каталога")?.into()),
+            other if mysql_url.is_none() && !other.starts_with("--") => {
+                mysql_url = Some(other.to_string())
+            }
+            other => bail!("неизвестный аргумент `{other}`"),
+        }
+    }
+    Ok(import::Options {
+        mysql_url: mysql_url.context("не указан адрес MySQL")?,
+        bitrix_upload,
+        upload_dir: config.upload_dir.clone(),
+        replace,
+        api_codes,
+    })
 }
 
 async fn create_admin(db: &PgPool, login: &str) -> anyhow::Result<()> {
@@ -113,12 +169,22 @@ async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
         db,
         templates: Arc::new(env),
         config: Arc::new(config),
+        registry: Arc::default(),
+        project: bxapi::project::Project::from_env(),
     };
 
     let app = Router::new()
         .route("/", get(|| async { Redirect::to("/admin") }))
         .nest("/api", api::router().layer(cors_layer(&state.config)))
+        .nest("/api/v1", bxapi::router().layer(cors_layer(&state.config)))
         .nest("/admin", admin::router(state.clone()))
+        .nest(
+            "/upload",
+            uploads::router().layer(SetResponseHeaderLayer::overriding(
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            )),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 

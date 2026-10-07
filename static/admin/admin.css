@@ -148,7 +148,7 @@ a.stat:hover { text-decoration: none; border-color: var(--accent); }
 
 /* pager */
 .pager { display: flex; gap: 4px; flex-wrap: wrap; }
-.pager a, .pager span { min-width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); }
+.pager a, .pager span { min-width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); }
 .pager .current { background: var(--accent); border-color: var(--accent); color: #fff; }
 
 /* login */
@@ -207,3 +207,10 @@ fieldset:disabled input, fieldset:disabled textarea, fieldset:disabled select { 
 @media (max-width: 760px) {
   .access-row { flex-direction: column; align-items: flex-start; }
 }
+
+/* Поле без обёртки-label (файлы): подпись сверху, как у остальных полей */
+.field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.field-label { font-size: 14px; font-weight: 500; }
+.form label.check.file-item { align-items: center; gap: 10px; font-weight: 400; }
+.thumb { width: 64px; height: 64px; object-fit: cover; border-radius: var(--radius); border: 1px solid var(--border); }
+select[multiple] { min-height: 6em; }

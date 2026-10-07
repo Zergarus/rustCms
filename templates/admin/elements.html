@@ -1,16 +1,54 @@
 {% extends "base.html" %}
 {% set section = "iblocks" %}
-{% block title %}{{ iblock.name }}{% endblock %}
+{% block title %}{% if chain %}{{ chain[-1].name }} — {% endif %}{{ iblock.name }}{% endblock %}
 {% block content %}
-<div class="breadcrumbs"><a href="/admin/iblocks">Инфоблоки</a> /</div>
+{% set current = chain[-1] if chain else none %}
+<div class="breadcrumbs">
+  <a href="/admin/iblocks">Инфоблоки</a> /
+  {% if chain %}
+  <a href="/admin/iblocks/{{ iblock.id }}/elements">{{ iblock.name }}</a> /
+  {% for s in chain[:-1] %}<a href="/admin/iblocks/{{ iblock.id }}/elements?section={{ s.id }}">{{ s.name }}</a> / {% endfor %}
+  {% endif %}
+</div>
 <div class="page-head">
-  <h1>{{ iblock.name }} <span class="muted count">{{ total }}</span></h1>
+  <h1>{% if current %}{{ current.name }}{% else %}{{ iblock.name }}{% endif %} <span class="muted count">{{ total }}</span></h1>
   <div class="head-actions">
-    {% if "iblocks.manage" in user.permissions %}<a class="btn" href="/admin/iblocks/{{ iblock.id }}">Настройки</a>{% endif %}
-    {% if can_write %}<a class="btn primary" href="/admin/iblocks/{{ iblock.id }}/elements/new">Добавить элемент</a>
+    {% if current and can_write %}<a class="btn" href="/admin/sections/{{ current.id }}">Изменить раздел</a>{% endif %}
+    {% if not current and "iblocks.manage" in user.permissions %}<a class="btn" href="/admin/iblocks/{{ iblock.id }}">Настройки</a>{% endif %}
+    {% if can_write %}
+    <a class="btn" href="/admin/iblocks/{{ iblock.id }}/sections/new{% if current %}?parent={{ current.id }}{% endif %}">Добавить раздел</a>
+    <a class="btn primary" href="/admin/iblocks/{{ iblock.id }}/elements/new{% if current %}?section={{ current.id }}{% endif %}">Добавить элемент</a>
     {% else %}<span class="badge">только чтение</span>{% endif %}
   </div>
 </div>
+
+{% if subsections %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>ID</th><th>Раздел</th><th>Код</th><th>Акт.</th><th>Сорт.</th><th></th></tr></thead>
+    <tbody>
+      {% for s in subsections %}
+      <tr {% if not s.active %}class="inactive"{% endif %}>
+        <td class="muted">{{ s.id }}</td>
+        <td><a href="/admin/iblocks/{{ iblock.id }}/elements?section={{ s.id }}">📁 {{ s.name }}</a></td>
+        <td><code>{{ s.code }}</code></td>
+        <td>{% if s.active %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}</td>
+        <td>{{ s.sort }}</td>
+        <td class="actions">
+          {% if can_write %}
+          <a class="link" href="/admin/sections/{{ s.id }}">Изменить</a>
+          <form method="post" action="/admin/sections/{{ s.id }}/delete"
+                hx-confirm="Удалить раздел «{{ s.name }}» вместе с подразделами? Элементы останутся без раздела.">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
 
 {% if items %}
 <div class="card table-wrap">
@@ -44,14 +82,14 @@
 <nav class="pager">
   {% for p in range(1, pages + 1) %}
     {% if p == page %}<span class="current">{{ p }}</span>
-    {% else %}<a href="?page={{ p }}">{{ p }}</a>{% endif %}
+    {% else %}<a href="?{% if current %}section={{ current.id }}&amp;{% endif %}page={{ p }}">{{ p }}</a>{% endif %}
   {% endfor %}
 </nav>
 {% endif %}
-{% else %}
+{% elif not subsections %}
 <div class="card empty">
-  <p>В инфоблоке пока нет элементов.</p>
-  {% if can_write %}<a class="btn primary" href="/admin/iblocks/{{ iblock.id }}/elements/new">Добавить элемент</a>{% endif %}
+  <p>{% if current %}В разделе пока ничего нет.{% else %}В инфоблоке пока нет элементов.{% endif %}</p>
+  {% if can_write %}<a class="btn primary" href="/admin/iblocks/{{ iblock.id }}/elements/new{% if current %}?section={{ current.id }}{% endif %}">Добавить элемент</a>{% endif %}
 </div>
 {% endif %}
 {% endblock %}

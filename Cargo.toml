@@ -5,22 +5,26 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 axum-extra = { version = "0.12", features = ["cookie", "form"] }
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 hex = "0.4"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+md-5 = "0.11.0"
 minijinja = { version = "2", features = ["loader"] }
 password-auth = "1.0"
 rand = "0.10"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+sha-crypt = "0.6.0"
 sha2 = "0.11"
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "chrono", "json"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "chrono", "json", "mysql"] }
 thiserror = "2"
 time = "0.3"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.7", features = ["cors", "fs", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "fs", "set-header", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

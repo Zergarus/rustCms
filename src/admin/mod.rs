@@ -4,11 +4,12 @@ mod auth_pages;
 mod elements;
 mod groups;
 mod iblocks;
+mod sections;
 mod users;
 
 use axum::{
     Extension, Router,
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Multipart, Request, State, multipart::MultipartError},
     http::{Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
@@ -16,15 +17,18 @@ use axum::{
 };
 use axum_extra::extract::CookieJar;
 use minijinja::{Value, context};
-use serde::Deserialize;
 use tower_http::services::ServeDir;
 
 use crate::{
     access::Access,
     auth,
     error::{AppError, AppResult},
+    files::{self, FileRecord},
     state::AppState,
 };
+
+/// Предел размера запроса в админке (формы с файлами).
+const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 pub fn router(state: AppState) -> Router<AppState> {
     let protected = Router::new()
@@ -38,7 +42,19 @@ pub fn router(state: AppState) -> Router<AppState> {
         )
         .route("/iblocks/{id}/delete", post(iblocks::delete))
         .route("/iblocks/{id}/properties", post(iblocks::add_property))
+        .route(
+            "/properties/{id}",
+            get(iblocks::property_form).post(iblocks::update_property),
+        )
+        .route("/properties/{id}/enums", post(iblocks::save_enums))
         .route("/properties/{id}/delete", post(iblocks::delete_property))
+        .route("/iblocks/{id}/sections", post(sections::create))
+        .route("/iblocks/{id}/sections/new", get(sections::new_form))
+        .route(
+            "/sections/{id}",
+            get(sections::edit_form).post(sections::update),
+        )
+        .route("/sections/{id}/delete", post(sections::delete))
         .route(
             "/iblocks/{id}/elements",
             get(elements::list).post(elements::create),
@@ -71,6 +87,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .merge(protected)
         .nest_service("/static", ServeDir::new(static_dir))
         .layer(middleware::from_fn(same_origin_guard))
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
 }
 
 /// Пускает дальше пользователей с правом входа в админку (см. [`Access`]),
@@ -121,21 +138,61 @@ fn url_authority(url: &str) -> Option<&str> {
     rest.split(['/', '?', '#']).next()
 }
 
+/// Поля multipart-формы: текстовые значения (с повторами, в порядке прихода) и
+/// загруженные файлы — уже сохранённые, с именем поля, из которого пришли.
+pub(crate) struct UploadForm {
+    pub fields: Vec<(String, String)>,
+    pub uploads: Vec<(String, FileRecord)>,
+    /// Отклонённые файлы — показываются пользователю как ошибки формы.
+    pub rejected: Vec<String>,
+}
+
+/// Читает multipart-форму и сразу сохраняет файлы в хранилище `subdir`.
+/// Пустые файловые поля (ничего не выбрано) пропускаются.
+pub(crate) async fn read_upload_form(
+    state: &AppState,
+    mut multipart: Multipart,
+    subdir: &str,
+) -> AppResult<UploadForm> {
+    let mut form = UploadForm {
+        fields: Vec::new(),
+        uploads: Vec::new(),
+        rejected: Vec::new(),
+    };
+    let bad = |e: MultipartError| AppError::BadRequest(e.body_text());
+    while let Some(field) = multipart.next_field().await.map_err(bad)? {
+        let name = field.name().unwrap_or_default().to_string();
+        match field.file_name().map(str::to_string) {
+            None => form.fields.push((name, field.text().await.map_err(bad)?)),
+            Some(file_name) => {
+                let content_type = field.content_type().unwrap_or_default().to_string();
+                let data = field.bytes().await.map_err(bad)?;
+                if file_name.is_empty() || data.is_empty() {
+                    continue;
+                }
+                let saved = files::save(
+                    &state.db,
+                    &state.config.upload_dir,
+                    subdir,
+                    &file_name,
+                    &content_type,
+                    &data,
+                )
+                .await;
+                match saved {
+                    Ok(file) => form.uploads.push((name, file)),
+                    Err(files::SaveError::Rejected(msg)) => form.rejected.push(msg),
+                    Err(files::SaveError::Failed(e)) => return Err(e.into()),
+                }
+            }
+        }
+    }
+    Ok(form)
+}
+
 pub(crate) fn render(state: &AppState, name: &str, ctx: Value) -> AppResult<Html<String>> {
     let tmpl = state.templates.get_template(name)?;
     Ok(Html(tmpl.render(ctx)?))
-}
-
-/// Номер страницы в списках админки.
-#[derive(Deserialize)]
-pub(crate) struct PageQuery {
-    page: Option<i64>,
-}
-
-impl PageQuery {
-    pub fn page(&self) -> i64 {
-        self.page.unwrap_or(1).clamp(1, 1_000_000)
-    }
 }
 
 pub(crate) fn parse_sort(raw: &str) -> i32 {

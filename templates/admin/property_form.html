@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% set section = "iblocks" %}
+{% block title %}{{ property.name }} — {{ iblock.name }}{% endblock %}
+{% block content %}
+<div class="breadcrumbs">
+  <a href="/admin/iblocks">Инфоблоки</a> /
+  <a href="/admin/iblocks/{{ iblock.id }}">{{ iblock.name }}</a> /
+</div>
+<h1>{{ property.name }}</h1>
+
+<form class="card form" method="post" action="/admin/properties/{{ property.id }}">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <p class="muted">
+    Код <code>{{ property.code }}</code>, тип «{{ kind }}»{% if property.multiple %}, множественное{% endif %}.
+    Код, тип и множественность не меняются — от них зависят сохранённые значения.
+  </p>
+  <div class="grid-3">
+    <label>Название *<input name="name" value="{{ form.name }}" required></label>
+    <label>Сортировка<input name="sort" type="number" value="{{ form.sort }}"></label>
+    <label class="check"><input type="checkbox" name="is_required" {% if form.is_required %}checked{% endif %}> Обязательное</label>
+  </div>
+  {% if property.kind == "element" %}
+  <label>Инфоблок привязки
+    <select name="link_iblock_id">
+      <option value="">— любой —</option>
+      {% for i in iblocks %}
+      <option value="{{ i.id }}" {% if form.link_iblock_id == i.id|string %}selected{% endif %}>{{ i.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  {% endif %}
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/iblocks/{{ iblock.id }}">Отмена</a>
+  </div>
+</form>
+
+{% if property.kind == "list" %}
+<section class="card">
+  <h2>Варианты значений</h2>
+  <p class="muted">В элементе хранится id варианта. XML_ID — стабильный код для фильтров API; пустой создастся из значения.</p>
+  <form class="form" method="post" action="/admin/properties/{{ property.id }}/enums">
+    {% if enum_error %}<div class="alert">{{ enum_error }}</div>{% endif %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Значение</th><th>XML_ID</th><th>Сорт.</th><th>По умолч.</th><th>Удалить</th></tr></thead>
+        <tbody>
+          {% for e in enums %}
+          <tr>
+            <td class="muted">{{ e.id }}<input type="hidden" name="enum_id_{{ loop.index0 }}" value="{{ e.id }}"></td>
+            <td><input name="enum_value_{{ loop.index0 }}" value="{{ e.value }}"></td>
+            <td><input name="enum_xml_id_{{ loop.index0 }}" value="{{ e.xml_id }}"></td>
+            <td><input name="enum_sort_{{ loop.index0 }}" type="number" value="{{ e.sort }}"></td>
+            <td><input type="checkbox" name="enum_default_{{ loop.index0 }}" {% if e.is_default %}checked{% endif %}></td>
+            <td><input type="checkbox" name="enum_delete_{{ loop.index0 }}"></td>
+          </tr>
+          {% endfor %}
+          {% for i in range(enums|length, enums|length + new_rows) %}
+          <tr>
+            <td class="muted">новый</td>
+            <td><input name="enum_value_{{ i }}"></td>
+            <td><input name="enum_xml_id_{{ i }}"></td>
+            <td><input name="enum_sort_{{ i }}" type="number" value="500"></td>
+            <td><input type="checkbox" name="enum_default_{{ i }}"></td>
+            <td></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <button class="btn" type="submit">Сохранить варианты</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}
