@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "orders" %}
+{% block title %}Заказы{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="page-head"><h1>Заказы <span class="muted count">{{ total }}</span></h1></div>
+<form class="card form filters" method="get" action="/admin/shop/orders">
+  <div class="grid-4">
+    <label>Номер<input name="number" value="{{ q.number }}"></label>
+    <label>Статус
+      <select name="status"><option value="">— любой —</option>{% for s in statuses %}<option value="{{ s[0] }}" {% if q.status == s[0] %}selected{% endif %}>{{ s[1] }}</option>{% endfor %}</select>
+    </label>
+    <label>С<input type="date" name="from" value="{{ q.from }}"></label>
+    <label>По<input type="date" name="to" value="{{ q.to }}"></label>
+  </div>
+  <div class="grid-4">
+    <label>Покупатель<input name="buyer" value="{{ q.buyer }}" placeholder="логин, email, ФИО"></label>
+    <label>Оплачен
+      <select name="paid">{% for v, t in [("", "— не важно —"), ("Y", "Да"), ("N", "Нет")] %}<option value="{{ v }}" {% if q.paid == v %}selected{% endif %}>{{ t }}</option>{% endfor %}</select>
+    </label>
+    <label>Отменён
+      <select name="canceled">{% for v, t in [("", "— не важно —"), ("Y", "Да"), ("N", "Нет")] %}<option value="{{ v }}" {% if q.canceled == v %}selected{% endif %}>{{ t }}</option>{% endfor %}</select>
+    </label>
+    <div class="form-actions"><button class="btn primary" type="submit">Найти</button><a class="btn" href="/admin/shop/orders">Сбросить</a></div>
+  </div>
+</form>
+{% if rows %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>№</th><th>Дата</th><th>Покупатель</th><th>Статус</th><th>Сумма</th><th>Оплата</th><th>Доставка</th></tr></thead>
+    <tbody>
+      {% for o in rows %}
+      <tr{% if o.canceled %} class="muted"{% endif %}>
+        <td><a href="/admin/shop/orders/{{ o.id }}">{{ o.account_number }}</a></td>
+        <td class="muted">{{ o.created_at[:16]|replace("T", " ") }}</td>
+        <td>{{ o.buyer }}</td>
+        <td>{% if o.canceled %}<span class="badge">отменён</span>{% else %}{{ o.status_name }}{% endif %}</td>
+        <td>{{ o.price }} {{ o.currency }}</td>
+        <td>{% if o.paid %}<span class="badge ok">оплачен</span>{% else %}<span class="muted">нет</span>{% endif %}</td>
+        <td>{{ o.delivery }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% if pages > 1 %}
+<nav class="pager">{% for p in range(1, pages + 1) %}{% if p == page %}<span class="current">{{ p }}</span>{% else %}<a href="?page={{ p }}{{ query }}">{{ p }}</a>{% endif %}{% endfor %}</nav>
+{% endif %}
+{% else %}
+<div class="card empty"><p>Заказов не найдено.</p></div>
+{% endif %}
+{% endblock %}

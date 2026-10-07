@@ -17,6 +17,7 @@ pub const ADMIN_ACCESS: &str = "admin.access";
 pub const IBLOCKS_MANAGE: &str = "iblocks.manage";
 pub const USERS_MANAGE: &str = "users.manage";
 pub const SHOP_MANAGE: &str = "shop.manage";
+pub const ORDERS_MANAGE: &str = "orders.manage";
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct PermissionDef {
@@ -44,7 +45,12 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     PermissionDef {
         code: SHOP_MANAGE,
         name: "Управление магазином",
-        description: "Склады, корзины покупателей, типы цен, валюты, настройки каталога",
+        description: "Склады, корзины покупателей, типы цен, валюты, настройки каталога и оформления заказа",
+    },
+    PermissionDef {
+        code: ORDERS_MANAGE,
+        name: "Работа с заказами",
+        description: "Просмотр заказов, смена статуса, оплата, отмена, правка свойств и состава",
     },
 ];
 

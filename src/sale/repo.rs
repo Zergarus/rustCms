@@ -1,10 +1,14 @@
 //! Заказ в БД: создание при оформлении, чтение для писем и админки, действия менеджера.
 
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use serde_json::{Map, Value};
 use sqlx::{PgConnection, PgPool};
 
-use super::stock::{StockChange, apply};
+use super::stock::{self, StockChange, StockLine, apply};
+use crate::catalog;
 
 /// Значение свойства заказа (флаги — из справочника свойств, если он ещё есть).
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -263,4 +267,198 @@ pub async fn load(db: &PgPool, id: i64) -> sqlx::Result<Option<OrderView>> {
     .fetch_all(db)
     .await?;
     Ok(Some(order))
+}
+
+/// Значения свойств-местоположений из ввода, которые есть в базе (по коду или id).
+pub async fn known_locations(
+    db: &PgPool,
+    input: &Map<String, Value>,
+) -> sqlx::Result<HashSet<String>> {
+    let values: Vec<String> = input
+        .values()
+        .filter_map(|v| match v {
+            Value::String(s) => Some(s.trim().to_string()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+        .filter(|v| !v.is_empty())
+        .collect();
+    let found: Vec<String> = sqlx::query_scalar(
+        "SELECT code FROM locations WHERE code = ANY($1)
+         UNION SELECT id::text FROM locations WHERE id::text = ANY($1)",
+    )
+    .bind(&values)
+    .fetch_all(db)
+    .await?;
+    Ok(found.into_iter().collect())
+}
+
+/// Меняет статус и пишет историю. `false` — статус уже такой.
+pub async fn set_status(
+    db: &PgPool,
+    order_id: i64,
+    status: &str,
+    admin_id: Option<i64>,
+    comment: &str,
+) -> sqlx::Result<bool> {
+    let mut tx = db.begin().await?;
+    let changed = sqlx::query(
+        "UPDATE orders SET status = $2, updated_at = now() WHERE id = $1 AND status <> $2",
+    )
+    .bind(order_id)
+    .bind(status)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    if changed {
+        sqlx::query(
+            "INSERT INTO order_status_history (order_id, status, user_id, comment) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(order_id)
+        .bind(status)
+        .bind(admin_id)
+        .bind(comment)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// Отметка оплаты заказа и его оплаты. `false` — уже так.
+pub async fn set_paid(db: &PgPool, order_id: i64, paid: bool) -> sqlx::Result<bool> {
+    let mut tx = db.begin().await?;
+    let changed = sqlx::query(
+        "UPDATE orders SET paid = $2, paid_at = CASE WHEN $2 THEN now() END, updated_at = now()
+         WHERE id = $1 AND paid <> $2",
+    )
+    .bind(order_id)
+    .bind(paid)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    if changed {
+        sqlx::query(
+            "UPDATE payments SET paid = $2, paid_at = CASE WHEN $2 THEN now() END WHERE order_id = $1",
+        )
+        .bind(order_id)
+        .bind(paid)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// Позиции заказа для расчёта остатков.
+pub async fn stock_lines(tx: &mut PgConnection, order_id: i64) -> sqlx::Result<Vec<StockLine>> {
+    let rows: Vec<(i64, Option<i64>, f64)> = sqlx::query_as(
+        "SELECT element_id, store_id, quantity::float8 FROM cart_items WHERE order_id = $1 ORDER BY id",
+    )
+    .bind(order_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(element_id, store_id, quantity)| StockLine {
+            element_id,
+            store_id,
+            quantity,
+        })
+        .collect())
+}
+
+/// Товары с учётом количества среди позиций (строки товаров блокируются).
+pub async fn traced_locked(
+    tx: &mut PgConnection,
+    lines: &[StockLine],
+) -> sqlx::Result<HashSet<i64>> {
+    let ids: Vec<i64> = lines.iter().map(|l| l.element_id).collect();
+    Ok(catalog::load_locked(tx, &ids)
+        .await?
+        .into_iter()
+        .filter(|(_, i)| i.quantity_trace)
+        .map(|(id, _)| id)
+        .collect())
+}
+
+/// Отмена (возврат остатков) или снятие отмены (повторное списание). `false` — уже так;
+/// `stock_deducted` не даёт вернуть или списать дважды.
+pub async fn set_canceled(
+    db: &PgPool,
+    order_id: i64,
+    canceled: bool,
+    reason: &str,
+) -> sqlx::Result<bool> {
+    let mut tx = db.begin().await?;
+    let Some((was, deducted)): Option<(bool, bool)> =
+        sqlx::query_as("SELECT canceled, stock_deducted FROM orders WHERE id = $1 FOR UPDATE")
+            .bind(order_id)
+            .fetch_optional(&mut *tx)
+            .await?
+    else {
+        return Ok(false);
+    };
+    if was == canceled {
+        return Ok(false);
+    }
+    let lines = stock_lines(&mut tx, order_id).await?;
+    let traced = traced_locked(&mut tx, &lines).await?;
+    let deducted = if canceled && deducted {
+        apply(&mut tx, &stock::plan(&lines, &[], &traced)).await?;
+        false
+    } else if !canceled && !deducted {
+        apply(&mut tx, &stock::plan(&[], &lines, &traced)).await?;
+        true
+    } else {
+        deducted
+    };
+    sqlx::query(
+        "UPDATE orders SET canceled = $2, canceled_at = CASE WHEN $2 THEN now() END,
+             cancel_reason = CASE WHEN $2 THEN $3 ELSE '' END, stock_deducted = $4, updated_at = now()
+         WHERE id = $1",
+    )
+    .bind(order_id)
+    .bind(canceled)
+    .bind(reason)
+    .bind(deducted)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Заменяет значения свойств и комментарий менеджера.
+pub async fn update_properties(
+    db: &PgPool,
+    order_id: i64,
+    values: &[(i64, String, String, String)],
+    manager_comment: &str,
+) -> sqlx::Result<()> {
+    let mut tx = db.begin().await?;
+    sqlx::query("DELETE FROM order_property_values WHERE order_id = $1")
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    for (property_id, code, name, value) in values {
+        sqlx::query(
+            "INSERT INTO order_property_values (order_id, property_id, code, name, value)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(order_id)
+        .bind(property_id)
+        .bind(code)
+        .bind(name)
+        .bind(value)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query("UPDATE orders SET manager_comment = $2, updated_at = now() WHERE id = $1")
+        .bind(order_id)
+        .bind(manager_comment)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
 }

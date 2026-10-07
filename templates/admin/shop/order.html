@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "orders" %}
+{% block title %}Заказ № {{ order.account_number }}{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="breadcrumbs"><a href="/admin/shop/orders">Заказы</a> /</div>
+<div class="page-head">
+  <h1>Заказ № {{ order.account_number }} <span class="muted count">от {{ order.created_at[:16]|replace("T", " ") }}</span></h1>
+  <div>
+    {% if order.canceled %}<span class="badge">отменён</span>{% endif %}
+    {% if order.paid %}<span class="badge ok">оплачен</span>{% endif %}
+  </div>
+</div>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+
+<div class="grid-2">
+  <div class="card form">
+    <h2>Статус</h2>
+    <form method="post" action="/admin/shop/orders/{{ order.id }}/status">
+      <div class="grid-2">
+        <label>Статус
+          <select name="status">{% for s in statuses %}<option value="{{ s[0] }}" {% if order.status == s[0] %}selected{% endif %}>{{ s[1] }}</option>{% endfor %}</select>
+        </label>
+        <label>Комментарий<input name="comment"></label>
+      </div>
+      <button class="btn primary" type="submit">Сменить статус</button>
+    </form>
+    <form method="post" action="/admin/shop/orders/{{ order.id }}/paid">
+      <input type="hidden" name="value" value="{% if order.paid %}N{% else %}Y{% endif %}">
+      <p>Оплата: {% if order.paid %}оплачен {{ (order.paid_at or "")[:16]|replace("T", " ") }}{% else %}не оплачен{% endif %}
+        <button class="btn" type="submit">{% if order.paid %}Снять оплату{% else %}Отметить оплату{% endif %}</button></p>
+    </form>
+    <form method="post" action="/admin/shop/orders/{{ order.id }}/cancel">
+      {% if order.canceled %}
+      <input type="hidden" name="value" value="N">
+      <p>Отменён {{ (order.canceled_at or "")[:16]|replace("T", " ") }}{% if order.cancel_reason %}: {{ order.cancel_reason }}{% endif %}
+        <button class="btn" type="submit">Снять отмену</button></p>
+      {% else %}
+      <input type="hidden" name="value" value="Y">
+      <div class="grid-2"><label>Причина отмены<input name="reason"></label>
+        <div class="form-actions"><button class="btn danger" type="submit">Отменить заказ</button></div></div>
+      {% endif %}
+    </form>
+  </div>
+  <div class="card">
+    <h2>Покупатель</h2>
+    <p>{% if order.user_id %}<a href="/admin/users/{{ order.user_id }}">{{ order.user_login }}</a>{% if order.user_name %} — {{ order.user_name }}{% endif %}{% if order.user_email %}, {{ order.user_email }}{% endif %}{% else %}<span class="muted">пользователь удалён</span>{% endif %}</p>
+    <p>Тип плательщика: {{ person_type }}</p>
+    <p>Доставка: {% if order.shipment %}{{ order.shipment.delivery_name }}, {{ order.shipment.price }} {{ order.currency }}{% if order.shipment.store_id %}, склад: {{ stores[order.shipment.store_id|string] }}{% endif %}{% endif %}</p>
+    <p>Оплата: {% if order.payment %}{{ order.payment.name }}, {{ order.payment.sum }} {{ order.currency }}{% endif %}</p>
+    <p>Остатки: {% if order.stock_deducted %}списаны{% else %}не списаны{% endif %}</p>
+    {% if order.user_comment %}<p>Комментарий покупателя: {{ order.user_comment }}</p>{% endif %}
+  </div>
+</div>
+
+<div class="card table-wrap">
+  <h2>Состав заказа</h2>
+  <table>
+    <thead><tr><th>Товар</th><th>Склад</th><th>Кол-во</th><th>Цена</th><th>Сумма</th></tr></thead>
+    <tbody>
+      {% for i in order.items %}
+      <tr>
+        <td><a href="/admin/elements/{{ i.element_id }}">{{ i.name }}</a>{% if i.custom_price %} <span class="muted">(своя цена)</span>{% endif %}</td>
+        <td>{% if i.store_id %}{{ stores[i.store_id|string] or i.store_id }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td>{{ i.quantity }}</td>
+        <td>{{ i.price }}</td>
+        <td>{{ (i.price * i.quantity)|round(2) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+    <tfoot>
+      <tr><td colspan="4">Товары</td><td>{{ order.goods_price }} {{ order.currency }}</td></tr>
+      <tr><td colspan="4">Доставка</td><td>{{ order.delivery_price }} {{ order.currency }}</td></tr>
+      <tr><td colspan="4"><b>Итого</b></td><td><b>{{ order.price }} {{ order.currency }}</b></td></tr>
+    </tfoot>
+  </table>
+  {% block composition %}{% endblock %}
+</div>
+
+<form class="card form" method="post" action="/admin/shop/orders/{{ order.id }}/props">
+  <h2>Свойства заказа</h2>
+  <div class="grid-2">
+    {% for f in fields %}
+    <label>{{ f.name }}{% if f.required %} *{% endif %}{% if f.util %} <span class="muted">(служебное)</span>{% endif %}
+      {% if f.kind == "select" %}
+      <select name="prop_{{ f.code }}"><option value="">—</option>{% for o in f.options %}<option value="{{ o[0] }}" {% if f.value == o[0] %}selected{% endif %}>{{ o[1] }}</option>{% endfor %}</select>
+      {% elif f.kind == "checkbox" %}
+      <select name="prop_{{ f.code }}"><option value="N">Нет</option><option value="Y" {% if f.value == "Y" %}selected{% endif %}>Да</option></select>
+      {% elif f.kind == "textarea" %}
+      <textarea name="prop_{{ f.code }}" rows="2">{{ f.value }}</textarea>
+      {% else %}
+      <input name="prop_{{ f.code }}" value="{{ f.value }}">
+      {% endif %}
+    </label>
+    {% endfor %}
+  </div>
+  {% if extra %}<p class="muted">Прочие значения: {% for v in extra %}{{ v.name }}: {{ v.value }}{% if not loop.last %}; {% endif %}{% endfor %}</p>{% endif %}
+  <label>Комментарий менеджера<textarea name="manager_comment" rows="2">{{ order.manager_comment }}</textarea></label>
+  <div class="form-actions"><button class="btn primary" type="submit">Сохранить свойства</button></div>
+</form>
+
+<div class="card table-wrap">
+  <h2>История статусов</h2>
+  <table>
+    <thead><tr><th>Когда</th><th>Статус</th><th>Кто</th><th>Комментарий</th></tr></thead>
+    <tbody>
+      {% for h in order.history %}
+      <tr><td class="muted">{{ h.created_at[:16]|replace("T", " ") }}</td><td>{{ h.status_name }}</td><td>{{ h.user_login or "система" }}</td><td>{{ h.comment }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -8,7 +8,7 @@ use axum::{
     http::StatusCode,
 };
 use axum_extra::extract::cookie::CookieJar;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use super::{
     BxError, BxResult,
@@ -168,30 +168,6 @@ fn shipment_store(delivery: &Delivery, items: &[&CartItem]) -> Option<i64> {
     }
 }
 
-/// Значения свойств-местоположений, которые есть в базе (по коду или id).
-async fn known_locations(
-    state: &AppState,
-    input: &Map<String, Value>,
-) -> Result<HashSet<String>, BxError> {
-    let values: Vec<String> = input
-        .values()
-        .filter_map(|v| match v {
-            Value::String(s) => Some(s.trim().to_string()),
-            Value::Number(n) => Some(n.to_string()),
-            _ => None,
-        })
-        .filter(|v| !v.is_empty())
-        .collect();
-    let found: Vec<String> = sqlx::query_scalar(
-        "SELECT code FROM locations WHERE code = ANY($1)
-         UNION SELECT id::text FROM locations WHERE id::text = ANY($1)",
-    )
-    .bind(&values)
-    .fetch_all(&state.db)
-    .await?;
-    Ok(found.into_iter().collect())
-}
-
 pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) -> BxResult {
     let body = Value::Object(parse_body(&body)?);
     let settings = sale::load_settings(&state.db).await?;
@@ -263,7 +239,7 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let known = known_locations(&state, &input).await?;
+    let known = repo::known_locations(&state.db, &input).await?;
     let values = validate_properties(&props, &settings.variants, &input, &known).map_err(fail)?;
 
     // 5. Состав

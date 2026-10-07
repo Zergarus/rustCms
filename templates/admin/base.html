@@ -33,7 +33,7 @@
   {% set menu = [
     {"id": "dashboard", "url": "/admin", "label": "Рабочий стол", "show": true},
     {"id": "iblocks", "url": "/admin/iblocks", "label": "Инфоблоки", "show": user.can_see_iblocks},
-    {"id": "shop", "url": "/admin/shop/stores", "label": "Магазин", "show": "shop.manage" in user.permissions},
+    {"id": "shop", "url": "/admin/shop/orders" if "orders.manage" in user.permissions else "/admin/shop/stores", "label": "Магазин", "show": "shop.manage" in user.permissions or "orders.manage" in user.permissions},
     {"id": "users", "url": "/admin/users", "label": "Пользователи", "show": "users.manage" in user.permissions},
     {"id": "groups", "url": "/admin/groups", "label": "Группы", "show": user.is_admin},
   ] %}

@@ -5,6 +5,7 @@ pub mod carts;
 pub mod currencies;
 pub mod deliveries;
 pub mod order_props;
+pub mod orders;
 pub mod pay_systems;
 pub mod person_types;
 pub mod price_types;
