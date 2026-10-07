@@ -1,0 +1,6 @@
+{#- Вкладки раздела «Магазин»; tab — код текущей -#}
+<nav class="shop-nav">
+  {% for t in [("stores", "Склады"), ("carts", "Корзины"), ("price-types", "Типы цен"), ("currencies", "Валюты"), ("settings", "Настройки каталога")] %}
+  <a href="/admin/shop/{{ t[0] }}" class="{% if tab == t[0] %}active{% endif %}">{{ t[1] }}</a>
+  {% endfor %}
+</nav>

@@ -214,3 +214,9 @@ fieldset:disabled input, fieldset:disabled textarea, fieldset:disabled select { 
 .form label.check.file-item { align-items: center; gap: 10px; font-weight: 400; }
 .thumb { width: 64px; height: 64px; object-fit: cover; border-radius: var(--radius); border: 1px solid var(--border); }
 select[multiple] { min-height: 6em; }
+
+/* Вкладки раздела «Магазин» */
+.shop-nav { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 16px; }
+.shop-nav a { padding: 6px 12px; border-radius: var(--radius); color: var(--muted); text-decoration: none; }
+.shop-nav a:hover { background: var(--surface); color: var(--text); }
+.shop-nav a.active { background: var(--surface); color: var(--accent); box-shadow: var(--shadow); }

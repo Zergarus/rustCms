@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "stores" %}
+{% block title %}{% if id %}{{ form.name }}{% else %}Новый склад{% endif %}{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="breadcrumbs"><a href="/admin/shop/stores">Склады</a> /</div>
+<h1>{% if id %}{{ form.name }}{% else %}Новый склад{% endif %}</h1>
+<form class="card form" method="post" action="{% if id %}/admin/shop/stores/{{ id }}{% else %}/admin/shop/stores{% endif %}">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <div class="grid-3">
+    <label>Название *<input name="name" value="{{ form.name }}" required></label>
+    <label>Сортировка<input name="sort" type="number" value="{{ form.sort }}"></label>
+    <label class="check"><input type="checkbox" name="active" {% if form.active %}checked{% endif %}> Активен</label>
+  </div>
+  <div class="grid-2">
+    <label>Адрес<input name="address" value="{{ form.address }}"></label>
+    <label>Телефон<input name="phone" value="{{ form.phone }}"></label>
+  </div>
+  <div class="grid-2">
+    <label>Email<input name="email" value="{{ form.email }}"></label>
+    <label>График работы<input name="schedule" value="{{ form.schedule }}"></label>
+  </div>
+  <div class="grid-2">
+    <label>Найти город
+      <input type="search" name="q" placeholder="начните вводить название" autocomplete="off"
+             hx-get="/admin/shop/locations" hx-trigger="keyup changed delay:300ms" hx-target="#city-select" hx-swap="innerHTML">
+      <small>Город склада — UF_CITY_ID: по нему фронт отличает самовывоз от доставки.</small>
+    </label>
+    <label>Город
+      <select name="city_id" id="city-select">
+        <option value="">— не задан —</option>
+        {% if form.city_id %}<option value="{{ form.city_id }}" selected>{{ city_label or form.city_id }}</option>{% endif %}
+      </select>
+    </label>
+  </div>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/shop/stores">Отмена</a>
+  </div>
+</form>
+{% endblock %}

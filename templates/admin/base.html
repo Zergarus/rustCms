@@ -8,6 +8,8 @@
     <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
   {%- elif name == "groups" -%}
     <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/>
+  {%- elif name == "shop" -%}
+    <circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M2 3h3l2.6 11.4a2 2 0 0 0 2 1.6h7.9a2 2 0 0 0 2-1.5L21 7H6"/>
   {%- elif name == "logout" -%}
     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>
   {%- endif -%}
@@ -31,6 +33,7 @@
   {% set menu = [
     {"id": "dashboard", "url": "/admin", "label": "Рабочий стол", "show": true},
     {"id": "iblocks", "url": "/admin/iblocks", "label": "Инфоблоки", "show": user.can_see_iblocks},
+    {"id": "shop", "url": "/admin/shop/stores", "label": "Магазин", "show": "shop.manage" in user.permissions},
     {"id": "users", "url": "/admin/users", "label": "Пользователи", "show": "users.manage" in user.permissions},
     {"id": "groups", "url": "/admin/groups", "label": "Группы", "show": user.is_admin},
   ] %}

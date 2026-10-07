@@ -5,6 +5,7 @@ mod elements;
 mod groups;
 mod iblocks;
 mod sections;
+mod shop;
 mod users;
 
 use axum::{
@@ -65,6 +66,16 @@ pub fn router(state: AppState) -> Router<AppState> {
             get(elements::edit_form).post(elements::update),
         )
         .route("/elements/{id}/delete", post(elements::delete))
+        .route(
+            "/shop/stores",
+            get(shop::stores::list).post(shop::stores::create),
+        )
+        .route("/shop/stores/new", get(shop::stores::new_form))
+        .route(
+            "/shop/stores/{id}",
+            get(shop::stores::edit_form).post(shop::stores::update),
+        )
+        .route("/shop/locations", get(shop::locations))
         .route("/users", get(users::list).post(users::create))
         .route("/users/new", get(users::new_form))
         .route("/users/{id}", get(users::edit_form).post(users::update))

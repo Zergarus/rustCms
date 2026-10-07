@@ -16,6 +16,7 @@ use crate::{
 pub const ADMIN_ACCESS: &str = "admin.access";
 pub const IBLOCKS_MANAGE: &str = "iblocks.manage";
 pub const USERS_MANAGE: &str = "users.manage";
+pub const SHOP_MANAGE: &str = "shop.manage";
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct PermissionDef {
@@ -39,6 +40,11 @@ pub const PERMISSIONS: &[PermissionDef] = &[
         code: USERS_MANAGE,
         name: "Управление пользователями",
         description: "Создание, редактирование и блокировка пользователей (кроме суперадминистраторов)",
+    },
+    PermissionDef {
+        code: SHOP_MANAGE,
+        name: "Управление магазином",
+        description: "Склады, корзины покупателей, типы цен, валюты, настройки каталога",
     },
 ];
 
