@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "carts" %}
+{% block title %}Корзины покупателей{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="page-head"><h1>Корзины покупателей <span class="muted count">{{ total }}</span></h1></div>
+{% if rows %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>ID</th><th>Покупатель</th><th>Позиций</th><th>Сумма</th><th>Изменена</th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td class="muted">{{ r.id }}</td>
+        <td><a href="/admin/shop/carts/{{ r.id }}">{{ r.buyer }}</a></td>
+        <td>{{ r.items }}</td>
+        <td>{{ r.total }}</td>
+        <td class="muted">{{ r.updated_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% if pages > 1 %}
+<nav class="pager">{% for p in range(1, pages + 1) %}{% if p == page %}<span class="current">{{ p }}</span>{% else %}<a href="?page={{ p }}">{{ p }}</a>{% endif %}{% endfor %}</nav>
+{% endif %}
+{% else %}
+<div class="card empty"><p>Непустых корзин нет.</p></div>
+{% endif %}
+{% endblock %}

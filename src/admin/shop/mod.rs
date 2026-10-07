@@ -1,6 +1,7 @@
 //! Раздел админки «Магазин» (модули sale и catalog): склады, корзины, типы цен,
 //! валюты, настройки каталога. Право — `shop.manage`.
 
+pub mod carts;
 pub mod currencies;
 pub mod price_types;
 pub mod settings;

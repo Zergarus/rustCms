@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "carts" %}
+{% block title %}Корзина {{ label }}{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="breadcrumbs"><a href="/admin/shop/carts">Корзины покупателей</a> /</div>
+<h1>{{ label }} <span class="muted count">{{ snap.itemsCount }} шт. на {{ snap.totalPrice }} {{ snap.currency }}</span></h1>
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>Товар</th><th>Склад</th><th>Количество</th><th>Цена</th><th>Сумма</th><th>Доступен</th></tr></thead>
+    <tbody>
+      {% for i in snap["items"] %}
+      <tr {% if not i.isAvailable %}class="inactive"{% endif %}>
+        <td><a href="/admin/elements/{{ i.productId }}">{{ i.name }}</a></td>
+        <td>{% if i.store %}{{ i.store.name }}{% else %}<span class="muted">не выбран</span>{% endif %}</td>
+        <td>{{ i.quantity }}</td>
+        <td>{{ i.price }}</td>
+        <td>{{ i.sum }}</td>
+        <td>{% if i.isAvailable %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
