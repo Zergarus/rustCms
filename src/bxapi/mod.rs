@@ -6,6 +6,7 @@
 //! camelCase (`homeTabs`, `relatedBrands`), в CMS — snake_case.
 
 mod auth;
+mod cart;
 mod elements;
 mod filter;
 mod forms;
@@ -34,6 +35,12 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/base/csrf/token", get(csrf_token))
+        .route("/cart", get(cart::get_cart))
+        .route("/cart/items", post(cart::add_item))
+        .route("/cart/items/{id}/quantity", post(cart::set_quantity))
+        .route("/cart/items/{id}/store", post(cart::set_store))
+        .route("/cart/items/{id}/remove", post(cart::remove_item))
+        .route("/cart/clear", post(cart::clear))
         .route("/auth/login", post(auth::login))
         .route("/auth/session", get(auth::session))
         .route("/auth/logout", post(auth::logout))

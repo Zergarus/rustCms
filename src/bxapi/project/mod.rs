@@ -131,6 +131,38 @@ pub struct LocationConfig {
     pub user_field: &'static str,
 }
 
+/// Корзина (`bxapi.basket`).
+pub struct CartConfig {
+    /// Свойство-артикул (путь `select`, camelCase), например `cml2Article`.
+    pub article_property: Option<&'static str>,
+    /// Свойства позиции: путь `select` (camelCase) и необязательный ключ в ответе.
+    pub item_properties: Vec<(&'static str, Option<&'static str>)>,
+    /// Поля карточки склада в ответе: `address`, `phone`, `email`, `schedule`.
+    pub store_fields: Vec<&'static str>,
+    /// UF-поля склада (snake_case) → ключ в ответе: `uf_city_id` → `cityId`.
+    pub store_user_fields: Vec<(&'static str, &'static str)>,
+    /// `itemsCount` — число позиций, а не штук.
+    pub items_count_positions: bool,
+    /// Обязательное для оформления: `store` — выбран склад.
+    pub required_props: Vec<&'static str>,
+    /// Ширина картинки позиции; нет — оригинал.
+    pub image_width: Option<u32>,
+}
+
+impl Default for CartConfig {
+    fn default() -> Self {
+        CartConfig {
+            article_property: None,
+            item_properties: Vec::new(),
+            store_fields: vec!["address", "phone"],
+            store_user_fields: Vec::new(),
+            items_count_positions: false,
+            required_props: Vec::new(),
+            image_width: None,
+        }
+    }
+}
+
 pub struct Project {
     /// Разрешённые ширины ресайза (`bxapi.images.widths`); пусто — любые.
     pub image_widths: Vec<u32>,
@@ -152,6 +184,7 @@ pub struct Project {
     pub location: LocationConfig,
     pub forms: Vec<FormConfig>,
     pub form_guards: Vec<Arc<dyn FormGuard>>,
+    pub cart: CartConfig,
 }
 
 impl Project {
@@ -250,6 +283,7 @@ impl Default for Project {
             },
             forms: default_forms(),
             form_guards: Vec::new(),
+            cart: CartConfig::default(),
         }
     }
 }

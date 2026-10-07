@@ -156,30 +156,31 @@ mod tests {
         }
     }
 
-    fn info(id: i64, price: Option<f64>, amounts: &[(i64, f64)]) -> PurchaseInfo {
-        PurchaseInfo {
-            element_id: id,
-            iblock_id: 4,
-            active: true,
-            is_catalog: true,
-            available: true,
-            quantity_trace: true,
-            can_buy_zero: false,
-            prices: price
-                .map(|p| Price {
-                    type_id: 1,
-                    type_name: "Розница".into(),
-                    is_base: true,
-                    price: p,
-                    currency: "RUB".into(),
-                    quantity_from: None,
-                    quantity_to: None,
-                })
-                .into_iter()
-                .collect(),
-            amounts: amounts.iter().copied().collect(),
-            total: amounts.iter().map(|(_, a)| a).sum(),
-        }
+    fn info(id: i64, price: Option<f64>, amounts: &[(i64, f64)]) -> (i64, PurchaseInfo) {
+        (
+            id,
+            PurchaseInfo {
+                active: true,
+                is_catalog: true,
+                available: true,
+                quantity_trace: true,
+                can_buy_zero: false,
+                prices: price
+                    .map(|p| Price {
+                        type_id: 1,
+                        type_name: "Розница".into(),
+                        is_base: true,
+                        price: p,
+                        currency: "RUB".into(),
+                        quantity_from: None,
+                        quantity_to: None,
+                    })
+                    .into_iter()
+                    .collect(),
+                amounts: amounts.iter().copied().collect(),
+                total: amounts.iter().map(|(_, a)| a).sum(),
+            },
+        )
     }
 
     fn item(id: i64, element: i64, store: Option<i64>, qty: f64) -> CartItem {
@@ -205,12 +206,11 @@ mod tests {
 
     fn run(
         items: &[CartItem],
-        infos: Vec<PurchaseInfo>,
+        infos: Vec<(i64, PurchaseInfo)>,
         stores: &[StoreInfo],
         cfg: &SnapshotConfig,
     ) -> serde_json::Value {
-        let infos: HashMap<i64, PurchaseInfo> =
-            infos.into_iter().map(|i| (i.element_id, i)).collect();
+        let infos: HashMap<i64, PurchaseInfo> = infos.into_iter().collect();
         let views: HashMap<i64, ProductView> = HashMap::new();
         build_snapshot(items, &infos, &views, stores, cfg)
     }
@@ -325,9 +325,9 @@ mod tests {
     fn unavailable_item_blocks_checkout() {
         let items = [item(1, 10, None, 1.0)];
         let mut inactive = info(10, Some(100.0), &[]);
-        inactive.active = false;
+        inactive.1.active = false;
         let mut not_catalog = info(10, Some(100.0), &[]);
-        not_catalog.is_catalog = false;
+        not_catalog.1.is_catalog = false;
         for i in [inactive, not_catalog, info(10, None, &[])] {
             let s = run(&items, vec![i], &[], &config());
             assert_eq!(s["items"][0]["isAvailable"], json!(false));

@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 
-use super::{BxError, BxResult, parse_body, success};
+use super::{BxError, BxResult, cart::BUYER_COOKIE, parse_body, success};
 use crate::{auth::hash_password, passwords, state::AppState};
 
 pub const COOKIE: &str = "CMS_SID";
@@ -190,7 +190,14 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar, body: Bytes) -
             .bind(user_id)
             .fetch_one(&state.db)
             .await?;
-    let jar = jar.add(session_cookie(&state, token, remember));
+    let mut jar = jar.add(session_cookie(&state, token, remember));
+    // Корзина гостя переходит пользователю, как в Битриксе; сбой не мешает входу
+    if let Some(guest) = jar.get(BUYER_COOKIE).map(|c| c.value().to_string()) {
+        if let Err(e) = crate::cart::repo::merge_guest_into_user(&state.db, &guest, user_id).await {
+            tracing::error!(error = ?e, user_id, "не удалось объединить корзину гостя");
+        }
+        jar = jar.remove(Cookie::build(BUYER_COOKIE).path("/"));
+    }
     let data = json!({ "user": user.json(), "csrfToken": csrf_token() });
     Ok((jar, success(data)).into_response())
 }

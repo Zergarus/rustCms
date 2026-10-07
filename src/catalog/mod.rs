@@ -19,8 +19,6 @@ pub struct Price {
 /// Всё, что нужно, чтобы решить, можно ли купить товар и почём.
 #[derive(Debug, Clone)]
 pub struct PurchaseInfo {
-    pub element_id: i64,
-    pub iblock_id: i64,
     pub active: bool,
     /// Инфоблок товара — торговый каталог.
     pub is_catalog: bool,
@@ -111,7 +109,6 @@ pub async fn load_prices(
 #[derive(FromRow)]
 struct ProductRow {
     element_id: i64,
-    iblock_id: i64,
     active: bool,
     is_catalog: bool,
     available: Option<bool>,
@@ -139,7 +136,7 @@ pub async fn load(db: &PgPool, element_ids: &[i64]) -> sqlx::Result<HashMap<i64,
     let default_trace = default_flag(db, "default_quantity_trace", true).await?;
     let default_zero = default_flag(db, "default_can_buy_zero", false).await?;
     let products: Vec<ProductRow> = sqlx::query_as(
-        "SELECT e.id AS element_id, e.iblock_id, e.active, i.is_catalog,
+        "SELECT e.id AS element_id, e.active, i.is_catalog,
                 p.available, p.quantity_trace, p.can_buy_zero, p.quantity::float8 AS total
          FROM iblock_elements e
          JOIN iblocks i ON i.id = e.iblock_id
@@ -164,8 +161,6 @@ pub async fn load(db: &PgPool, element_ids: &[i64]) -> sqlx::Result<HashMap<i64,
         .into_iter()
         .map(|p| {
             let info = PurchaseInfo {
-                element_id: p.element_id,
-                iblock_id: p.iblock_id,
                 active: p.active,
                 is_catalog: p.is_catalog,
                 available: p.available.unwrap_or(true),
@@ -200,8 +195,6 @@ mod tests {
 
     fn info(trace: bool, buy_zero: bool, amounts: &[(i64, f64)], total: f64) -> PurchaseInfo {
         PurchaseInfo {
-            element_id: 1,
-            iblock_id: 4,
             active: true,
             is_catalog: true,
             available: true,
