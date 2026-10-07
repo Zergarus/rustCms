@@ -8,7 +8,9 @@
 mod auth;
 mod elements;
 mod filter;
+mod forms;
 mod images;
+mod location;
 mod nav;
 pub mod project;
 mod query;
@@ -35,7 +37,11 @@ pub fn router() -> Router<AppState> {
         .route("/auth/login", post(auth::login))
         .route("/auth/session", get(auth::session))
         .route("/auth/logout", post(auth::logout))
+        .route("/location/search", get(location::search))
+        .route("/location/set", post(location::set))
+        .route("/location/current", get(location::current))
         .route("/iblock/list", get(elements::iblock_list))
+        .route("/form/{code}", post(forms::submit))
         .route("/nav/breadcrumbs", post(nav::breadcrumbs))
         .route("/nav/legacy-redirect", post(nav::legacy_redirect))
         .route("/iblock/{*rest}", post(dispatch_post).get(dispatch_get))
@@ -71,6 +77,15 @@ impl BxError {
         Self {
             status,
             ..Self::new(code, message)
+        }
+    }
+
+    /// Ошибка с числовым `code`, равным HTTP-статусу.
+    pub fn numeric(status: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code: Value::from(status.as_u16()),
+            message: message.into(),
         }
     }
 

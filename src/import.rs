@@ -148,6 +148,10 @@ struct Data {
     file_sources: HashMap<i64, String>,
     catalog: Catalog,
     users: Vec<UserRow>,
+    groups: Vec<GroupRow>,
+    locations: Vec<LocationRow>,
+    mail_templates: Vec<MailTemplateRow>,
+    options: Vec<(String, String, String)>,
 }
 
 /// Пользователь сайта из `b_user`.
@@ -160,7 +164,54 @@ struct UserRow {
     /// Хеш как храним у себя (см. [`crate::passwords::from_bitrix`]).
     password_hash: String,
     active: bool,
+    second_name: String,
+    phone: String,
+    city: String,
+    work_position: String,
+    photo_id: Option<i64>,
+    /// UF-поля: `uf_phone_list` → значение (множественное — массив).
+    extra: Map<String, Value>,
+    /// Группы Битрикса, в которых состоит пользователь.
+    groups: Vec<i64>,
 }
+
+/// Группа пользователей Битрикса: (id, код, название, описание, сортировка).
+type GroupRow = (i64, String, String, String, i32);
+
+/// Местоположение: (id, код, родитель, тип, название, сортировка, глубина).
+type LocationRow = (i64, String, Option<i64>, String, String, i32, i32);
+
+/// Склад как в `b_catalog_store`.
+struct StoreRow {
+    id: i64,
+    name: String,
+    active: bool,
+    sort: i32,
+    address: String,
+    phone: String,
+    email: String,
+    schedule: String,
+}
+
+/// Почтовый шаблон `b_event_message`.
+struct MailTemplateRow {
+    id: i64,
+    event_name: String,
+    active: bool,
+    email_from: String,
+    email_to: String,
+    bcc: String,
+    subject: String,
+    body: String,
+    body_type: String,
+}
+
+/// Настройки ядра, которые нужны CMS (без паролей и ключей из b_option).
+const OPTIONS: &[(&str, &str)] = &[
+    ("main", "email_from"),
+    ("main", "server_name"),
+    ("main", "site_name"),
+];
 
 /// Цена: (элемент, тип цены, цена, валюта, количество от, до).
 type PriceRow = (i64, i64, f64, String, Option<i32>, Option<i32>);
@@ -171,8 +222,7 @@ struct Catalog {
     /// (id, код, название, базовый)
     price_types: Vec<(i64, String, String, bool)>,
     prices: Vec<PriceRow>,
-    /// (id, название, активен, сортировка)
-    stores: Vec<(i64, String, bool, i32)>,
+    stores: Vec<StoreRow>,
     /// (элемент, склад, количество)
     amounts: Vec<(i64, i64, f64)>,
     /// (элемент, общий остаток)
@@ -210,9 +260,11 @@ pub async fn run(db: &PgPool, opts: Options) -> anyhow::Result<()> {
     stage("разделы", read_sections(&my, &mut data)).await?;
     stage("элементы", read_elements(&my, &mut data)).await?;
     stage("значения свойств", read_property_values(&my, &mut data)).await?;
+    stage("пользователи", read_users(&my, &mut data)).await?;
     stage("файлы", read_files(&my, &mut data)).await?;
     stage("торговый каталог", read_catalog(&my, &mut data)).await?;
-    stage("пользователи", read_users(&my, &mut data)).await?;
+    stage("местоположения", read_locations(&my, &mut data)).await?;
+    stage("почтовые шаблоны и настройки", read_mail(&my, &mut data)).await?;
 
     let props = resolve_properties(&mut data);
     let (linked, missing) = link_files(&data, &opts)?;
@@ -235,6 +287,8 @@ pub async fn run(db: &PgPool, opts: Options) -> anyhow::Result<()> {
         elements = data.elements.len(),
         files = data.files.len(),
         users = data.users.len(),
+        groups = data.groups.len(),
+        locations = data.locations.len(),
         prices = data.catalog.prices.len(),
         store_amounts = data.catalog.amounts.len(),
         files_linked = linked,
@@ -783,6 +837,9 @@ async fn read_files(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
     for s in &data.sections {
         ids.extend(s.picture_id);
     }
+    for u in &data.users {
+        ids.extend(u.photo_id);
+    }
     for e in &data.elements {
         ids.extend(e.preview_picture_id);
         ids.extend(e.detail_picture_id);
@@ -838,26 +895,333 @@ async fn read_users(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
     let rows = sqlx::query(
         "SELECT CAST(ID AS SIGNED), CAST(LOGIN AS CHAR), CAST(IFNULL(EMAIL, '') AS CHAR),
                 CAST(IFNULL(NAME, '') AS CHAR), CAST(IFNULL(LAST_NAME, '') AS CHAR),
-                CAST(IFNULL(PASSWORD, '') AS CHAR), CAST(ACTIVE AS CHAR)
+                CAST(IFNULL(PASSWORD, '') AS CHAR), CAST(ACTIVE AS CHAR),
+                CAST(IFNULL(SECOND_NAME, '') AS CHAR), CAST(IFNULL(PERSONAL_PHONE, '') AS CHAR),
+                CAST(IFNULL(PERSONAL_CITY, '') AS CHAR), CAST(IFNULL(WORK_POSITION, '') AS CHAR),
+                CAST(IFNULL(PERSONAL_PHOTO, 0) AS SIGNED)
          FROM b_user ORDER BY ID",
     )
     .fetch_all(my)
     .await?;
+    let uf = read_user_fields(my).await?;
+    let mut memberships: HashMap<i64, Vec<i64>> = HashMap::new();
+    for row in
+        sqlx::query("SELECT CAST(USER_ID AS SIGNED), CAST(GROUP_ID AS SIGNED) FROM b_user_group")
+            .fetch_all(my)
+            .await?
+    {
+        if let (Some(user), Some(group)) = (int_col(&row, 0), int_col(&row, 1)) {
+            memberships.entry(user).or_default().push(group);
+        }
+    }
     for row in rows {
         let login = str_col(&row, 1).trim().to_string();
         let hash = str_col(&row, 5);
         if login.is_empty() || hash.is_empty() {
             continue;
         }
+        let bitrix_id = int_col(&row, 0).context("b_user.ID")?;
         data.users.push(UserRow {
-            bitrix_id: int_col(&row, 0).context("b_user.ID")?,
+            bitrix_id,
             login,
             email: str_col(&row, 2).trim().to_string(),
             name: str_col(&row, 3).trim().to_string(),
             last_name: str_col(&row, 4).trim().to_string(),
             password_hash: crate::passwords::from_bitrix(&hash),
             active: str_col(&row, 6) == "Y",
+            second_name: str_col(&row, 7).trim().to_string(),
+            phone: str_col(&row, 8).trim().to_string(),
+            city: str_col(&row, 9).trim().to_string(),
+            work_position: str_col(&row, 10).trim().to_string(),
+            photo_id: id_col(&row, 11),
+            extra: uf.get(&bitrix_id).cloned().unwrap_or_default(),
+            groups: memberships.remove(&bitrix_id).unwrap_or_default(),
         });
+    }
+
+    for row in sqlx::query(
+        "SELECT CAST(ID AS SIGNED), CAST(IFNULL(STRING_ID, '') AS CHAR), CAST(NAME AS CHAR),
+                CAST(IFNULL(DESCRIPTION, '') AS CHAR), CAST(IFNULL(C_SORT, 100) AS SIGNED)
+         FROM b_group ORDER BY ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        let id = int_col(&row, 0).context("b_group.ID")?;
+        let string_id = str_col(&row, 1);
+        let code = match clean_code(&string_id, String::new()) {
+            c if !c.is_empty() && !string_id.is_empty() => format!("bitrix_{c}"),
+            _ => format!("bitrix_{id}"),
+        };
+        data.groups.push((
+            id,
+            code,
+            str_col(&row, 2),
+            str_col(&row, 3),
+            int_col(&row, 4).unwrap_or(100) as i32,
+        ));
+    }
+    Ok(())
+}
+
+/// UF-поля пользователей (`b_uts_user`, множественные — `b_utm_user` или сериализованный
+/// массив в `b_uts_user`) → id пользователя → { uf_код: значение }.
+async fn read_user_fields(my: &MySqlPool) -> anyhow::Result<HashMap<i64, Map<String, Value>>> {
+    let fields: Vec<(i64, String, String, bool)> = sqlx::query(
+        "SELECT CAST(ID AS SIGNED), CAST(FIELD_NAME AS CHAR), CAST(USER_TYPE_ID AS CHAR),
+                CAST(MULTIPLE AS CHAR)
+         FROM b_user_field WHERE ENTITY_ID = 'USER' ORDER BY SORT, ID",
+    )
+    .fetch_all(my)
+    .await?
+    .iter()
+    .map(|r| {
+        (
+            int_col(r, 0).unwrap_or_default(),
+            str_col(r, 1),
+            str_col(r, 2),
+            str_col(r, 3) == "Y",
+        )
+    })
+    .filter(|(_, name, ..)| is_safe_column(name))
+    .collect();
+    let mut out: HashMap<i64, Map<String, Value>> = HashMap::new();
+    if fields.is_empty() {
+        return Ok(out);
+    }
+    let convert = |user_type: &str, raw: &str| -> Option<Value> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        Some(match user_type {
+            "boolean" => Value::Bool(matches!(raw, "1" | "Y")),
+            "integer" | "double" | "file" | "iblock_element" | "iblock_section" => {
+                number(raw).unwrap_or_else(|| Value::from(raw))
+            }
+            _ => Value::from(raw),
+        })
+    };
+    let columns: Vec<String> = fields
+        .iter()
+        .map(|(_, n, ..)| format!("CAST(`{n}` AS CHAR)"))
+        .collect();
+    let sql = format!(
+        "SELECT CAST(VALUE_ID AS SIGNED), {} FROM b_uts_user",
+        columns.join(", ")
+    );
+    for row in sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(my).await? {
+        let user = int_col(&row, 0).unwrap_or_default();
+        let map = out.entry(user).or_default();
+        for (i, (_, name, user_type, multiple)) in fields.iter().enumerate() {
+            let raw = str_col(&row, i + 1);
+            let value = if *multiple {
+                let items: Vec<Value> = php_unserialize_list(&raw)
+                    .iter()
+                    .filter_map(|v| convert(user_type, v))
+                    .collect();
+                (!items.is_empty()).then_some(Value::Array(items))
+            } else {
+                convert(user_type, &raw)
+            };
+            if let Some(v) = value {
+                map.insert(name.to_ascii_lowercase(), v);
+            }
+        }
+    }
+    // Строки множественных полей, если они есть, точнее сериализованного кеша
+    let mut multi: HashMap<(i64, String), Vec<Value>> = HashMap::new();
+    for row in sqlx::query(
+        "SELECT CAST(VALUE_ID AS SIGNED), CAST(FIELD_ID AS SIGNED), CAST(VALUE AS CHAR)
+         FROM b_utm_user ORDER BY ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        let field_id = int_col(&row, 1).unwrap_or_default();
+        let Some((_, name, user_type, _)) = fields.iter().find(|(id, ..)| *id == field_id) else {
+            continue;
+        };
+        if let Some(v) = convert(user_type, &str_col(&row, 2)) {
+            multi
+                .entry((
+                    int_col(&row, 0).unwrap_or_default(),
+                    name.to_ascii_lowercase(),
+                ))
+                .or_default()
+                .push(v);
+        }
+    }
+    for ((user, name), values) in multi {
+        out.entry(user)
+            .or_default()
+            .insert(name, Value::Array(values));
+    }
+    Ok(out)
+}
+
+/// Значения из PHP-`serialize` массива скаляров: `a:2:{i:0;s:3:"abc";i:1;i:5;}`.
+/// Не массив — само значение как один элемент.
+fn php_unserialize_list(raw: &str) -> Vec<String> {
+    let raw = raw.trim();
+    let Some(body) = raw
+        .strip_prefix("a:")
+        .and_then(|r| r.split_once(":{"))
+        .and_then(|(_, b)| b.strip_suffix('}'))
+    else {
+        return if raw.is_empty() {
+            Vec::new()
+        } else {
+            vec![raw.to_string()]
+        };
+    };
+    let bytes = body.as_bytes();
+    let mut items = Vec::new();
+    let mut i = 0;
+    let mut is_value = false;
+    while i < bytes.len() {
+        let kind = bytes[i];
+        let rest = &body[i..];
+        let (value, consumed) = match kind {
+            b's' => {
+                // s:<длина в байтах>:"...";
+                let Some((len, after)) = rest[2..].split_once(':') else {
+                    break;
+                };
+                let Ok(len) = len.parse::<usize>() else { break };
+                let start = i + 2 + len.to_string().len() + 2;
+                let end = start + len;
+                if end > body.len() || !body.is_char_boundary(start) || !body.is_char_boundary(end)
+                {
+                    break;
+                }
+                let _ = after;
+                (body[start..end].to_string(), end + 2 - i)
+            }
+            b'i' | b'd' | b'b' => {
+                let Some(end) = rest.find(';') else { break };
+                (rest[2..end].to_string(), end + 1)
+            }
+            b'N' => (String::new(), 2),
+            _ => break,
+        };
+        if is_value {
+            items.push(value);
+        }
+        is_value = !is_value;
+        i += consumed;
+    }
+    items
+}
+
+/// Почтовые шаблоны и нужные CMS настройки ядра.
+async fn read_mail(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
+    for row in sqlx::query(
+        "SELECT CAST(ID AS SIGNED), CAST(EVENT_NAME AS CHAR), CAST(ACTIVE AS CHAR),
+                CAST(IFNULL(EMAIL_FROM, '') AS CHAR), CAST(IFNULL(EMAIL_TO, '') AS CHAR),
+                CAST(IFNULL(BCC, '') AS CHAR), CAST(IFNULL(SUBJECT, '') AS CHAR),
+                CAST(IFNULL(MESSAGE, '') AS CHAR), CAST(IFNULL(BODY_TYPE, 'text') AS CHAR)
+         FROM b_event_message ORDER BY ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        data.mail_templates.push(MailTemplateRow {
+            id: int_col(&row, 0).context("b_event_message.ID")?,
+            event_name: str_col(&row, 1),
+            active: str_col(&row, 2) == "Y",
+            email_from: str_col(&row, 3),
+            email_to: str_col(&row, 4),
+            bcc: str_col(&row, 5),
+            subject: str_col(&row, 6),
+            body: str_col(&row, 7),
+            body_type: str_col(&row, 8),
+        });
+    }
+    for (module, name) in OPTIONS {
+        let value: Option<String> = sqlx::query_scalar(
+            "SELECT CAST(VALUE AS CHAR) FROM b_option WHERE MODULE_ID = ? AND NAME = ? AND SITE_ID IS NULL",
+        )
+        .bind(module)
+        .bind(name)
+        .fetch_optional(my)
+        .await?
+        .flatten();
+        if let Some(value) = value {
+            data.options
+                .push((module.to_string(), name.to_string(), value));
+        }
+    }
+    Ok(())
+}
+
+/// Шаблоны обновляются по external_id; настройки — по (модуль, имя).
+async fn write_mail(tx: &mut sqlx::PgConnection, data: &Data) -> anyhow::Result<()> {
+    for t in &data.mail_templates {
+        sqlx::query(
+            "INSERT INTO mail_templates
+                (event_name, active, email_from, email_to, bcc, subject, body, body_type, external_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO UPDATE SET
+                event_name = EXCLUDED.event_name, active = EXCLUDED.active,
+                email_from = EXCLUDED.email_from, email_to = EXCLUDED.email_to, bcc = EXCLUDED.bcc,
+                subject = EXCLUDED.subject, body = EXCLUDED.body, body_type = EXCLUDED.body_type",
+        )
+        .bind(&t.event_name)
+        .bind(t.active)
+        .bind(&t.email_from)
+        .bind(&t.email_to)
+        .bind(&t.bcc)
+        .bind(&t.subject)
+        .bind(&t.body)
+        .bind(&t.body_type)
+        .bind(format!("bitrix:{}", t.id))
+        .execute(&mut *tx)
+        .await?;
+    }
+    for (module, name, value) in &data.options {
+        sqlx::query(
+            "INSERT INTO options (module, name, value) VALUES ($1, $2, $3)
+             ON CONFLICT (module, name) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(module)
+        .bind(name)
+        .bind(value)
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Местоположения модуля sale с русскими названиями.
+async fn read_locations(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
+    let exists: Option<String> = sqlx::query_scalar("SHOW TABLES LIKE 'b_sale_location'")
+        .fetch_optional(my)
+        .await?;
+    if exists.is_none() {
+        return Ok(());
+    }
+    for row in sqlx::query(
+        "SELECT CAST(l.ID AS SIGNED), CAST(l.CODE AS CHAR), CAST(IFNULL(l.PARENT_ID, 0) AS SIGNED),
+                CAST(IFNULL(t.CODE, '') AS CHAR), CAST(IFNULL(n.NAME, l.CODE) AS CHAR),
+                CAST(l.SORT AS SIGNED), CAST(IFNULL(l.DEPTH_LEVEL, 1) AS SIGNED)
+         FROM b_sale_location l
+         LEFT JOIN b_sale_loc_type t ON t.ID = l.TYPE_ID
+         LEFT JOIN b_sale_loc_name n ON n.LOCATION_ID = l.ID AND n.LANGUAGE_ID = 'ru'
+         ORDER BY l.DEPTH_LEVEL, l.ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        data.locations.push((
+            int_col(&row, 0).context("b_sale_location.ID")?,
+            str_col(&row, 1),
+            id_col(&row, 2),
+            str_col(&row, 3),
+            str_col(&row, 4),
+            int_col(&row, 5).unwrap_or(100) as i32,
+            int_col(&row, 6).unwrap_or(1) as i32,
+        ));
     }
     Ok(())
 }
@@ -867,6 +1231,8 @@ async fn read_users(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
 async fn write_users(
     tx: &mut sqlx::PgConnection,
     users: &[UserRow],
+    groups: &[GroupRow],
+    file_ids: &HashSet<i64>,
 ) -> anyhow::Result<HashMap<i64, i64>> {
     let taken: HashMap<String, Option<String>> =
         sqlx::query_as::<_, (String, Option<String>)>("SELECT login, external_id FROM users")
@@ -891,7 +1257,8 @@ async fn write_users(
     let mut map = HashMap::new();
     for chunk in users.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO users (login, email, name, last_name, password_hash, is_admin, active, external_id) ",
+            "INSERT INTO users (login, email, name, last_name, password_hash, is_admin, active,
+                                external_id, second_name, phone, city, work_position, photo_id, extra) ",
         );
         qb.push_values(chunk, |mut b, u| {
             b.push_bind(&u.login)
@@ -901,13 +1268,22 @@ async fn write_users(
                 .push_bind(&u.password_hash)
                 .push_bind(false)
                 .push_bind(u.active)
-                .push_bind(format!("bitrix:{}", u.bitrix_id));
+                .push_bind(format!("bitrix:{}", u.bitrix_id))
+                .push_bind(&u.second_name)
+                .push_bind(&u.phone)
+                .push_bind(&u.city)
+                .push_bind(&u.work_position)
+                .push_bind(u.photo_id.filter(|id| file_ids.contains(id)))
+                .push_bind(sqlx::types::Json(&u.extra));
         });
         // Уже вошедший через CMS хранит argon2 — его не затираем старым хешем
         qb.push(
             " ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO UPDATE SET
                 login = EXCLUDED.login, email = EXCLUDED.email, name = EXCLUDED.name,
                 last_name = EXCLUDED.last_name, active = EXCLUDED.active,
+                second_name = EXCLUDED.second_name, phone = EXCLUDED.phone, city = EXCLUDED.city,
+                work_position = EXCLUDED.work_position, photo_id = EXCLUDED.photo_id,
+                extra = users.extra || EXCLUDED.extra,
                 password_hash = CASE WHEN users.password_hash LIKE '$argon2%'
                                      THEN users.password_hash ELSE EXCLUDED.password_hash END
               RETURNING id, external_id",
@@ -919,7 +1295,83 @@ async fn write_users(
             }
         }
     }
+
+    // Группы: обновляются по external_id; членство в них перезаписывается
+    let mut group_map: HashMap<i64, i64> = HashMap::new();
+    for (bitrix_id, code, name, description, sort) in groups {
+        let (id,): (i64,) = sqlx::query_as(
+            "INSERT INTO groups (code, name, description, sort, external_id) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (external_id) WHERE external_id IS NOT NULL
+             DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description, sort = EXCLUDED.sort
+             RETURNING id",
+        )
+        .bind(code)
+        .bind(name)
+        .bind(description)
+        .bind(sort)
+        .bind(format!("bitrix:{bitrix_id}"))
+        .fetch_one(&mut *tx)
+        .await?;
+        group_map.insert(*bitrix_id, id);
+    }
+    sqlx::query(
+        "DELETE FROM user_groups ug USING groups g
+         WHERE g.id = ug.group_id AND g.external_id LIKE 'bitrix:%'",
+    )
+    .execute(&mut *tx)
+    .await?;
+    let pairs: Vec<(i64, i64)> = users
+        .iter()
+        .filter_map(|u| map.get(&u.bitrix_id).map(|uid| (u, *uid)))
+        .flat_map(|(u, uid)| {
+            let group_map = &group_map;
+            u.groups
+                .iter()
+                .filter_map(move |g| group_map.get(g).map(|gid| (uid, *gid)))
+        })
+        .collect();
+    for chunk in pairs.chunks(BATCH) {
+        let mut qb = QueryBuilder::<Postgres>::new("INSERT INTO user_groups (user_id, group_id) ");
+        qb.push_values(chunk, |mut b, (u, g)| {
+            b.push_bind(u).push_bind(g);
+        });
+        qb.push(" ON CONFLICT DO NOTHING");
+        qb.build().execute(&mut *tx).await?;
+    }
     Ok(map)
+}
+
+/// Местоположения перезаписываются целиком; родитель вставлен раньше потомка.
+async fn write_locations(
+    tx: &mut sqlx::PgConnection,
+    locations: &[LocationRow],
+) -> anyhow::Result<()> {
+    if locations.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("DELETE FROM locations")
+        .execute(&mut *tx)
+        .await?;
+    let ids: HashSet<i64> = locations.iter().map(|l| l.0).collect();
+    for chunk in locations.chunks(BATCH) {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO locations (id, code, parent_id, type_code, name, sort, depth_level) ",
+        );
+        qb.push_values(
+            chunk,
+            |mut b, (id, code, parent, type_code, name, sort, depth)| {
+                b.push_bind(id)
+                    .push_bind(code)
+                    .push_bind(parent.filter(|p| ids.contains(p)))
+                    .push_bind(type_code)
+                    .push_bind(name)
+                    .push_bind(sort)
+                    .push_bind(depth);
+            },
+        );
+        qb.build().execute(&mut *tx).await?;
+    }
+    Ok(())
 }
 
 /// Цены, склады и остатки модуля `catalog`, форматы валют.
@@ -973,18 +1425,24 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
     }
 
     for row in sqlx::query(
-        "SELECT CAST(ID AS SIGNED), CAST(TITLE AS CHAR), CAST(ACTIVE AS CHAR), CAST(SORT AS SIGNED)
+        "SELECT CAST(ID AS SIGNED), CAST(TITLE AS CHAR), CAST(ACTIVE AS CHAR), CAST(SORT AS SIGNED),
+                CAST(IFNULL(ADDRESS, '') AS CHAR), CAST(IFNULL(PHONE, '') AS CHAR),
+                CAST(IFNULL(EMAIL, '') AS CHAR), CAST(IFNULL(SCHEDULE, '') AS CHAR)
          FROM b_catalog_store ORDER BY ID",
     )
     .fetch_all(my)
     .await?
     {
-        c.stores.push((
-            int_col(&row, 0).context("b_catalog_store.ID")?,
-            str_col(&row, 1),
-            str_col(&row, 2) == "Y",
-            int_col(&row, 3).unwrap_or(500) as i32,
-        ));
+        c.stores.push(StoreRow {
+            id: int_col(&row, 0).context("b_catalog_store.ID")?,
+            name: str_col(&row, 1),
+            active: str_col(&row, 2) == "Y",
+            sort: int_col(&row, 3).unwrap_or(500) as i32,
+            address: str_col(&row, 4),
+            phone: str_col(&row, 5),
+            email: str_col(&row, 6),
+            schedule: str_col(&row, 7),
+        });
     }
 
     for row in sqlx::query(
@@ -1273,7 +1731,10 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
         qb.build().execute(&mut *tx).await?;
     }
 
-    let users = write_users(&mut *tx, &data.users).await?;
+    let file_ids: HashSet<i64> = data.files.iter().map(|f| f.id).collect();
+    let users = write_users(&mut *tx, &data.users, &data.groups, &file_ids).await?;
+    write_locations(&mut *tx, &data.locations).await?;
+    write_mail(&mut *tx, data).await?;
     let empty = Map::new();
     for chunk in data.elements.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
@@ -1363,13 +1824,18 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
         qb.build().execute(&mut *tx).await?;
     }
     for chunk in c.stores.chunks(BATCH) {
-        let mut qb =
-            QueryBuilder::<Postgres>::new("INSERT INTO catalog_stores (id, name, active, sort) ");
-        qb.push_values(chunk, |mut b, (id, name, active, sort)| {
-            b.push_bind(id)
-                .push_bind(name)
-                .push_bind(active)
-                .push_bind(sort);
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO catalog_stores (id, name, active, sort, address, phone, email, schedule) ",
+        );
+        qb.push_values(chunk, |mut b, st| {
+            b.push_bind(st.id)
+                .push_bind(&st.name)
+                .push_bind(st.active)
+                .push_bind(st.sort)
+                .push_bind(&st.address)
+                .push_bind(&st.phone)
+                .push_bind(&st.email)
+                .push_bind(&st.schedule);
         });
         qb.build().execute(&mut *tx).await?;
     }
@@ -1411,6 +1877,18 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn php_arrays() {
+        assert_eq!(
+            php_unserialize_list(r#"a:2:{i:0;s:12:"+7 900 1-2-3";i:1;s:8:"Тест";}"#),
+            ["+7 900 1-2-3", "Тест"]
+        );
+        assert_eq!(php_unserialize_list("a:1:{i:0;i:5;}"), ["5"]);
+        assert!(php_unserialize_list("a:0:{}").is_empty());
+        assert_eq!(php_unserialize_list("plain"), ["plain"]);
+        assert!(php_unserialize_list("").is_empty());
+    }
 
     #[test]
     fn snake_and_codes() {

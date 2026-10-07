@@ -9,6 +9,7 @@ mod files;
 mod groups;
 mod iblock;
 mod import;
+mod mail;
 mod passwords;
 mod state;
 mod uploads;

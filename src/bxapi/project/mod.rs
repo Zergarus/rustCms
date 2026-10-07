@@ -83,6 +83,54 @@ pub struct LegacyRule {
     pub prefix: Option<&'static str>,
 }
 
+/// Правило проверки поля формы.
+#[derive(Clone, Copy, Debug)]
+pub enum Rule {
+    Required,
+    Email,
+}
+
+/// Запись формы в инфоблок: поле формы → `NAME` | `PREVIEW_TEXT` | `DETAIL_TEXT` | код свойства.
+pub struct IblockWriter {
+    pub api_code: &'static str,
+    pub field_mapping: Vec<(&'static str, &'static str)>,
+}
+
+/// Письмо по почтовому событию: поле формы → `#ПОЛЕ#` шаблона.
+pub struct MailNotifier {
+    pub event: &'static str,
+    pub field_mapping: Vec<(&'static str, &'static str)>,
+}
+
+/// Форма (`bxapi.forms`): правила, запись, уведомление.
+pub struct FormConfig {
+    pub code: &'static str,
+    pub rules: Vec<(&'static str, &'static [Rule])>,
+    pub writer: Option<IblockWriter>,
+    pub notifier: Option<MailNotifier>,
+}
+
+/// Проверка запроса формы до её обработки (капча и т.п. — `onBeforeAction` в Битриксе).
+pub trait FormGuard: Send + Sync {
+    fn check<'a>(
+        &'a self,
+        state: &'a AppState,
+        form: &'a str,
+        body: &'a Map<String, Value>,
+        ip: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<(), BxError>>;
+}
+
+/// Выбор города (`bxapi.location`).
+pub struct LocationConfig {
+    /// Типы местоположений в поиске (`CITY`, `VILLAGE`...).
+    pub search_types: Vec<&'static str>,
+    /// Добавлять страну в `displayName`.
+    pub show_country: bool,
+    /// Имя поля пользователя в ответе `location/set` (выбор хранится в профиле).
+    pub user_field: &'static str,
+}
+
 pub struct Project {
     /// Разрешённые ширины ресайза (`bxapi.images.widths`); пусто — любые.
     pub image_widths: Vec<u32>,
@@ -101,6 +149,9 @@ pub struct Project {
     pub home_label: &'static str,
     pub breadcrumb_rules: Vec<BreadcrumbRule>,
     pub legacy_rules: Vec<LegacyRule>,
+    pub location: LocationConfig,
+    pub forms: Vec<FormConfig>,
+    pub form_guards: Vec<Arc<dyn FormGuard>>,
 }
 
 impl Project {
@@ -152,6 +203,11 @@ impl Project {
         Self::find(&self.list_decorators, iblock).map_or(&[], Vec::as_slice)
     }
 
+    pub fn form(&self, code: &str) -> Option<&FormConfig> {
+        // Последняя с таким кодом: проект может переопределить форму модуля
+        self.forms.iter().rev().find(|f| f.code == code)
+    }
+
     pub fn search_props(&self, iblock: &str) -> &[&'static str] {
         Self::find(&self.search_props, iblock).map_or(&[], Vec::as_slice)
     }
@@ -187,6 +243,60 @@ impl Default for Project {
                 template: "/product/{value}",
                 prefix: None,
             }],
+            location: LocationConfig {
+                search_types: vec!["CITY"],
+                show_country: true,
+                user_field: "UF_CITY",
+            },
+            forms: default_forms(),
+            form_guards: Vec::new(),
         }
     }
+}
+
+/// Формы модуля bxapi по умолчанию: обратный звонок и бриф.
+fn default_forms() -> Vec<FormConfig> {
+    vec![
+        FormConfig {
+            code: "callback",
+            rules: vec![
+                ("name", &[Rule::Required]),
+                ("contacts", &[Rule::Required]),
+                ("personalData", &[]),
+            ],
+            writer: Some(IblockWriter {
+                api_code: "callback",
+                field_mapping: vec![("name", "NAME"), ("contacts", "CONTACTS")],
+            }),
+            notifier: Some(MailNotifier {
+                event: "CALLBACK_FORM",
+                field_mapping: vec![("name", "AUTHOR"), ("contacts", "TEXT")],
+            }),
+        },
+        FormConfig {
+            code: "brief",
+            rules: vec![
+                ("name", &[Rule::Required]),
+                ("contacts", &[Rule::Required]),
+                ("comments", &[]),
+                ("personalData", &[]),
+            ],
+            writer: Some(IblockWriter {
+                api_code: "brief",
+                field_mapping: vec![
+                    ("name", "NAME"),
+                    ("contacts", "CONTACTS"),
+                    ("comments", "PREVIEW_TEXT"),
+                ],
+            }),
+            notifier: Some(MailNotifier {
+                event: "BRIEF_FORM",
+                field_mapping: vec![
+                    ("name", "AUTHOR"),
+                    ("contacts", "TEXT"),
+                    ("comments", "TEXT"),
+                ],
+            }),
+        },
+    ]
 }

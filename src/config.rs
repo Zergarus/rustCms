@@ -14,6 +14,9 @@ pub struct Config {
     pub upload_dir: PathBuf,
     /// Сайт, откуда докачивать отсутствующие файлы `/upload/*` (после переноса из Битрикса).
     pub upload_origin_url: Option<String>,
+    /// SMTP для писем: `smtp://user:pass@host:587` или `smtps://...`; нет — письма в `mail_dir`.
+    pub mail_smtp_url: Option<String>,
+    pub mail_dir: PathBuf,
     /// Ставить флаг Secure на cookie сессии (включать за HTTPS).
     pub cookie_secure: bool,
 }
@@ -34,6 +37,10 @@ impl Config {
             upload_origin_url: env::var("UPLOAD_ORIGIN_URL")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
+            mail_smtp_url: env::var("MAIL_SMTP_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            mail_dir: var_or("MAIL_DIR", "mail").into(),
             cookie_secure: var_or("COOKIE_SECURE", "false") == "true",
         })
     }

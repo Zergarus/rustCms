@@ -2,6 +2,7 @@
 .env
 .claude/
 /upload
+/mail
 # Модули конкретных проектов (см. projects/README.md)
 /projects/*
 !/projects/README.md

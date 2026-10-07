@@ -35,15 +35,19 @@ cargo run                             # http://127.0.0.1:3000/admin
 cms import-bitrix 'mysql://user:pass@host:3306/db' --upload /path/to/site/upload [--replace] [--api-code 14=info]
 ```
 
-Переносит инфоблоки, свойства, варианты списков, разделы, элементы со значениями свойств (хранение v1 и v2), HL-блоки (как инфоблоки), торговый каталог и пользователей. Id инфоблоков, разделов, элементов, свойств и файлов сохраняются как в Битриксе. Пользователи входят со своими паролями: хеши Битрикса (`$6$…` и старый md5 с солью) проверяются и при входе заменяются на argon2. Повторный запуск с `--replace` заменяет инфоблоки; пользователи обновляются, а не дублируются. `--api-code` задаёт apiCode инфоблоку, у которого API_CODE в базе не заполнен.
+Переносит инфоблоки, свойства, варианты списков, разделы, элементы со значениями свойств (хранение v1 и v2), HL-блоки (как инфоблоки), торговый каталог (цены, склады с реквизитами, остатки, валюты), пользователей (с полями профиля, UF-полями и фото), группы пользователей, местоположения модуля sale, почтовые шаблоны и нужные настройки ядра (`email_from`, `site_name`, `server_name`). Id инфоблоков, разделов, элементов, свойств и файлов сохраняются как в Битриксе. Пользователи входят со своими паролями: хеши Битрикса (`$6$…` и старый md5 с солью) проверяются и при входе заменяются на argon2. Повторный запуск с `--replace` заменяет инфоблоки; пользователи обновляются, а не дублируются. `--api-code` задаёт apiCode инфоблоку, у которого API_CODE в базе не заполнен.
 
 ## Файлы
 
 `/upload/<путь>` — файлы из `UPLOAD_DIR`; перенесённые лежат по тем же путям, что в Битриксе. `/upload/resize_cache/<ширина>/<путь>` — уменьшенная копия, создаётся при первом запросе. Если задан `UPLOAD_ORIGIN_URL` (старый сайт), отсутствующие файлы докачиваются оттуда при первом обращении — весь `upload` заранее переносить не нужно.
 
+## Почта
+
+Аналог почтовых событий Битрикса: письмо на событие собирается из активных шаблонов `mail_templates` (переносятся из `b_event_message`) с подстановкой `#ПОЛЕЙ#` и полей по умолчанию (`#DEFAULT_EMAIL_FROM#`, `#SITE_NAME#`, `#SERVER_NAME#`). Отправка — по SMTP из `MAIL_SMTP_URL`; если он не задан, письма сохраняются файлами `.eml` в `MAIL_DIR`.
+
 ## API в формате bxapi
 
-Под `/api/v1/` — контракт модуля `mediagroup.bxapi` (обёртка `{status, data, errors}`, ключи в camelCase): `iblock/list`, `iblock/info/{apiCode}`, `iblock/{apiCode}/element/list`, `element/{id}`, `element/slug/{slug}`, `section/list` (с `hasElements`), `iblock/{apiCode}/search`, `nav/breadcrumbs`, `nav/legacy-redirect`, `base/csrf/token`, `auth/login|session|logout`.
+Под `/api/v1/` — контракт модуля `mediagroup.bxapi` (обёртка `{status, data, errors}`, ключи в camelCase): `iblock/list`, `iblock/info/{apiCode}`, `iblock/{apiCode}/element/list`, `element/{id}`, `element/slug/{slug}`, `section/list` (с `hasElements`), `iblock/{apiCode}/search`, `nav/breadcrumbs`, `nav/legacy-redirect`, `base/csrf/token`, `auth/login|session|logout`, `location/search|set|current` (выбор города: у гостя — в cookie, у авторизованного — ещё и в профиле), `form/{code}` (проверка полей, запись в инфоблок, письмо по почтовому событию; формы `callback` и `brief` — как в модуле, свои — в модуле проекта).
 
 - `filter` — операторы `=`, `!`, `@`, `!@`, `%`, `<`, `>`, `<=`, `>=`, группы `logic: OR`, спецключи `iblockSectionId`, `sectionSubtreeId`, `sectionCode`, `iblockSection.*`, пути `prop.item.xmlId`, `prop.element.<поле>` (вложенные связи до 3 уровней);
 - `select` — поля, свойства и пути через точку, `image`/`imageExt` (+ `imageResize`), `detailPageUrl` (по шаблону URL инфоблока), `sectionName`, `sectionCode`, `catalogPrice`, `catalogQuantity`, `stocks`;
@@ -51,7 +55,7 @@ cms import-bitrix 'mysql://user:pass@host:3306/db' --upload /path/to/site/upload
 
 ## Модули проектов
 
-Настройки и код конкретного сайта (декораторы ответов, группы поиска, характеристики, ширины картинок — аналог `bxapi.*` в `.settings_extra.php` и `init.php`) в репозиторий не входят. Модуль проекта — файл `projects/<имя>.rs` с функцией `pub fn project() -> Project`; он подключается при сборке (`build.rs`) и включается `BXAPI_PROJECT=<имя>`. См. `projects/README.md`.
+Настройки и код конкретного сайта (декораторы ответов, группы поиска, формы, проверки форм вроде капчи, характеристики, ширины картинок — аналог `bxapi.*` в `.settings_extra.php` и `init.php`) в репозиторий не входят. Модуль проекта — файл `projects/<имя>.rs` с функцией `pub fn project() -> Project`; он подключается при сборке (`build.rs`) и включается `BXAPI_PROJECT=<имя>`. См. `projects/README.md`.
 
 ## Публичный API
 
@@ -94,6 +98,7 @@ src/
   config.rs       настройки из окружения
   auth.rs         пользователи, сессии админки
   passwords.rs    проверка паролей (argon2 и хеши Битрикса)
+  mail.rs         почтовые события: шаблоны, SMTP или сохранение в файлы
   iblock/         модели, типы свойств, разделы, запросы к БД
   files.rs        загруженные файлы
   uploads.rs      раздача /upload: ресайз, докачка с origin

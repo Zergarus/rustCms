@@ -84,6 +84,14 @@ async fn current_user(state: &AppState, jar: &CookieJar) -> Result<Option<SiteUs
     .await?)
 }
 
+/// Id авторизованного посетителя по cookie сессии.
+pub(super) async fn current_user_id(
+    state: &AppState,
+    jar: &CookieJar,
+) -> Result<Option<i64>, BxError> {
+    Ok(current_user(state, jar).await?.map(|u| u.id))
+}
+
 fn auth_failed() -> BxError {
     BxError::with_status(
         StatusCode::UNAUTHORIZED,
