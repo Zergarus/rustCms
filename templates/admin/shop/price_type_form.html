@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "price-types" %}
+{% block title %}{% if id %}{{ form.name }}{% else %}Новый тип цен{% endif %}{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="breadcrumbs"><a href="/admin/shop/price-types">Типы цен</a> /</div>
+<h1>{% if id %}{{ form.name }}{% else %}Новый тип цен{% endif %}</h1>
+<form class="card form" method="post" action="{% if id %}/admin/shop/price-types/{{ id }}{% else %}/admin/shop/price-types{% endif %}">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <div class="grid-2">
+    <label>Код *<input name="code" value="{{ form.code }}" required></label>
+    <label>Название<input name="name" value="{{ form.name }}"></label>
+  </div>
+  <div class="grid-2">
+    <label>Сортировка<input name="sort" type="number" value="{{ form.sort }}"></label>
+    <label class="check"><input type="checkbox" name="is_base" {% if form.is_base %}checked{% endif %}> Базовый — основная цена товара</label>
+  </div>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/shop/price-types">Отмена</a>
+  </div>
+</form>
+{% endblock %}

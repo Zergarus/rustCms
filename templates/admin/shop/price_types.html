@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "price-types" %}
+{% block title %}Типы цен{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="page-head">
+  <h1>Типы цен <span class="muted count">{{ items|length }}</span></h1>
+  <a class="btn primary" href="/admin/shop/price-types/new">Добавить тип цен</a>
+</div>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>ID</th><th>Название</th><th>Код</th><th>Базовый</th><th>Сорт.</th><th>Цен</th><th></th></tr></thead>
+    <tbody>
+      {% for t in items %}
+      <tr>
+        <td class="muted">{{ t.id }}</td>
+        <td><a href="/admin/shop/price-types/{{ t.id }}">{{ t.name }}</a></td>
+        <td><code>{{ t.code }}</code></td>
+        <td>{% if t.is_base %}<span class="badge ok">да</span>{% endif %}</td>
+        <td>{{ t.sort }}</td>
+        <td>{{ t.prices }}</td>
+        <td class="actions">
+          <form method="post" action="/admin/shop/price-types/{{ t.id }}/delete" hx-confirm="Удалить тип цен «{{ t.name }}»?">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

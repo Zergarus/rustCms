@@ -76,6 +76,32 @@ pub fn router(state: AppState) -> Router<AppState> {
             get(shop::stores::edit_form).post(shop::stores::update),
         )
         .route("/shop/locations", get(shop::locations))
+        .route(
+            "/shop/price-types",
+            get(shop::price_types::list).post(shop::price_types::create),
+        )
+        .route("/shop/price-types/new", get(shop::price_types::new_form))
+        .route(
+            "/shop/price-types/{id}",
+            get(shop::price_types::edit_form).post(shop::price_types::update),
+        )
+        .route(
+            "/shop/price-types/{id}/delete",
+            post(shop::price_types::delete),
+        )
+        .route(
+            "/shop/currencies",
+            get(shop::currencies::list).post(shop::currencies::create),
+        )
+        .route("/shop/currencies/new", get(shop::currencies::new_form))
+        .route(
+            "/shop/currencies/{code}",
+            get(shop::currencies::edit_form).post(shop::currencies::update),
+        )
+        .route(
+            "/shop/settings",
+            get(shop::settings::form).post(shop::settings::save),
+        )
         .route("/users", get(users::list).post(users::create))
         .route("/users/new", get(users::new_form))
         .route("/users/{id}", get(users::edit_form).post(users::update))

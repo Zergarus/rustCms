@@ -20,6 +20,8 @@ mod search;
 mod sections;
 mod serialize;
 
+pub(crate) use serialize::format_price;
+
 use axum::{
     Json, Router,
     body::Bytes,

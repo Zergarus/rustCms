@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "currencies" %}
+{% block title %}{% if code %}{{ code }}{% else %}Новая валюта{% endif %}{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="breadcrumbs"><a href="/admin/shop/currencies">Валюты</a> /</div>
+<h1>{% if code %}{{ code }}{% else %}Новая валюта{% endif %}</h1>
+<form class="card form" method="post" action="{% if code %}/admin/shop/currencies/{{ code }}{% else %}/admin/shop/currencies{% endif %}">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <div class="grid-3">
+    <label>Код *<input name="code" value="{{ form.code }}" maxlength="3" required></label>
+    <label>Формат *<input name="format_string" value="{{ form.format_string }}"><small># — место числа, например <code># &amp;#8381;</code></small></label>
+    <label>Знаков после запятой<input name="decimals" type="number" min="0" max="4" value="{{ form.decimals }}"></label>
+  </div>
+  <div class="grid-3">
+    <label>Десятичный разделитель<input name="dec_point" value="{{ form.dec_point }}"></label>
+    <label>Разделитель тысяч<input name="thousands_sep" value="{{ form.thousands_sep }}"><small>Неразрывный пробел — <code>&amp;nbsp;</code></small></label>
+    <label class="check"><input type="checkbox" name="hide_zero" {% if form.hide_zero %}checked{% endif %}> Скрывать нулевые копейки</label>
+  </div>
+  <p class="muted">Пример: {{ sample|safe }}</p>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/shop/currencies">Отмена</a>
+  </div>
+</form>
+{% endblock %}

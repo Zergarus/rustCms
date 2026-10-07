@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "settings" %}
+{% block title %}Настройки каталога{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<h1>Настройки каталога</h1>
+<form class="card form" method="post" action="/admin/shop/settings">
+  <p class="muted">Значения по умолчанию для товаров, у которых флаг стоит «по умолчанию».</p>
+  <label class="check"><input type="checkbox" name="quantity_trace" {% if quantity_trace %}checked{% endif %}> Учитывать количество (нельзя купить больше остатка)</label>
+  <label class="check"><input type="checkbox" name="can_buy_zero" {% if can_buy_zero %}checked{% endif %}> Разрешать покупку при нулевом остатке</label>
+  <div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
+</form>
+{% endblock %}
