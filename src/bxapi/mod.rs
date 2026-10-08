@@ -14,6 +14,7 @@ mod images;
 mod location;
 mod nav;
 mod order;
+mod profile_orders;
 pub mod project;
 mod query;
 pub mod registry;

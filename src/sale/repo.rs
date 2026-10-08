@@ -458,6 +458,17 @@ pub async fn set_canceled(
 }
 
 /// Заменяет значения свойств и комментарий менеджера.
+/// Id файлов из значения файлового свойства («5,7»); мусор, повторы и неположительные — мимо.
+pub fn file_ids(raw: &str) -> Vec<i64> {
+    let mut out = Vec::new();
+    for id in raw.split(',').filter_map(|p| p.trim().parse::<i64>().ok()) {
+        if id > 0 && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
 /// Трек-номер и разрешение доставки первой отгрузки; `false` — у заказа нет отгрузки.
 pub async fn set_shipment(
     db: &PgPool,
@@ -578,6 +589,13 @@ mod tests {
         let mut tx = db.begin().await.unwrap();
         let result = create(&mut tx, &new_order(&f, 2.0)).await;
         assert!(matches!(result, Err(CreateError::BasketChanged)));
+    }
+
+    #[test]
+    fn file_ids_parse() {
+        assert_eq!(file_ids("5,7"), vec![5, 7]);
+        assert_eq!(file_ids(" 5 , abc,,7,5,-1,0"), vec![5, 7]);
+        assert!(file_ids("").is_empty());
     }
 
     #[sqlx::test]
