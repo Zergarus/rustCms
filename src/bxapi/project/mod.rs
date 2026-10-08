@@ -179,6 +179,40 @@ pub trait DeliveryFilter: Send + Sync {
     ) -> HashSet<i64>;
 }
 
+/// Личный кабинет (`bxapi.profile`).
+pub struct ProfileConfig {
+    /// Поля профиля (UPPER_SNAKE `b_user`, можно `UF_*`).
+    pub fields: Vec<&'static str>,
+    /// Поля, которые можно менять через `POST /profile`.
+    pub editable_fields: Vec<&'static str>,
+    /// Отдавать `ordersCount` в профиле.
+    pub include_orders_count: bool,
+    /// Заказов на страницу `/profile/orders` по умолчанию.
+    pub orders_limit: i64,
+    /// Формат `createdAtLabel` (токены PHP `date()`).
+    pub order_created_at_format: &'static str,
+}
+
+impl Default for ProfileConfig {
+    fn default() -> Self {
+        let fields = vec![
+            "NAME",
+            "LAST_NAME",
+            "SECOND_NAME",
+            "EMAIL",
+            "PERSONAL_PHONE",
+            "PERSONAL_PHOTO",
+        ];
+        ProfileConfig {
+            editable_fields: fields.clone(),
+            fields,
+            include_orders_count: true,
+            orders_limit: 50,
+            order_created_at_format: "d.m.Y H:i:s",
+        }
+    }
+}
+
 /// Оформление заказа (`bxapi.order`).
 #[derive(Default)]
 pub struct OrderConfig {
@@ -222,6 +256,7 @@ pub struct Project {
     pub form_guards: Vec<Arc<dyn FormGuard>>,
     pub cart: CartConfig,
     pub order: OrderConfig,
+    pub profile: ProfileConfig,
 }
 
 impl Project {
@@ -322,6 +357,7 @@ impl Default for Project {
             form_guards: Vec::new(),
             cart: CartConfig::default(),
             order: OrderConfig::default(),
+            profile: ProfileConfig::default(),
         }
     }
 }

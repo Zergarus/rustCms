@@ -48,6 +48,8 @@ pub fn router() -> Router<AppState> {
         .route("/order/form", get(order::form))
         .route("/order/summary", post(order::summary))
         .route("/order/submit", post(order::submit))
+        .route("/profile/orders", get(profile_orders::orders))
+        .route("/profile/orders/{id}", get(profile_orders::order))
         .route("/auth/login", post(auth::login))
         .route("/auth/session", get(auth::session))
         .route("/auth/logout", post(auth::logout))

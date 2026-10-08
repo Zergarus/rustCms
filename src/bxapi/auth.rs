@@ -92,6 +92,17 @@ pub(super) async fn current_user_id(
     Ok(current_user(state, jar).await?.map(|u| u.id))
 }
 
+/// Id вошедшего посетителя; без сессии — HTTP 401 `unauthorized`.
+pub(super) async fn require_user(state: &AppState, jar: &CookieJar) -> Result<i64, BxError> {
+    current_user_id(state, jar).await?.ok_or_else(|| {
+        BxError::with_status(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Требуется авторизация",
+        )
+    })
+}
+
 fn auth_failed() -> BxError {
     BxError::with_status(
         StatusCode::UNAUTHORIZED,

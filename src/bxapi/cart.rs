@@ -166,7 +166,7 @@ async fn load_stores(state: &AppState) -> Result<Vec<StoreInfo>, BxError> {
 }
 
 /// Отображение товаров позиций: URL, картинка, артикул, свойства — через сериализацию элементов.
-async fn product_views(
+pub(super) async fn product_views(
     state: &AppState,
     element_ids: &[i64],
 ) -> Result<HashMap<i64, ProductView>, BxError> {
