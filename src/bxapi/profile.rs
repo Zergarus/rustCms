@@ -161,6 +161,17 @@ struct Upload {
 /// Расширения аватара.
 const PHOTO_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "gif", "webp"];
 
+/// Наибольшая сторона аватара: заголовок маленького файла может объявить огромную
+/// картинку, и её распаковка при ресайзе съест память сервера.
+const MAX_PHOTO_SIDE: u32 = 4096;
+
+/// Аватар: картинка допустимого типа и размера.
+pub(super) fn photo_acceptable(name: &str, data: &[u8]) -> bool {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase());
+    ext.is_some_and(|e| PHOTO_EXTENSIONS.contains(&e.as_str()))
+        && files::image_size(data).is_some_and(|(w, h)| w <= MAX_PHOTO_SIDE && h <= MAX_PHOTO_SIDE)
+}
+
 /// Ввод `POST /profile`: поля и файл аватара (из multipart).
 async fn read_input(
     state: &AppState,
@@ -248,13 +259,10 @@ pub async fn update_profile(
         }
     };
     let upload = upload.filter(|_| photo_editable);
-    if let Some(u) = &upload {
-        let ext = u.name.rsplit_once('.').map(|(_, e)| e.to_lowercase());
-        let is_image = ext.is_some_and(|e| PHOTO_EXTENSIONS.contains(&e.as_str()))
-            && files::image_size(&u.data).is_some();
-        if !is_image {
-            errors.insert("personalPhoto".into(), json!("upload_failed"));
-        }
+    if let Some(u) = &upload
+        && !photo_acceptable(&u.name, &u.data)
+    {
+        errors.insert("personalPhoto".into(), json!("upload_failed"));
     }
     if !errors.is_empty() {
         return Err(
@@ -366,5 +374,55 @@ mod tests {
         assert_eq!(camel("PERSONAL_PHONE"), "personalPhone");
         assert_eq!(camel("UF_CITY_ID"), "ufCityId");
         assert_eq!(camel("NAME"), "name");
+    }
+
+    /// PNG с заголовком нужного размера (данные пикселей не важны для проверки).
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+            out.extend((data.len() as u32).to_be_bytes());
+            let start = out.len();
+            out.extend(kind);
+            out.extend(data);
+            let crc = crc32(&out[start..]);
+            out.extend(crc.to_be_bytes());
+        }
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut crc = 0xffff_ffffu32;
+            for b in bytes {
+                crc ^= u32::from(*b);
+                for _ in 0..8 {
+                    crc = if crc & 1 == 1 {
+                        (crc >> 1) ^ 0xedb8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = Vec::new();
+        ihdr.extend(width.to_be_bytes());
+        ihdr.extend(height.to_be_bytes());
+        ihdr.extend([8, 2, 0, 0, 0]);
+        chunk(&mut out, b"IHDR", &ihdr);
+        chunk(
+            &mut out,
+            b"IDAT",
+            &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+        );
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    #[test]
+    fn photo_size_limited() {
+        assert!(photo_acceptable("a.png", &png(800, 600)));
+        assert!(photo_acceptable("a.PNG", &png(4096, 4096)));
+        // Маленький файл с огромными размерами — распаковка при ресайзе съест память
+        assert!(!photo_acceptable("a.png", &png(16000, 8000)));
+        assert!(!photo_acceptable("a.png", &png(100, 9000)));
+        assert!(!photo_acceptable("a.svg", &png(10, 10)));
+        assert!(!photo_acceptable("a.png", b"not image"));
     }
 }
