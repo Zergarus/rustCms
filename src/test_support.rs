@@ -80,3 +80,37 @@ pub async fn amounts(db: &PgPool, element_id: i64) -> (f64, f64) {
     .await
     .unwrap()
 }
+
+/// Заказ из новой позиции (1 шт., без склада — позиция фикстуры на складе 1 остаётся в корзине)
+/// покупателя фикстуры: самовывоз 1, платёжка 1,
+/// без списания остатков.
+pub async fn place_order(db: &PgPool, f: &Fixture, user_id: Option<i64>) -> i64 {
+    use crate::sale::repo::{NewOrder, create};
+    let item_id: i64 = sqlx::query_scalar(
+        "INSERT INTO cart_items (buyer_id, element_id, store_id, quantity, name) VALUES ($1, $2, NULL, 1, 'Товар') RETURNING id",
+    )
+    .bind(f.buyer_id)
+    .bind(f.element_id)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    let order = NewOrder {
+        user_id,
+        buyer_id: f.buyer_id,
+        person_type_id: f.person_type_id,
+        status: "N".into(),
+        currency: "RUB".into(),
+        goods_price: 100.0,
+        delivery_price: 0.0,
+        user_comment: String::new(),
+        properties: Vec::new(),
+        delivery: (1, "Самовывоз".into(), 0.0, Some(1)),
+        payment: (1, "QR".into()),
+        items: vec![(item_id, 1.0, 100.0, "Товар".into())],
+        stock: Vec::new(),
+    };
+    let mut tx = db.begin().await.unwrap();
+    let id = create(&mut tx, &order).await.unwrap();
+    tx.commit().await.unwrap();
+    id
+}

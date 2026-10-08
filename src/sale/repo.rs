@@ -36,10 +36,13 @@ pub struct OrderItem {
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Shipment {
+    pub id: i64,
     pub delivery_id: Option<i64>,
     pub delivery_name: String,
     pub price: f64,
     pub store_id: Option<i64>,
+    pub tracking_number: String,
+    pub allow_delivery: bool,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -265,7 +268,8 @@ pub async fn load(db: &PgPool, id: i64) -> sqlx::Result<Option<OrderView>> {
     .fetch_all(db)
     .await?;
     order.shipment = sqlx::query_as(
-        "SELECT delivery_id, delivery_name, price::float8 AS price, store_id
+        "SELECT id, delivery_id, delivery_name, price::float8 AS price, store_id,
+                tracking_number, allow_delivery
          FROM shipments WHERE order_id = $1 ORDER BY id LIMIT 1",
     )
     .bind(id)
@@ -454,6 +458,35 @@ pub async fn set_canceled(
 }
 
 /// Заменяет значения свойств и комментарий менеджера.
+/// Трек-номер и разрешение доставки первой отгрузки; `false` — у заказа нет отгрузки.
+pub async fn set_shipment(
+    db: &PgPool,
+    order_id: i64,
+    tracking: &str,
+    allow: bool,
+) -> sqlx::Result<bool> {
+    let mut tx = db.begin().await?;
+    let done = sqlx::query(
+        "UPDATE shipments SET tracking_number = $2, allow_delivery = $3
+         WHERE id = (SELECT min(id) FROM shipments WHERE order_id = $1)",
+    )
+    .bind(order_id)
+    .bind(tracking.trim())
+    .bind(allow)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if done {
+        sqlx::query("UPDATE orders SET updated_at = now() WHERE id = $1")
+            .bind(order_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(done)
+}
+
 pub async fn update_properties(
     db: &PgPool,
     order_id: i64,
@@ -493,7 +526,7 @@ mod tests {
     use super::*;
     use crate::{
         sale::stock::{StockLine, plan},
-        test_support::{amounts, order_fixture},
+        test_support::{amounts, order_fixture, place_order},
     };
 
     fn new_order(f: &crate::test_support::Fixture, quantity: f64) -> NewOrder {
@@ -545,5 +578,15 @@ mod tests {
         let mut tx = db.begin().await.unwrap();
         let result = create(&mut tx, &new_order(&f, 2.0)).await;
         assert!(matches!(result, Err(CreateError::BasketChanged)));
+    }
+
+    #[sqlx::test]
+    async fn shipment_tracking_saved(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        assert!(set_shipment(&db, id, " 80012345 ", true).await.unwrap());
+        let s = load(&db, id).await.unwrap().unwrap().shipment.unwrap();
+        assert_eq!((s.tracking_number.as_str(), s.allow_delivery), ("80012345", true));
+        assert!(!set_shipment(&db, id + 1000, "x", false).await.unwrap());
     }
 }

@@ -57,6 +57,8 @@ pub struct OrderProperty {
     pub description: String,
     pub sort: i32,
     pub active: bool,
+    /// Несколько значений (файлы).
+    pub multiple: bool,
 }
 
 /// Вариант свойства-списка.
@@ -195,7 +197,7 @@ pub async fn load_settings(db: &PgPool) -> sqlx::Result<SaleSettings> {
         properties: sqlx::query_as(
             "SELECT id, person_type_id, group_id, code, name, kind, required, util, is_email, is_phone,
                     is_payer, is_profile_name, is_location, is_address, is_zip, default_value,
-                    description, sort, active
+                    description, sort, active, multiple
              FROM order_properties ORDER BY sort, id",
         )
         .fetch_all(db)

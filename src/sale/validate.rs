@@ -262,6 +262,7 @@ mod tests {
             description: String::new(),
             sort: id as i32,
             active: true,
+            multiple: false,
         }
     }
 

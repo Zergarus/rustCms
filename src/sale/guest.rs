@@ -170,6 +170,7 @@ mod tests {
             description: String::new(),
             sort: 0,
             active: true,
+            multiple: false,
         }
     }
 

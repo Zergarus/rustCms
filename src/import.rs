@@ -188,6 +188,7 @@ struct SalePropertyRow {
     description: String,
     sort: i32,
     active: bool,
+    multiple: bool,
 }
 
 struct DeliveryRow {
@@ -2132,7 +2133,8 @@ async fn read_sale(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
                 CAST(IS_PHONE AS CHAR), CAST(IS_PAYER AS CHAR), CAST(IS_PROFILE_NAME AS CHAR),
                 CAST(IS_LOCATION AS CHAR), CAST(IS_ADDRESS AS CHAR), CAST(IS_ZIP AS CHAR),
                 CAST(IFNULL(DEFAULT_VALUE, '') AS CHAR), CAST(IFNULL(DESCRIPTION, '') AS CHAR),
-                CAST(SORT AS SIGNED), CAST(ACTIVE AS CHAR), CAST(IFNULL(SETTINGS, '') AS CHAR)
+                CAST(SORT AS SIGNED), CAST(ACTIVE AS CHAR), CAST(IFNULL(SETTINGS, '') AS CHAR),
+                CAST(MULTIPLE AS CHAR)
          FROM b_sale_order_props ORDER BY ID",
     )
     .fetch_all(my)
@@ -2156,6 +2158,7 @@ async fn read_sale(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
             description: str_col(&row, 16),
             sort: int_col(&row, 17).unwrap_or(100) as i32,
             active: yes(18),
+            multiple: yes(20),
         });
     }
     for row in sqlx::query(
@@ -2354,8 +2357,8 @@ async fn write_sale(tx: &mut sqlx::PgConnection, sale: &Sale) -> anyhow::Result<
         sqlx::query(
             "INSERT INTO order_properties (id, person_type_id, group_id, code, name, kind, required, util,
                  is_email, is_phone, is_payer, is_profile_name, is_location, is_address, is_zip,
-                 default_value, description, sort, active)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                 default_value, description, sort, active, multiple)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
              ON CONFLICT (id) DO UPDATE SET person_type_id = EXCLUDED.person_type_id,
                  group_id = EXCLUDED.group_id, code = EXCLUDED.code, name = EXCLUDED.name,
                  kind = EXCLUDED.kind, required = EXCLUDED.required, util = EXCLUDED.util,
@@ -2363,7 +2366,7 @@ async fn write_sale(tx: &mut sqlx::PgConnection, sale: &Sale) -> anyhow::Result<
                  is_profile_name = EXCLUDED.is_profile_name, is_location = EXCLUDED.is_location,
                  is_address = EXCLUDED.is_address, is_zip = EXCLUDED.is_zip,
                  default_value = EXCLUDED.default_value, description = EXCLUDED.description,
-                 sort = EXCLUDED.sort, active = EXCLUDED.active",
+                 sort = EXCLUDED.sort, active = EXCLUDED.active, multiple = EXCLUDED.multiple",
         )
         .bind(p.id)
         .bind(p.person_type_id)
@@ -2384,6 +2387,7 @@ async fn write_sale(tx: &mut sqlx::PgConnection, sale: &Sale) -> anyhow::Result<
         .bind(&p.description)
         .bind(p.sort)
         .bind(p.active)
+        .bind(p.multiple)
         .execute(&mut *tx)
         .await?;
     }
