@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sqlx::FromRow;
 
-use super::{BxError, BxResult, auth::require_user, cart::product_views, success};
+use super::{BxError, BxResult, auth::require_user, cart::product_views, profile::camel, success};
 use crate::{
     bxapi::project::{CartConfig, ProfileConfig},
     cart::ProductView,
@@ -28,26 +28,11 @@ use crate::{
 /// Ключ свойства заказа: код в camelCase (`SDEK_TRACKING_URL` → `sdekTrackingUrl`),
 /// без кода — `prop<ID>`.
 pub(super) fn camel_key(code: &str, id: i64) -> String {
-    let mut out = String::new();
-    for word in code
-        .to_lowercase()
-        .split(['_', '.'])
-        .filter(|w| !w.is_empty())
-    {
-        if out.is_empty() {
-            out.push_str(word);
-        } else {
-            let mut chars = word.chars();
-            if let Some(first) = chars.next() {
-                out.extend(first.to_uppercase());
-                out.push_str(chars.as_str());
-            }
-        }
-    }
-    if out.is_empty() {
+    let key = camel(code);
+    if key.is_empty() {
         format!("prop{id}")
     } else {
-        out
+        key
     }
 }
 

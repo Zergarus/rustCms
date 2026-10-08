@@ -101,7 +101,7 @@ pub async fn save(
 }
 
 /// Размеры картинки без полного декодирования; `None` — не картинка.
-fn image_size(data: &[u8]) -> Option<(u32, u32)> {
+pub fn image_size(data: &[u8]) -> Option<(u32, u32)> {
     image::ImageReader::new(Cursor::new(data))
         .with_guessed_format()
         .ok()?

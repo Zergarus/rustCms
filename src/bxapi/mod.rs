@@ -14,6 +14,7 @@ mod images;
 mod location;
 mod nav;
 mod order;
+mod profile;
 mod profile_orders;
 pub mod project;
 mod query;
@@ -27,7 +28,7 @@ pub(crate) use serialize::format_price;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -48,6 +49,12 @@ pub fn router() -> Router<AppState> {
         .route("/order/form", get(order::form))
         .route("/order/summary", post(order::summary))
         .route("/order/submit", post(order::submit))
+        .route(
+            "/profile",
+            get(profile::get_profile)
+                .post(profile::update_profile)
+                .layer(DefaultBodyLimit::max(PROFILE_BODY_LIMIT)),
+        )
         .route("/profile/orders", get(profile_orders::orders))
         .route("/profile/orders/{id}", get(profile_orders::order))
         .route("/auth/login", post(auth::login))
@@ -159,6 +166,9 @@ impl From<anyhow::Error> for BxError {
         }
     }
 }
+
+/// Предел тела `POST /profile` (аватар до 5 МБ на фронте).
+const PROFILE_BODY_LIMIT: usize = 10 * 1024 * 1024;
 
 pub type BxResult = Result<Response, BxError>;
 
