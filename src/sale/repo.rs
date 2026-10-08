@@ -469,6 +469,107 @@ pub fn file_ids(raw: &str) -> Vec<i64> {
     out
 }
 
+/// Записывает значение свойства (код и название — из справочника) или удаляет пустое.
+async fn write_property_value(
+    tx: &mut PgConnection,
+    order_id: i64,
+    prop: (i64, &str, &str),
+    value: &str,
+) -> sqlx::Result<()> {
+    if value.is_empty() {
+        sqlx::query("DELETE FROM order_property_values WHERE order_id = $1 AND property_id = $2")
+            .bind(order_id)
+            .bind(prop.0)
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        sqlx::query(
+            "INSERT INTO order_property_values (order_id, property_id, code, name, value)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (order_id, property_id) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(order_id)
+        .bind(prop.0)
+        .bind(prop.1)
+        .bind(prop.2)
+        .bind(value)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query("UPDATE orders SET updated_at = now() WHERE id = $1")
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    Ok(())
+}
+
+async fn locked_value(
+    tx: &mut PgConnection,
+    order_id: i64,
+    property_id: i64,
+) -> sqlx::Result<String> {
+    // Блокировка заказа: два одновременных добавления файлов не теряют друг друга
+    sqlx::query("SELECT id FROM orders WHERE id = $1 FOR UPDATE")
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    Ok(sqlx::query_scalar(
+        "SELECT value FROM order_property_values WHERE order_id = $1 AND property_id = $2",
+    )
+    .bind(order_id)
+    .bind(property_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .unwrap_or_default())
+}
+
+fn join_ids(ids: &[i64]) -> String {
+    ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+}
+
+/// Файлы в файловое свойство: множественному — дописать, одиночному — заменить первым.
+pub async fn add_property_files(
+    db: &PgPool,
+    order_id: i64,
+    prop: &super::OrderProperty,
+    ids: &[i64],
+) -> sqlx::Result<()> {
+    let mut tx = db.begin().await?;
+    let current = file_ids(&locked_value(&mut tx, order_id, prop.id).await?);
+    let next: Vec<i64> = if prop.multiple {
+        let mut all = current;
+        all.extend(ids.iter().filter(|id| **id > 0));
+        file_ids(&join_ids(&all))
+    } else {
+        ids.iter().copied().filter(|id| *id > 0).take(1).collect()
+    };
+    if next.is_empty() {
+        return Ok(());
+    }
+    write_property_value(
+        &mut tx,
+        order_id,
+        (prop.id, &prop.code, &prop.name),
+        &join_ids(&next),
+    )
+    .await?;
+    tx.commit().await
+}
+
+/// Убирает файл из значения свойства; пустое значение удаляется.
+pub async fn remove_property_file(
+    db: &PgPool,
+    order_id: i64,
+    property_id: i64,
+    file_id: i64,
+) -> sqlx::Result<()> {
+    let mut tx = db.begin().await?;
+    let current = file_ids(&locked_value(&mut tx, order_id, property_id).await?);
+    let next: Vec<i64> = current.into_iter().filter(|id| *id != file_id).collect();
+    write_property_value(&mut tx, order_id, (property_id, "", ""), &join_ids(&next)).await?;
+    tx.commit().await
+}
+
 /// Трек-номер и разрешение доставки первой отгрузки; `false` — у заказа нет отгрузки.
 pub async fn set_shipment(
     db: &PgPool,
@@ -502,13 +603,18 @@ pub async fn update_properties(
     db: &PgPool,
     order_id: i64,
     values: &[(i64, String, String, String)],
+    keep: &[i64],
     manager_comment: &str,
 ) -> sqlx::Result<()> {
     let mut tx = db.begin().await?;
-    sqlx::query("DELETE FROM order_property_values WHERE order_id = $1")
-        .bind(order_id)
-        .execute(&mut *tx)
-        .await?;
+    // Значения из `keep` (файлы) правятся отдельно и здесь не трогаются
+    sqlx::query(
+        "DELETE FROM order_property_values WHERE order_id = $1 AND NOT (property_id = ANY($2))",
+    )
+    .bind(order_id)
+    .bind(keep)
+    .execute(&mut *tx)
+    .await?;
     for (property_id, code, name, value) in values {
         sqlx::query(
             "INSERT INTO order_property_values (order_id, property_id, code, name, value)
@@ -609,5 +715,85 @@ mod tests {
             ("80012345", true)
         );
         assert!(!set_shipment(&db, id + 1000, "x", false).await.unwrap());
+    }
+
+    async fn file_prop(
+        db: &PgPool,
+        f: &crate::test_support::Fixture,
+        code: &str,
+        multiple: bool,
+    ) -> crate::sale::OrderProperty {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO order_properties (person_type_id, code, name, kind, multiple)
+             VALUES ($1, $2, $2, 'file', $3) RETURNING id",
+        )
+        .bind(f.person_type_id)
+        .bind(code)
+        .bind(multiple)
+        .fetch_one(db)
+        .await
+        .unwrap();
+        crate::sale::load_settings(db)
+            .await
+            .unwrap()
+            .properties
+            .into_iter()
+            .find(|p| p.id == id)
+            .unwrap()
+    }
+
+    async fn value(db: &PgPool, order_id: i64, property_id: i64) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT value FROM order_property_values WHERE order_id = $1 AND property_id = $2",
+        )
+        .bind(order_id)
+        .bind(property_id)
+        .fetch_optional(db)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn property_files_add_replace_remove(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let many = file_prop(&db, &f, "WAYBILL", true).await;
+        let one = file_prop(&db, &f, "INVOICE", false).await;
+        add_property_files(&db, id, &many, &[1]).await.unwrap();
+        add_property_files(&db, id, &many, &[2]).await.unwrap();
+        assert_eq!(value(&db, id, many.id).await.as_deref(), Some("1,2"));
+        remove_property_file(&db, id, many.id, 1).await.unwrap();
+        assert_eq!(value(&db, id, many.id).await.as_deref(), Some("2"));
+        add_property_files(&db, id, &one, &[1]).await.unwrap();
+        add_property_files(&db, id, &one, &[2, 3]).await.unwrap();
+        assert_eq!(value(&db, id, one.id).await.as_deref(), Some("2"));
+        let name: String = sqlx::query_scalar(
+            "SELECT name FROM order_property_values WHERE order_id = $1 AND property_id = $2",
+        )
+        .bind(id)
+        .bind(one.id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(name, "INVOICE");
+    }
+
+    #[sqlx::test]
+    async fn update_properties_keeps_files(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let many = file_prop(&db, &f, "WAYBILL", true).await;
+        add_property_files(&db, id, &many, &[1]).await.unwrap();
+        let rows = vec![(
+            500,
+            "FIO".to_string(),
+            "ФИО".to_string(),
+            "Иван".to_string(),
+        )];
+        update_properties(&db, id, &rows, &[many.id], "")
+            .await
+            .unwrap();
+        assert_eq!(value(&db, id, many.id).await.as_deref(), Some("1"));
+        assert_eq!(value(&db, id, 500).await.as_deref(), Some("Иван"));
     }
 }

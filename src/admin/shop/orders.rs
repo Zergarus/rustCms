@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use axum::{
     Extension,
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::Form;
@@ -16,8 +16,9 @@ use sqlx::{FromRow, Postgres, QueryBuilder};
 
 use crate::{
     access::{Access, ORDERS_MANAGE},
-    admin::render,
+    admin::{read_upload_form, render},
     error::{AppError, AppResult},
+    files,
     sale::{self, OrderProperty, mail, repo, validate::validate_properties},
     state::AppState,
 };
@@ -204,6 +205,23 @@ fn order_properties<'a>(
         .collect()
 }
 
+/// Файл свойства в карточке.
+#[derive(Serialize)]
+struct PropFile {
+    id: i64,
+    url: String,
+    name: String,
+}
+
+/// Файловое свойство заказа (накладная, счёт, УПД).
+#[derive(Serialize)]
+struct FileField {
+    id: i64,
+    name: String,
+    multiple: bool,
+    files: Vec<PropFile>,
+}
+
 #[derive(Serialize)]
 struct PropField {
     code: String,
@@ -229,7 +247,41 @@ pub(crate) async fn card(
         .iter()
         .map(|v| (v.code.as_str(), v.value.as_str()))
         .collect();
-    let fields: Vec<PropField> = order_properties(&settings, &order)
+    let (file_props, text_props): (Vec<_>, Vec<_>) = order_properties(&settings, &order)
+        .into_iter()
+        .partition(|p| p.kind == "file");
+    let stored: HashMap<i64, &str> = order
+        .properties
+        .iter()
+        .map(|v| (v.property_id, v.value.as_str()))
+        .collect();
+    let ids: Vec<i64> = file_props
+        .iter()
+        .flat_map(|p| repo::file_ids(stored.get(&p.id).copied().unwrap_or("")))
+        .collect();
+    let records: HashMap<i64, files::FileRecord> = files::get_many(&state.db, &ids)
+        .await?
+        .into_iter()
+        .map(|f| (f.id, f))
+        .collect();
+    let file_fields: Vec<FileField> = file_props
+        .iter()
+        .map(|p| FileField {
+            id: p.id,
+            name: p.name.clone(),
+            multiple: p.multiple,
+            files: repo::file_ids(stored.get(&p.id).copied().unwrap_or(""))
+                .into_iter()
+                .filter_map(|id| records.get(&id))
+                .map(|f| PropFile {
+                    id: f.id,
+                    url: f.url(),
+                    name: f.original_name.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+    let fields: Vec<PropField> = text_props
         .into_iter()
         .map(|p| PropField {
             code: p.code.clone(),
@@ -254,6 +306,7 @@ pub(crate) async fn card(
         .properties
         .iter()
         .filter(|v| !fields.iter().any(|f| f.code == v.code))
+        .filter(|v| !file_fields.iter().any(|f| f.id == v.property_id))
         .collect();
     let stores: HashMap<String, String> =
         sqlx::query_as::<_, (i64, String)>("SELECT id, name FROM catalog_stores")
@@ -288,7 +341,7 @@ pub(crate) async fn card(
     render(
         state,
         "shop/order.html",
-        context! { user, order, fields, extra, stores, statuses, person_type, error, notice,
+        context! { user, order, fields, file_fields, extra, stores, statuses, person_type, error, notice,
         store_list, deliveries, pay_systems, version },
     )
 }
@@ -398,7 +451,17 @@ pub async fn save_properties(
     require_orders(&user)?;
     let order = repo::load(&state.db, id).await?.ok_or(AppError::NotFound)?;
     let settings = sale::load_settings(&state.db).await?;
-    let props = order_properties(&settings, &order);
+    // Файлы правятся отдельной формой — здесь их значения не трогаются
+    let props: Vec<_> = order_properties(&settings, &order)
+        .into_iter()
+        .filter(|p| p.kind != "file")
+        .collect();
+    let keep: Vec<i64> = settings
+        .properties
+        .iter()
+        .filter(|p| p.kind == "file")
+        .map(|p| p.id)
+        .collect();
     let input: Map<String, Value> = form
         .iter()
         .filter_map(|(k, v)| Some((k.strip_prefix("prop_")?.to_string(), Value::from(v.clone()))))
@@ -423,7 +486,82 @@ pub async fn save_properties(
         .get("manager_comment")
         .map(|s| s.trim())
         .unwrap_or_default();
-    repo::update_properties(&state.db, id, &rows, comment).await?;
+    repo::update_properties(&state.db, id, &rows, &keep, comment).await?;
+    Ok(back(id))
+}
+
+/// Файлы свойств: загрузка (`file_<id свойства>`) и удаление (`remove_<свойство>_<файл>`).
+pub async fn save_files(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+    multipart: Multipart,
+) -> AppResult<Response> {
+    require_orders(&user)?;
+    let order = repo::load(&state.db, id).await?.ok_or(AppError::NotFound)?;
+    let settings = sale::load_settings(&state.db).await?;
+    let props: Vec<&OrderProperty> = order_properties(&settings, &order)
+        .into_iter()
+        .filter(|p| p.kind == "file")
+        .collect();
+    let form = read_upload_form(&state, multipart, "sale").await?;
+    for (name, _) in &form.fields {
+        let Some((prop, file)) = name
+            .strip_prefix("remove_")
+            .and_then(|r| r.split_once('_'))
+            .and_then(|(p, f)| Some((p.parse::<i64>().ok()?, f.parse::<i64>().ok()?)))
+        else {
+            continue;
+        };
+        if props.iter().any(|p| p.id == prop) {
+            repo::remove_property_file(&state.db, id, prop, file).await?;
+        }
+    }
+    for p in &props {
+        let key = format!("file_{}", p.id);
+        let ids: Vec<i64> = form
+            .uploads
+            .iter()
+            .filter(|(name, _)| *name == key)
+            .map(|(_, f)| f.id)
+            .collect();
+        if !ids.is_empty() {
+            repo::add_property_files(&state.db, id, p, &ids).await?;
+        }
+    }
+    if !form.rejected.is_empty() {
+        return Ok(card(&state, user, id, Some(form.rejected.join("; ")), None)
+            .await?
+            .into_response());
+    }
+    Ok(back(id))
+}
+
+#[derive(Deserialize)]
+pub struct ShipmentForm {
+    #[serde(default)]
+    tracking_number: String,
+    allow_delivery: Option<String>,
+}
+
+/// Трек-номер и разрешение доставки.
+pub async fn save_shipment(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+    Form(form): Form<ShipmentForm>,
+) -> AppResult<Response> {
+    require_orders(&user)?;
+    if !repo::set_shipment(
+        &state.db,
+        id,
+        &form.tracking_number,
+        form.allow_delivery.is_some(),
+    )
+    .await?
+    {
+        return Err(AppError::NotFound);
+    }
     Ok(back(id))
 }
 

@@ -118,6 +118,35 @@
   <div class="form-actions"><button class="btn primary" type="submit">Сохранить свойства</button></div>
 </form>
 
+{% if order.shipment %}
+<form class="card form" method="post" action="/admin/shop/orders/{{ order.id }}/shipment">
+  <h2>Отгрузка</h2>
+  <div class="grid-2">
+    <label>Трек-номер<input name="tracking_number" value="{{ order.shipment.tracking_number }}"></label>
+    <label class="check"><input type="checkbox" name="allow_delivery" value="Y" {% if order.shipment.allow_delivery %}checked{% endif %}> Доставка разрешена</label>
+  </div>
+  <div class="form-actions"><button class="btn primary" type="submit">Сохранить отгрузку</button></div>
+</form>
+{% endif %}
+
+{% if file_fields %}
+<form class="card form" method="post" enctype="multipart/form-data" action="/admin/shop/orders/{{ order.id }}/files">
+  <h2>Документы</h2>
+  {% for f in file_fields %}
+  <fieldset>
+    <legend>{{ f.name }}</legend>
+    {% for file in f.files %}
+    <p><a href="{{ file.url }}" target="_blank">{{ file.name }}</a>
+      <label class="check"><input type="checkbox" name="remove_{{ f.id }}_{{ file.id }}" value="Y"> удалить</label></p>
+    {% endfor %}
+    <input type="file" name="file_{{ f.id }}" {% if f.multiple %}multiple{% endif %}>
+    {% if not f.multiple and f.files %}<span class="muted">новый файл заменит текущий</span>{% endif %}
+  </fieldset>
+  {% endfor %}
+  <div class="form-actions"><button class="btn primary" type="submit">Сохранить документы</button></div>
+</form>
+{% endif %}
+
 <div class="card table-wrap">
   <h2>История статусов</h2>
   <table>
