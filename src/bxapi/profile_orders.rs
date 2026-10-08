@@ -11,7 +11,11 @@ use crate::{files::FileRecord, sale::repo::file_ids};
 /// без кода — `prop<ID>`.
 pub(super) fn camel_key(code: &str, id: i64) -> String {
     let mut out = String::new();
-    for word in code.to_lowercase().split(['_', '.']).filter(|w| !w.is_empty()) {
+    for word in code
+        .to_lowercase()
+        .split(['_', '.'])
+        .filter(|w| !w.is_empty())
+    {
         if out.is_empty() {
             out.push_str(word);
         } else {
@@ -22,7 +26,11 @@ pub(super) fn camel_key(code: &str, id: i64) -> String {
             }
         }
     }
-    if out.is_empty() { format!("prop{id}") } else { out }
+    if out.is_empty() {
+        format!("prop{id}")
+    } else {
+        out
+    }
 }
 
 /// «1 товар», «4 товара», «11 товаров».
@@ -85,7 +93,10 @@ fn file_json(f: &FileRecord) -> Value {
 /// Значение файлового свойства как у Битрикса: объект файла (одиночное, пусто — `""`)
 /// или массив объектов (множественное). Пропавшие файлы пропускаются.
 pub(super) fn file_value(raw: &str, multiple: bool, files: &HashMap<i64, FileRecord>) -> Value {
-    let mut found = file_ids(raw).into_iter().filter_map(|id| files.get(&id)).map(file_json);
+    let mut found = file_ids(raw)
+        .into_iter()
+        .filter_map(|id| files.get(&id))
+        .map(file_json);
     if multiple {
         Value::Array(found.collect())
     } else {

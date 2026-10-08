@@ -604,7 +604,10 @@ mod tests {
         let id = place_order(&db, &f, None).await;
         assert!(set_shipment(&db, id, " 80012345 ", true).await.unwrap());
         let s = load(&db, id).await.unwrap().unwrap().shipment.unwrap();
-        assert_eq!((s.tracking_number.as_str(), s.allow_delivery), ("80012345", true));
+        assert_eq!(
+            (s.tracking_number.as_str(), s.allow_delivery),
+            ("80012345", true)
+        );
         assert!(!set_shipment(&db, id + 1000, "x", false).await.unwrap());
     }
 }
