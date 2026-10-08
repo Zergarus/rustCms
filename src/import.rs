@@ -2465,8 +2465,11 @@ async fn write_sale(tx: &mut sqlx::PgConnection, sale: &Sale) -> anyhow::Result<
     for p in &sale.pay_systems {
         sqlx::query(
             "INSERT INTO pay_systems (id, code, name, description, active, sort, api_type, group_ids)
-             VALUES ($1, $2, $3, $4, $5, $6, $7,
-                     ARRAY(SELECT id FROM groups WHERE external_id = ANY($8) ORDER BY id))
+             VALUES ($1, $2, $3, $4,
+                     -- ограничение по группам, которых нет в CMS: выключаем, а не открываем всем
+                     $5 AND (cardinality($8::text[]) = 0
+                             OR EXISTS (SELECT 1 FROM groups WHERE external_id = ANY($8))),
+                     $6, $7, ARRAY(SELECT id FROM groups WHERE external_id = ANY($8) ORDER BY id))
              ON CONFLICT (id) DO UPDATE SET code = EXCLUDED.code, name = EXCLUDED.name,
                  description = EXCLUDED.description, active = EXCLUDED.active, sort = EXCLUDED.sort,
                  api_type = EXCLUDED.api_type, group_ids = EXCLUDED.group_ids",
@@ -2597,6 +2600,38 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[sqlx::test]
+    async fn pay_system_with_unmapped_groups_is_disabled(db: PgPool) {
+        sqlx::query("INSERT INTO groups (code, name, external_id) VALUES ('cashless', 'Безнал', 'bitrix:21')")
+            .execute(&db)
+            .await
+            .unwrap();
+        let pay = |id: i64, groups: Vec<i64>| PaySystemRow {
+            id,
+            code: String::new(),
+            name: format!("Платёжка {id}"),
+            description: String::new(),
+            active: true,
+            sort: 100,
+            api_type: "other",
+            group_ids: groups,
+        };
+        let sale = Sale {
+            pay_systems: vec![pay(5, vec![21]), pay(6, vec![99]), pay(7, vec![])],
+            ..Default::default()
+        };
+        let mut conn = db.acquire().await.unwrap();
+        write_sale(&mut conn, &sale).await.unwrap();
+        let rows: Vec<(i64, bool, i32)> = sqlx::query_as(
+            "SELECT id, active, cardinality(group_ids) FROM pay_systems ORDER BY id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        // 5 — группа сопоставлена; 6 — группы нет в CMS: не открываем всем, а выключаем
+        assert_eq!(rows, vec![(5, true, 1), (6, false, 0), (7, true, 0)]);
+    }
 
     #[test]
     fn sale_block_code_by_group_name() {

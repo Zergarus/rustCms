@@ -100,6 +100,8 @@ pub struct OrderView {
 /// Заказ к записи при оформлении.
 pub struct NewOrder {
     pub user_id: Option<i64>,
+    /// Покупатель, чьи позиции корзины становятся позициями заказа.
+    pub buyer_id: i64,
     pub person_type_id: i64,
     pub status: String,
     pub currency: String,
@@ -112,8 +114,8 @@ pub struct NewOrder {
     pub delivery: (i64, String, f64, Option<i64>),
     /// (id платёжки, название)
     pub payment: (i64, String),
-    /// (id позиции корзины, цена, название)
-    pub items: Vec<(i64, f64, String)>,
+    /// (id позиции корзины, количество по снимку, цена, название)
+    pub items: Vec<(i64, f64, f64, String)>,
     /// Списание остатков.
     pub stock: Vec<StockChange>,
 }
@@ -122,8 +124,23 @@ fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
+#[derive(Debug)]
+pub enum CreateError {
+    /// Позиция уже оформлена другим запросом или изменилась после снимка.
+    BasketChanged,
+    Db(sqlx::Error),
+}
+
+impl From<sqlx::Error> for CreateError {
+    fn from(e: sqlx::Error) -> Self {
+        CreateError::Db(e)
+    }
+}
+
 /// Записывает заказ в транзакции вызывающего; позиции корзины становятся позициями заказа.
-pub async fn create(tx: &mut PgConnection, o: &NewOrder) -> sqlx::Result<i64> {
+/// Позиция должна быть ещё в корзине этого покупателя и с тем же количеством — иначе
+/// [`CreateError::BasketChanged`] (транзакцию вызывающий откатывает).
+pub async fn create(tx: &mut PgConnection, o: &NewOrder) -> Result<i64, CreateError> {
     let total = round2(o.goods_price + o.delivery_price);
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO orders (user_id, person_type_id, status, goods_price, delivery_price, price,
@@ -184,18 +201,24 @@ pub async fn create(tx: &mut PgConnection, o: &NewOrder) -> sqlx::Result<i64> {
         .bind(&o.status)
         .execute(&mut *tx)
         .await?;
-    for (item_id, price, name) in &o.items {
-        sqlx::query(
+    for (item_id, quantity, price, name) in &o.items {
+        let moved = sqlx::query(
             "UPDATE cart_items SET order_id = $2, price = $3, name = $4, currency = $5, updated_at = now()
-             WHERE id = $1 AND order_id IS NULL",
+             WHERE id = $1 AND order_id IS NULL AND buyer_id = $6 AND quantity = $7",
         )
         .bind(item_id)
         .bind(id)
         .bind(price)
         .bind(name)
         .bind(&o.currency)
+        .bind(o.buyer_id)
+        .bind(quantity)
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .rows_affected();
+        if moved != 1 {
+            return Err(CreateError::BasketChanged);
+        }
     }
     apply(tx, &o.stock).await?;
     Ok(id)
@@ -461,4 +484,66 @@ pub async fn update_properties(
         .execute(&mut *tx)
         .await?;
     tx.commit().await
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::{
+        sale::stock::{StockLine, plan},
+        test_support::{amounts, order_fixture},
+    };
+
+    fn new_order(f: &crate::test_support::Fixture, quantity: f64) -> NewOrder {
+        let lines = [StockLine {
+            element_id: f.element_id,
+            store_id: Some(1),
+            quantity,
+        }];
+        NewOrder {
+            user_id: None,
+            buyer_id: f.buyer_id,
+            person_type_id: f.person_type_id,
+            status: "N".into(),
+            currency: "RUB".into(),
+            goods_price: 100.0 * quantity,
+            delivery_price: 0.0,
+            user_comment: String::new(),
+            properties: Vec::new(),
+            delivery: (1, "Самовывоз".into(), 0.0, Some(1)),
+            payment: (1, "QR".into()),
+            items: vec![(f.item_id, quantity, 100.0, "Товар".into())],
+            stock: plan(&[], &lines, &[f.element_id].into_iter().collect()),
+        }
+    }
+
+    #[sqlx::test]
+    async fn repeated_create_with_same_items_is_rejected(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let mut tx = db.begin().await.unwrap();
+        create(&mut tx, &new_order(&f, 1.0)).await.unwrap();
+        tx.commit().await.unwrap();
+        // Второй запрос с теми же позициями (двойной клик) — позиции уже в заказе
+        let mut tx = db.begin().await.unwrap();
+        let second = create(&mut tx, &new_order(&f, 1.0)).await;
+        assert!(matches!(second, Err(CreateError::BasketChanged)));
+        drop(tx);
+        let orders: i64 = sqlx::query_scalar("SELECT count(*) FROM orders")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(orders, 1);
+        assert_eq!(amounts(&db, f.element_id).await, (9.0, 4.0));
+    }
+
+    #[sqlx::test]
+    async fn create_rejects_changed_quantity(db: PgPool) {
+        let f = order_fixture(&db).await;
+        // Количество в корзине поменяли после снимка: снимок — 2 шт., в БД — 1 шт.
+        let mut tx = db.begin().await.unwrap();
+        let result = create(&mut tx, &new_order(&f, 2.0)).await;
+        assert!(matches!(result, Err(CreateError::BasketChanged)));
+    }
 }

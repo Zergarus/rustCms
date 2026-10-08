@@ -353,6 +353,12 @@ pub async fn merge_guest_into_user(
             }
         }
     }
+    // Позиции оформленных гостем заказов переходят к покупателю-пользователю
+    sqlx::query("UPDATE cart_items SET buyer_id = $2 WHERE buyer_id = $1 AND order_id IS NOT NULL")
+        .bind(guest_id)
+        .bind(user_buyer)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM buyers WHERE id = $1")
         .bind(guest_id)
         .execute(&mut *tx)
@@ -429,6 +435,82 @@ mod tests {
                 set_store: Some(5)
             }
         );
+    }
+
+    async fn ordered_guest(db: &sqlx::PgPool) -> (crate::test_support::Fixture, i64) {
+        let f = crate::test_support::order_fixture(db).await;
+        sqlx::query("UPDATE buyers SET token_hash = $2 WHERE id = $1")
+            .bind(f.buyer_id)
+            .bind(token_hash("guest-token"))
+            .execute(db)
+            .await
+            .unwrap();
+        let order: i64 = sqlx::query_scalar(
+            "INSERT INTO orders (person_type_id, status) VALUES ($1, 'N') RETURNING id",
+        )
+        .bind(f.person_type_id)
+        .fetch_one(db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE cart_items SET order_id = $2 WHERE id = $1")
+            .bind(f.item_id)
+            .bind(order)
+            .execute(db)
+            .await
+            .unwrap();
+        let user: i64 = sqlx::query_scalar(
+            "INSERT INTO users (login, password_hash) VALUES ('buyer', 'x') RETURNING id",
+        )
+        .fetch_one(db)
+        .await
+        .unwrap();
+        (f, user)
+    }
+
+    async fn order_items(db: &sqlx::PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM cart_items WHERE order_id IS NOT NULL")
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn guest_order_items_survive_login_merge(db: sqlx::PgPool) {
+        let (_, user) = ordered_guest(&db).await;
+        merge_guest_into_user(&db, "guest-token", user)
+            .await
+            .unwrap();
+        assert_eq!(order_items(&db).await, 1);
+    }
+
+    #[sqlx::test]
+    async fn order_items_survive_user_deletion(db: sqlx::PgPool) {
+        let (f, user) = ordered_guest(&db).await;
+        sqlx::query("UPDATE buyers SET user_id = $2, token_hash = NULL WHERE id = $1")
+            .bind(f.buyer_id)
+            .bind(user)
+            .execute(&db)
+            .await
+            .unwrap();
+        // открытая позиция корзины того же покупателя — должна удалиться
+        sqlx::query("INSERT INTO cart_items (buyer_id, element_id, quantity) VALUES ($1, $2, 1)")
+            .bind(f.buyer_id)
+            .bind(f.element_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(order_items(&db).await, 1);
+        let open: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM cart_items WHERE order_id IS NULL")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(open, 0);
     }
 
     #[test]

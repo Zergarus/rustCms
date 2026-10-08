@@ -250,6 +250,7 @@ async fn product_views(
 
 /// Корзина для оформления: позиции, данные покупки, склады и снимок.
 pub(super) struct CartState {
+    pub buyer: Option<i64>,
     pub items: Vec<CartItem>,
     pub info: HashMap<i64, PurchaseInfo>,
     pub stores: Vec<StoreInfo>,
@@ -284,6 +285,7 @@ async fn cart_state_for(state: &AppState, buyer: Option<i64>) -> Result<CartStat
     };
     let snapshot = build_snapshot(&items, &info, &views, &stores, &snapshot_config);
     Ok(CartState {
+        buyer,
         items,
         info,
         stores,

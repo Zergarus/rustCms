@@ -1,7 +1,7 @@
 //! Покупатель-гость: контакты из свойств заказа, поиск или создание пользователя
 //! (как provisioner модуля bxapi).
 
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use super::OrderProperty;
 use crate::auth::hash_password;
@@ -46,14 +46,40 @@ pub fn guest_contacts(props: &[&OrderProperty], values: &[(i64, String)]) -> Gue
     c
 }
 
+/// Пользователь гостя: найденный по email/телефону или новый. Поиск и создание — под
+/// блокировкой по контакту, чтобы параллельные оформления не завели двух пользователей.
+pub async fn find_or_create(
+    db: &PgPool,
+    c: &GuestContacts,
+    group_ids: &[i64],
+) -> anyhow::Result<i64> {
+    let key = if c.email.is_empty() {
+        phone_digits(&c.phone)
+    } else {
+        c.email.clone()
+    };
+    anyhow::ensure!(!key.is_empty(), "нет email и телефона покупателя");
+    let mut tx = db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(format!("guest-user:{key}"))
+        .execute(&mut *tx)
+        .await?;
+    let id = match find_user(&mut tx, c).await? {
+        Some(id) => id,
+        None => create_user(&mut tx, c, group_ids).await?,
+    };
+    tx.commit().await?;
+    Ok(id)
+}
+
 /// Пользователь по email, затем по телефону (сравниваются только цифры).
-pub async fn find_user(db: &PgPool, c: &GuestContacts) -> sqlx::Result<Option<i64>> {
+async fn find_user(db: &mut PgConnection, c: &GuestContacts) -> sqlx::Result<Option<i64>> {
     if !c.email.is_empty()
         && let Some(id) = sqlx::query_scalar(
             "SELECT id FROM users WHERE lower(trim(email)) = $1 ORDER BY active DESC, id LIMIT 1",
         )
         .bind(&c.email)
-        .fetch_optional(db)
+        .fetch_optional(&mut *db)
         .await?
     {
         return Ok(Some(id));
@@ -67,12 +93,16 @@ pub async fn find_user(db: &PgPool, c: &GuestContacts) -> sqlx::Result<Option<i6
          ORDER BY active DESC, id LIMIT 1",
     )
     .bind(digits)
-    .fetch_optional(db)
+    .fetch_optional(&mut *db)
     .await
 }
 
 /// Новый пользователь для гостя: логин — email (занят — `email_2`…), случайный пароль.
-pub async fn create_user(db: &PgPool, c: &GuestContacts, group_ids: &[i64]) -> anyhow::Result<i64> {
+async fn create_user(
+    tx: &mut PgConnection,
+    c: &GuestContacts,
+    group_ids: &[i64],
+) -> anyhow::Result<i64> {
     let base = if c.email.is_empty() {
         phone_digits(&c.phone)
     } else {
@@ -81,7 +111,6 @@ pub async fn create_user(db: &PgPool, c: &GuestContacts, group_ids: &[i64]) -> a
     anyhow::ensure!(!base.is_empty(), "нет email и телефона покупателя");
     let password = hex::encode(rand::random::<[u8; 12]>());
     let hash = hash_password(password).await?;
-    let mut tx = db.begin().await?;
     let mut login = base.clone();
     let mut n = 1;
     while sqlx::query_scalar::<_, i64>("SELECT id FROM users WHERE login = $1")
@@ -112,7 +141,6 @@ pub async fn create_user(db: &PgPool, c: &GuestContacts, group_ids: &[i64]) -> a
     .bind(group_ids)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
     Ok(id)
 }
 
@@ -143,6 +171,24 @@ mod tests {
             sort: 0,
             active: true,
         }
+    }
+
+    #[sqlx::test]
+    async fn concurrent_guests_share_one_user(db: sqlx::PgPool) {
+        let c = || GuestContacts {
+            email: "race@example.test".into(),
+            phone: "+79990000000".into(),
+            full_name: "Гость".into(),
+        };
+        let (c1, c2) = (c(), c());
+        let (a, b) = tokio::join!(find_or_create(&db, &c1, &[]), find_or_create(&db, &c2, &[]));
+        assert_eq!(a.unwrap(), b.unwrap());
+        let users: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM users WHERE email = 'race@example.test'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(users, 1);
     }
 
     #[test]

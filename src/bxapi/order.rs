@@ -249,6 +249,9 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
 
     // 5. Состав
     let ids = picked.map_err(fail)?;
+    let cart_buyer = cart
+        .buyer
+        .ok_or_else(|| fail(SubmitError::new("empty_basket", "Корзина пуста")))?;
     let snapshot_items = basket["items"].as_array().cloned().unwrap_or_default();
     let mut order_items = Vec::new();
     let mut lines = Vec::new();
@@ -261,7 +264,7 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         let price = snap["price"].as_f64().unwrap_or(0.0);
         let name = snap["name"].as_str().unwrap_or(&item.name).to_string();
         goods += price * item.quantity;
-        order_items.push((item.id, price, name));
+        order_items.push((item.id, item.quantity, price, name));
         lines.push(StockLine {
             element_id: item.element_id,
             store_id: item.store_id,
@@ -288,15 +291,12 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
                 "user_provision_failed",
                 "Не удалось найти или создать пользователя",
             );
-            match guest::find_user(&state.db, &contacts).await? {
-                Some(id) => id,
-                None => guest::create_user(&state.db, &contacts, &cfg.guest_group_ids)
-                    .await
-                    .map_err(|e| {
-                        tracing::warn!(error = %e, "оформление: пользователь гостя не создан");
-                        fail(provision)
-                    })?,
-            }
+            guest::find_or_create(&state.db, &contacts, &cfg.guest_group_ids)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "оформление: пользователь гостя не найден и не создан");
+                    fail(provision)
+                })?
         }
     };
 
@@ -323,6 +323,7 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         .collect();
     let new_order = NewOrder {
         user_id: Some(buyer),
+        buyer_id: cart_buyer,
         person_type_id: person_type,
         status,
         currency: currency(&basket),
@@ -347,7 +348,11 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
     };
     let order_id = match repo::create(&mut tx, &new_order).await {
         Ok(id) => id,
-        Err(e) => {
+        Err(repo::CreateError::BasketChanged) => {
+            tx.rollback().await?;
+            return Err(fail(SubmitError::basket_changed()));
+        }
+        Err(repo::CreateError::Db(e)) => {
             tracing::error!(error = ?e, "оформление: заказ не записан");
             return Err(fail(SubmitError::new(
                 "order_write_exception",

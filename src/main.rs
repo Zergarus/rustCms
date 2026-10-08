@@ -15,6 +15,8 @@ mod mail;
 mod passwords;
 mod sale;
 mod state;
+#[cfg(test)]
+mod test_support;
 mod uploads;
 mod users;
 

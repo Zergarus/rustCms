@@ -142,6 +142,35 @@ pub fn stock_changes_for_edit(
     }
 }
 
+/// Что проверять по остаткам при правке: только товары на складах, где количество
+/// выросло (нетронутые позиции, в том числе удалённых из каталога товаров, не проверяются).
+pub fn lines_to_check(before: &[StockLine], after: &[StockLine]) -> Vec<StockLine> {
+    let sum = |lines: &[StockLine]| {
+        let mut out: std::collections::BTreeMap<(i64, Option<i64>), f64> = Default::default();
+        for l in lines {
+            *out.entry((l.element_id, l.store_id)).or_insert(0.0) += l.quantity;
+        }
+        out
+    };
+    let was = sum(before);
+    let mut out: Vec<StockLine> = sum(after)
+        .into_iter()
+        .filter(|(key, q)| *q > was.get(key).copied().unwrap_or(0.0) + 1e-9)
+        .map(|((element_id, store_id), quantity)| StockLine {
+            element_id,
+            store_id,
+            quantity,
+        })
+        .collect();
+    // В порядке позиций формы
+    out.sort_by_key(|l| {
+        after
+            .iter()
+            .position(|a| a.element_id == l.element_id && a.store_id == l.store_id)
+    });
+    out
+}
+
 pub fn version(updated_at: &DateTime<Utc>) -> String {
     updated_at.to_rfc3339_opts(SecondsFormat::Micros, true)
 }
@@ -158,11 +187,12 @@ pub async fn save_composition(
         .fetch_optional(db)
         .await?
         .ok_or(AppError::NotFound)?;
-    let existing_buyer: Option<i64> =
-        sqlx::query_scalar("SELECT buyer_id FROM cart_items WHERE order_id = $1 LIMIT 1")
-            .bind(order_id)
-            .fetch_optional(db)
-            .await?;
+    let existing_buyer: Option<i64> = sqlx::query_scalar(
+        "SELECT buyer_id FROM cart_items WHERE order_id = $1 AND buyer_id IS NOT NULL LIMIT 1",
+    )
+    .bind(order_id)
+    .fetch_optional(db)
+    .await?;
     let buyer = match (existing_buyer, user) {
         (Some(b), _) => b,
         (None, Some(u)) => ensure_buyer(db, &Owner::User(u)).await?,
@@ -234,7 +264,7 @@ pub async fn save_composition(
                 }
             }
         }
-        if let Err(message) = stock::check(&after, &info) {
+        if let Err(message) = stock::check(&lines_to_check(&before, &after), &info) {
             return Ok(Err(message));
         }
     }
@@ -464,6 +494,23 @@ mod tests {
             parse_composition(&form(&empty), &current()).unwrap_err(),
             "В заказе должна остаться хотя бы одна позиция"
         );
+    }
+
+    #[test]
+    fn only_increases_are_checked() {
+        let l = |e: i64, s: Option<i64>, q: f64| StockLine {
+            element_id: e,
+            store_id: s,
+            quantity: q,
+        };
+        let before = [l(1, Some(5), 2.0), l(9, None, 1.0)];
+        // товар 9 (удалён из каталога) не тронут, товар 1: 2 → 3 и новый склад для товара 2
+        let after = [l(1, Some(5), 3.0), l(9, None, 1.0), l(2, Some(6), 1.0)];
+        assert_eq!(
+            lines_to_check(&before, &after),
+            vec![l(1, Some(5), 3.0), l(2, Some(6), 1.0)]
+        );
+        assert!(lines_to_check(&after, &before).is_empty());
     }
 
     #[test]
