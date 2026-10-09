@@ -12,6 +12,7 @@
 //! Записи о файлах, которых нет на диске, всё равно переносятся — их можно докачать.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     path::PathBuf,
     time::Instant,
@@ -153,6 +154,10 @@ struct Data {
     mail_templates: Vec<MailTemplateRow>,
     options: Vec<(String, String, String)>,
     sale: Sale,
+    /// Связи из `b_catalog_iblock`: (инфоблок предложений, инфоблок товаров, свойство связи).
+    sku_links: Vec<(i64, i64, i64)>,
+    /// Признаки свойств `b_iblock_property_feature`: (свойство, `IN_BASKET` | `OFFER_TREE`).
+    property_features: Vec<(i64, String)>,
 }
 
 /// Настройки оформления заказа (модуль `sale`).
@@ -249,6 +254,10 @@ struct ProductRow {
     available: bool,
     quantity_trace: Option<bool>,
     can_buy_zero: Option<bool>,
+    /// Тип товара: 1 простой, 3 с предложениями, 4 предложение, 6 с предложениями без предложений.
+    product_type: i16,
+    /// Вес в граммах.
+    weight: f64,
 }
 
 /// Склад как в `b_catalog_store`.
@@ -1714,7 +1723,8 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
     for row in sqlx::query(
         "SELECT CAST(ID AS SIGNED), CAST(IFNULL(QUANTITY, 0) AS CHAR),
                 CAST(IFNULL(AVAILABLE, 'Y') AS CHAR), CAST(IFNULL(QUANTITY_TRACE, 'D') AS CHAR),
-                CAST(IFNULL(CAN_BUY_ZERO, 'D') AS CHAR)
+                CAST(IFNULL(CAN_BUY_ZERO, 'D') AS CHAR), CAST(IFNULL(TYPE, 1) AS SIGNED),
+                CAST(IFNULL(WEIGHT, 0) AS CHAR)
          FROM b_catalog_product",
     )
     .fetch_all(my)
@@ -1728,7 +1738,46 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
                 available: str_col(&row, 2) != "N",
                 quantity_trace: bitrix_flag(&str_col(&row, 3)),
                 can_buy_zero: bitrix_flag(&str_col(&row, 4)),
+                product_type: catalog_type(int_col(&row, 5).unwrap_or(1)),
+                weight: str_col(&row, 6).parse().unwrap_or(0.0),
             });
+        }
+    }
+
+    // Торговые предложения: инфоблок предложений → инфоблок товаров и свойство связи
+    let iblocks: HashSet<i64> = data.iblocks.iter().map(|i| i.id).collect();
+    let fields: HashSet<i64> = data.properties.iter().map(|p| p.id).collect();
+    for row in sqlx::query(
+        "SELECT CAST(IBLOCK_ID AS SIGNED), CAST(PRODUCT_IBLOCK_ID AS SIGNED),
+                CAST(SKU_PROPERTY_ID AS SIGNED)
+         FROM b_catalog_iblock WHERE PRODUCT_IBLOCK_ID > 0 AND SKU_PROPERTY_ID > 0",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        let (Some(offers), Some(product), Some(link)) =
+            (int_col(&row, 0), int_col(&row, 1), int_col(&row, 2))
+        else {
+            continue;
+        };
+        if iblocks.contains(&offers) && iblocks.contains(&product) && fields.contains(&link) {
+            data.sku_links.push((offers, product, link));
+        }
+    }
+    // Признаки свойств есть только в новых Битрикс; в старых таблицы нет
+    if mysql_table_exists(my, "b_iblock_property_feature").await? {
+        for row in sqlx::query(
+            "SELECT CAST(PROPERTY_ID AS SIGNED), CAST(FEATURE_ID AS CHAR)
+             FROM b_iblock_property_feature
+             WHERE MODULE_ID = 'catalog' AND FEATURE_ID IN ('IN_BASKET', 'OFFER_TREE')
+               AND IS_ENABLED = 'Y'",
+        )
+        .fetch_all(my)
+        .await?
+        {
+            if let Some(id) = int_col(&row, 0).filter(|id| fields.contains(id)) {
+                data.property_features.push((id, str_col(&row, 1)));
+            }
         }
     }
 
@@ -1873,6 +1922,25 @@ fn bitrix_flag(raw: &str) -> Option<bool> {
     }
 }
 
+/// Тип товара Битрикса в наш: 1, 3, 4, 6 как есть; остальные (2 набор, 5 свободное
+/// предложение) — простой товар.
+fn catalog_type(bitrix: i64) -> i16 {
+    match bitrix {
+        3 | 4 | 6 => bitrix as i16,
+        _ => 1,
+    }
+}
+
+/// Id родительского товара из значения поля связи (число, строка или первый элемент массива).
+fn link_target(value: &Value) -> Option<i64> {
+    match value {
+        Value::Array(items) => items.first().and_then(link_target),
+        Value::Number(n) => n.as_i64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
 /// Жёсткие ссылки (или копии) файлов Битрикса в наше хранилище.
 /// Возвращает (перенесено, нет в исходном каталоге).
 fn link_files(data: &Data, opts: &Options) -> anyhow::Result<(usize, usize)> {
@@ -2013,6 +2081,20 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
     write_locations(&mut *tx, &data.locations).await?;
     write_mail(&mut *tx, data).await?;
     let empty = Map::new();
+    // Поле связи коллекции предложений: значение уходит в `product_id`, в JSONB не хранится
+    let link_codes: HashMap<i64, &str> = data
+        .sku_links
+        .iter()
+        .filter_map(|(offers, _, field)| {
+            let code = data
+                .properties
+                .iter()
+                .find(|p| p.id == *field)?
+                .code
+                .as_str();
+            Some((*offers, code))
+        })
+        .collect();
     for chunk in data.elements.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
             "INSERT INTO collection_items
@@ -2034,7 +2116,14 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
                 .push_bind(e.preview_picture_id)
                 .push_bind(e.detail_picture_id)
                 .push_bind(e.published_at)
-                .push_bind(sqlx::types::Json(props.get(&e.id).unwrap_or(&empty)))
+                .push_bind(sqlx::types::Json(match link_codes.get(&e.collection_id) {
+                    Some(code) => {
+                        let mut values = props.get(&e.id).unwrap_or(&empty).clone();
+                        values.remove(*code);
+                        Cow::Owned(values)
+                    }
+                    None => Cow::Borrowed(props.get(&e.id).unwrap_or(&empty)),
+                }))
                 .push_bind(e.created_at)
                 .push_bind(e.updated_at)
                 .push_bind(e.created_by.and_then(|id| users.get(&id).copied()));
@@ -2043,6 +2132,7 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
     }
 
     write_catalog(&mut *tx, &data.catalog).await?;
+    write_sku(&mut *tx, data, props).await?;
     write_sale(&mut *tx, &data.sale).await?;
 
     // Последовательности — после максимальных перенесённых id
@@ -2503,6 +2593,65 @@ async fn write_sale(tx: &mut sqlx::PgConnection, sale: &Sale) -> anyhow::Result<
     Ok(())
 }
 
+/// Торговые предложения: связь коллекций, `product_id` предложений (родительский товар),
+/// флаги полей. Вызывается после записей и каталога; триггеры пересчитывают тип родителей.
+async fn write_sku(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> anyhow::Result<()> {
+    for (offers, product, field) in &data.sku_links {
+        sqlx::query(
+            "UPDATE collections SET product_collection_id = $2, sku_field_id = $3
+             WHERE id = $1 AND EXISTS (SELECT 1 FROM collections WHERE id = $2)
+               AND EXISTS (SELECT 1 FROM collection_fields WHERE id = $3)",
+        )
+        .bind(offers)
+        .bind(product)
+        .bind(field)
+        .execute(&mut *tx)
+        .await?;
+        let Some(code) = data
+            .properties
+            .iter()
+            .find(|p| p.id == *field)
+            .map(|p| &p.code)
+        else {
+            continue;
+        };
+        for e in data.elements.iter().filter(|e| e.collection_id == *offers) {
+            let Some(parent) = props
+                .get(&e.id)
+                .and_then(|v| v.get(code))
+                .and_then(link_target)
+            else {
+                continue;
+            };
+            // Родитель должен быть записью коллекции товаров, иначе предложение остаётся без связи
+            sqlx::query(
+                "UPDATE collection_items SET product_id = $2
+                 WHERE id = $1 AND EXISTS (
+                     SELECT 1 FROM collection_items WHERE id = $2 AND collection_id = $3)",
+            )
+            .bind(e.id)
+            .bind(parent)
+            .bind(product)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    for (field, feature) in &data.property_features {
+        let column = match feature.as_str() {
+            "IN_BASKET" => "in_basket",
+            "OFFER_TREE" => "offer_tree",
+            _ => continue,
+        };
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE collection_fields SET {column} = TRUE WHERE id = $1"
+        )))
+        .bind(field)
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(())
+}
+
 /// Справочники каталога (типы цен, склады, валюты) принадлежат переносу целиком
 /// и перезаписываются; цены и остатки ушли вместе с элементами (каскад).
 async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Result<()> {
@@ -2578,14 +2727,17 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
     }
     for chunk in c.products.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO catalog_products (item_id, quantity, available, quantity_trace, can_buy_zero) ",
+            "INSERT INTO catalog_products
+                (item_id, quantity, available, quantity_trace, can_buy_zero, type, weight) ",
         );
         qb.push_values(chunk, |mut b, p| {
             b.push_bind(p.item_id)
                 .push_bind(p.quantity)
                 .push_bind(p.available)
                 .push_bind(p.quantity_trace)
-                .push_bind(p.can_buy_zero);
+                .push_bind(p.can_buy_zero)
+                .push_bind(p.product_type)
+                .push_bind(p.weight);
         });
         qb.build().execute(&mut *tx).await?;
     }
@@ -2706,6 +2858,152 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(values, serde_json::json!({"color": 9}));
+    }
+
+    fn sku_iblock(id: i64, code: &str) -> IblockRow {
+        IblockRow {
+            id,
+            api_enabled: true,
+            code: code.into(),
+            name: code.into(),
+            description: String::new(),
+            sort: 500,
+            detail_page_url: String::new(),
+            section_page_url: String::new(),
+            list_page_url: String::new(),
+            is_catalog: true,
+        }
+    }
+
+    fn sku_property(id: i64, collection_id: i64, code: &str, kind: &'static str) -> PropertyRow {
+        PropertyRow {
+            id,
+            collection_id,
+            code: code.into(),
+            name: code.into(),
+            kind,
+            multiple: false,
+            is_required: false,
+            sort: 500,
+            link_collection_id: (kind == "element").then_some(1),
+            directory: false,
+            user_type: String::new(),
+        }
+    }
+
+    fn sku_element(id: i64, collection_id: i64, raw: HashMap<i64, Vec<String>>) -> ElementRow {
+        let now = Utc::now();
+        ElementRow {
+            id,
+            collection_id,
+            section_id: None,
+            code: format!("e{id}"),
+            xml_id: String::new(),
+            name: format!("Элемент {id}"),
+            active: true,
+            sort: 500,
+            preview_text: String::new(),
+            detail_text: String::new(),
+            preview_picture_id: None,
+            detail_picture_id: None,
+            published_at: None,
+            created_by: None,
+            raw,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Торговые предложения: связь коллекций, `product_id`, флаги полей, тип и вес.
+    #[sqlx::test]
+    async fn import_sku(db: PgPool) {
+        let product = |item_id, product_type, weight| ProductRow {
+            item_id,
+            quantity: 5.0,
+            available: true,
+            quantity_trace: None,
+            can_buy_zero: None,
+            product_type,
+            weight,
+        };
+        let mut data = Data {
+            iblocks: vec![sku_iblock(1, "goods"), sku_iblock(2, "offers")],
+            properties: vec![
+                sku_property(10, 2, "cml2_link", "element"),
+                sku_property(11, 2, "volume", "string"),
+            ],
+            elements: vec![
+                sku_element(100, 1, HashMap::new()),
+                sku_element(
+                    200,
+                    2,
+                    HashMap::from([(10, vec!["100".to_string()]), (11, vec!["1 л".to_string()])]),
+                ),
+            ],
+            sku_links: vec![(2, 1, 10)],
+            property_features: vec![
+                (11, "IN_BASKET".to_string()),
+                (11, "OFFER_TREE".to_string()),
+            ],
+            ..Default::default()
+        };
+        data.catalog.products = vec![product(100, 3, 0.0), product(200, 4, 900.0)];
+
+        for round in 0..2 {
+            let props = resolve_properties(&mut data);
+            let mut tx = db.begin().await.unwrap();
+            if round == 1 {
+                // Повторный перенос идёт с --replace
+                sqlx::query("DELETE FROM collections")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+            }
+            write_all(&mut tx, &data, &props).await.unwrap();
+            tx.commit().await.unwrap();
+
+            let link: (Option<i64>, Option<i64>) = sqlx::query_as(
+                "SELECT product_collection_id, sku_field_id FROM collections WHERE id = 2",
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            assert_eq!(link, (Some(1), Some(10)), "round {round}");
+            let offer: (Option<i64>, Value) = sqlx::query_as(
+                "SELECT product_id, field_values FROM collection_items WHERE id = 200",
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            assert_eq!(offer.0, Some(100), "round {round}");
+            assert_eq!(
+                offer.1,
+                serde_json::json!({"volume": "1 л"}),
+                "round {round}"
+            );
+            let flags: Vec<(i64, bool, bool)> = sqlx::query_as(
+                "SELECT id, in_basket, offer_tree FROM collection_fields ORDER BY id",
+            )
+            .fetch_all(&db)
+            .await
+            .unwrap();
+            assert_eq!(
+                flags,
+                vec![(10, false, false), (11, true, true)],
+                "round {round}"
+            );
+            let products: Vec<(i64, i16, f64)> = sqlx::query_as(
+                "SELECT item_id, type, weight::float8 FROM catalog_products ORDER BY item_id",
+            )
+            .fetch_all(&db)
+            .await
+            .unwrap();
+            assert_eq!(
+                products,
+                vec![(100, 3, 0.0), (200, 4, 900.0)],
+                "round {round}"
+            );
+        }
     }
 
     #[sqlx::test]
