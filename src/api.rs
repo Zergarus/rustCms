@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 use sqlx::{FromRow, Postgres, QueryBuilder, types::Json as SqlJson};
 
 use crate::{
-    collection::{Collection, is_valid_code, repo},
+    collection::{Collection, is_valid_code, repo, sku},
     error::{AppError, AppResult},
     state::AppState,
 };
@@ -63,6 +63,24 @@ struct ApiElement {
     properties: SqlJson<Map<String, Value>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    /// Только у предложения: родительский товар.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    product_id: Option<i64>,
+    /// Только у записей коллекций с каталогом: тип товара.
+    #[sqlx(rename = "catalog_type")]
+    #[serde(
+        rename = "catalog",
+        serialize_with = "serialize_catalog",
+        skip_serializing_if = "Option::is_none"
+    )]
+    catalog: Option<i16>,
+}
+
+fn serialize_catalog<S: serde::Serializer>(
+    value: &Option<i16>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    json!({ "type": value }).serialize(serializer)
 }
 
 #[derive(Serialize)]
@@ -176,10 +194,12 @@ async fn list_items(
     push_where(&mut count_qb);
     let (total,): (i64,) = count_qb.build_query_as().fetch_one(&state.db).await?;
 
-    let mut qb = QueryBuilder::new(
-        "SELECT id, code, name, sort, preview_text, detail_text, published_at, field_values AS properties, \
-         created_at, updated_at",
-    );
+    let mut qb = QueryBuilder::new(format!(
+        "SELECT id, code, name, sort, preview_text, detail_text, published_at, {} AS properties, \
+         created_at, updated_at, product_id, {} AS catalog_type",
+        sku::field_values_sql("collection_items"),
+        catalog_type_sql(&iblock),
+    ));
     push_where(&mut qb);
     qb.push(" ORDER BY ")
         .push(order_by)
@@ -203,19 +223,31 @@ async fn get_item(
     Path((iblock_code, element_code)): Path<(String, String)>,
 ) -> AppResult<Json<ApiElement>> {
     let iblock = public_iblock(&state, &iblock_code).await?;
-    let element: ApiElement = sqlx::query_as(
-        "SELECT id, code, name, sort, preview_text, detail_text, published_at, field_values AS properties,
-                created_at, updated_at
+    let element: ApiElement = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT id, code, name, sort, preview_text, detail_text, published_at, {} AS properties,
+                created_at, updated_at, product_id, {} AS catalog_type
          FROM collection_items
          WHERE collection_id = $1 AND code = $2 AND active
            AND (published_at IS NULL OR published_at <= now())",
-    )
+        sku::field_values_sql("collection_items"),
+        catalog_type_sql(&iblock),
+    )))
     .bind(iblock.id)
     .bind(&element_code)
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
     Ok(Json(element))
+}
+
+/// Тип товара записи (`catalog_products.type`) у коллекций с каталогом, иначе `NULL`.
+fn catalog_type_sql(collection: &Collection) -> &'static str {
+    if collection.is_catalog {
+        "COALESCE((SELECT cp.type FROM catalog_products cp WHERE cp.item_id = collection_items.id),
+                  CASE WHEN collection_items.product_id IS NULL THEN 1 ELSE 4 END)::smallint"
+    } else {
+        "NULL::smallint"
+    }
 }
 
 fn parse_positive(raw: Option<&String>, default: i64) -> i64 {

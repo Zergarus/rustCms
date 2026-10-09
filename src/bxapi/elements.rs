@@ -124,7 +124,8 @@ pub fn build_list_query(
     let counter = Cell::new(0);
     let ctx = Ctx::root(snap, schema, &state.project, &counter);
     let mut qb = QueryBuilder::new(format!(
-        "SELECT {ROW_COLS} FROM collection_items e WHERE e.collection_id = "
+        "SELECT {} FROM collection_items e WHERE e.collection_id = ",
+        *ROW_COLS
     ));
     qb.push_bind(schema.collection.id).push(" AND ");
     push_filter(&mut qb, &ctx, &req.filter)?;
@@ -161,7 +162,10 @@ pub async fn detail(
     let (snap, schema) = schema_for(state, api_code).await?;
     let select = Select::parse(body.get("select"), &state.project, &schema.collection.code);
     let resize = image_resize(body.get("imageResize"));
-    let sql = format!("SELECT {ROW_COLS} FROM collection_items e WHERE e.collection_id = $1 AND ");
+    let sql = format!(
+        "SELECT {} FROM collection_items e WHERE e.collection_id = $1 AND ",
+        *ROW_COLS
+    );
     let row: Option<Row> = match key {
         Key::Id(id) => {
             sqlx::query_as(sqlx::AssertSqlSafe(format!("{sql} e.id = $2")))

@@ -16,7 +16,7 @@ use crate::{
     catalog::{self, PurchaseInput},
     collection::{
         Collection, Field, FieldOption, Item, ItemInput, Section, fields, is_valid_slug, repo,
-        section_tree, slugify,
+        section_tree, sku, slugify,
     },
     error::{AppError, AppResult, is_unique_violation},
     files::{self, FileRecord},
@@ -176,6 +176,7 @@ fn build_input(
         detail_picture_id,
         published_at,
         field_values: values,
+        product_id: None,
     })
 }
 
@@ -673,7 +674,10 @@ async fn save(
         Err(e) => Err(format!("{e}; {}", upload.rejected.join("; "))),
     };
     let error = match result {
-        Ok(input) => {
+        Ok(mut input) => {
+            // Связь предложения с товаром хранится в колонке, а не в field_values
+            input.product_id =
+                sku::take_link(&ctx.collection, &ctx.properties, &mut input.field_values);
             let saved = match item_id {
                 Some(id) => repo::update_item(&state.db, id, &input).await.map(|_| id),
                 None => repo::create_item(&state.db, ctx.collection.id, &input).await,

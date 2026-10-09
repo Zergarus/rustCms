@@ -29,9 +29,15 @@ use crate::{
 };
 
 /// Колонки строки элемента; алиас таблицы — `e`.
-pub const ROW_COLS: &str = "e.id, e.collection_id, e.section_id, e.code, e.xml_id, e.name, e.active, \
-     e.sort, e.preview_text, e.detail_text, e.preview_picture_id, e.detail_picture_id, \
-     e.published_at, e.created_at, e.updated_at, e.created_by, e.field_values AS properties";
+/// `properties` включает связь предложения с товаром (см. `sku::field_values_sql`).
+pub static ROW_COLS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "e.id, e.collection_id, e.section_id, e.code, e.xml_id, e.name, e.active, \
+         e.sort, e.preview_text, e.detail_text, e.preview_picture_id, e.detail_picture_id, \
+         e.published_at, e.created_at, e.updated_at, e.created_by, {} AS properties",
+        crate::collection::sku::field_values_sql("e")
+    )
+});
 
 #[derive(Debug, Clone, FromRow)]
 pub struct Row {
@@ -108,7 +114,8 @@ pub async fn load_rows(state: &AppState, ids: &[i64]) -> Result<Vec<Row>, BxErro
         return Ok(Vec::new());
     }
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {ROW_COLS} FROM collection_items e WHERE e.id = ANY($1)"
+        "SELECT {} FROM collection_items e WHERE e.id = ANY($1)",
+        *ROW_COLS
     )))
     .bind(ids)
     .fetch_all(&state.db)

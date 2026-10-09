@@ -13,9 +13,15 @@ const COLLECTION_COLS: &str = "id, code, name, description, api_enabled, sort, d
 const PROPERTY_COLS: &str = "id, collection_id, code, name, kind, is_required, sort, multiple, link_collection_id, user_type, in_basket, offer_tree";
 const SECTION_COLS: &str = "id, collection_id, parent_id, code, xml_id, name, active, sort, depth_level, \
      description, picture_id, created_at, updated_at";
-const ELEMENT_COLS: &str = "id, collection_id, section_id, code, xml_id, name, active, sort, \
-     preview_text, detail_text, preview_picture_id, detail_picture_id, published_at, field_values, product_id, \
-     created_at, updated_at";
+/// Колонки записи; `field_values` дополнен ключом связи предложения с товаром.
+fn element_cols() -> String {
+    format!(
+        "id, collection_id, section_id, code, xml_id, name, active, sort, \
+         preview_text, detail_text, preview_picture_id, detail_picture_id, published_at, \
+         {} AS field_values, product_id, created_at, updated_at",
+        super::sku::field_values_sql("collection_items")
+    )
+}
 
 pub async fn list_collections(db: &PgPool) -> sqlx::Result<Vec<CollectionSummary>> {
     sqlx::query_as(
@@ -401,8 +407,9 @@ pub async fn list_items(
 ) -> sqlx::Result<(Vec<Item>, i64)> {
     const WHERE: &str = "WHERE collection_id = $1 AND ($2::bigint IS NULL
                           OR ($2 = 0 AND section_id IS NULL) OR section_id = $2)";
+    let cols = element_cols();
     let items = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {ELEMENT_COLS} FROM collection_items {WHERE}
+        "SELECT {cols} FROM collection_items {WHERE}
          ORDER BY sort, id DESC LIMIT $3 OFFSET $4"
     )))
     .bind(collection_id)
@@ -422,8 +429,9 @@ pub async fn list_items(
 }
 
 pub async fn get_item(db: &PgPool, id: i64) -> sqlx::Result<Option<Item>> {
+    let cols = element_cols();
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {ELEMENT_COLS} FROM collection_items WHERE id = $1"
+        "SELECT {cols} FROM collection_items WHERE id = $1"
     )))
     .bind(id)
     .fetch_optional(db)
@@ -454,8 +462,8 @@ pub async fn create_item(db: &PgPool, collection_id: i64, input: &ItemInput) -> 
     let (id,): (i64,) = sqlx::query_as(
         "INSERT INTO collection_items
             (collection_id, section_id, code, xml_id, name, active, sort, preview_text, detail_text,
-             preview_picture_id, detail_picture_id, published_at, field_values)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id",
+             preview_picture_id, detail_picture_id, published_at, field_values, product_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id",
     )
     .bind(collection_id)
     .bind(input.section_id)
@@ -470,6 +478,7 @@ pub async fn create_item(db: &PgPool, collection_id: i64, input: &ItemInput) -> 
     .bind(input.detail_picture_id)
     .bind(input.published_at)
     .bind(Json(&input.field_values))
+    .bind(input.product_id)
     .fetch_one(db)
     .await?;
     Ok(id)
@@ -480,7 +489,7 @@ pub async fn update_item(db: &PgPool, id: i64, input: &ItemInput) -> sqlx::Resul
         "UPDATE collection_items SET section_id = $2, code = $3, xml_id = $4, name = $5,
                 active = $6, sort = $7, preview_text = $8, detail_text = $9,
                 preview_picture_id = $10, detail_picture_id = $11, published_at = $12,
-                field_values = $13, updated_at = now()
+                field_values = $13, product_id = $14, updated_at = now()
          WHERE id = $1",
     )
     .bind(id)
@@ -496,6 +505,7 @@ pub async fn update_item(db: &PgPool, id: i64, input: &ItemInput) -> sqlx::Resul
     .bind(input.detail_picture_id)
     .bind(input.published_at)
     .bind(Json(&input.field_values))
+    .bind(input.product_id)
     .execute(db)
     .await?;
     Ok(())
@@ -508,4 +518,148 @@ pub async fn delete_item(db: &PgPool, id: i64) -> sqlx::Result<Option<i64>> {
             .fetch_optional(db)
             .await?;
     Ok(row.map(|(collection_id,)| collection_id))
+}
+
+// ---------------------------------------------------------------------------
+// Торговые предложения
+// ---------------------------------------------------------------------------
+
+/// Создаёт поле связи в коллекции предложений (если его ещё нет) и записывает его
+/// в `sku_field_id`; привязывает коллекцию к товарам. Всё в переданной транзакции.
+#[allow(dead_code)] // подключается в админке (следующая задача SKU)
+async fn ensure_link(
+    tx: &mut sqlx::PgConnection,
+    product_id: i64,
+    offers_id: i64,
+) -> sqlx::Result<()> {
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM collection_fields WHERE collection_id = $1 AND code = $2",
+    )
+    .bind(offers_id)
+    .bind(super::sku::LINK_CODE)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let field_id = match existing {
+        Some(id) => id,
+        None => {
+            sqlx::query_scalar(
+                "INSERT INTO collection_fields
+                    (collection_id, code, name, kind, is_required, sort, link_collection_id)
+                 VALUES ($1, $2, 'Товар', 'element', TRUE, 100, $3) RETURNING id",
+            )
+            .bind(offers_id)
+            .bind(super::sku::LINK_CODE)
+            .bind(product_id)
+            .fetch_one(&mut *tx)
+            .await?
+        }
+    };
+    sqlx::query(
+        "UPDATE collection_fields SET kind = 'element', link_collection_id = $2 WHERE id = $1",
+    )
+    .bind(field_id)
+    .bind(product_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE collections SET product_collection_id = $2, sku_field_id = $3, updated_at = now()
+         WHERE id = $1",
+    )
+    .bind(offers_id)
+    .bind(product_id)
+    .bind(field_id)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// Создаёт коллекцию предложений для коллекции товаров `product`: код `<код>_offers`,
+/// название «<название> — предложения», каталог, поле связи и сама связь — в одной транзакции.
+#[allow(dead_code)] // подключается в админке (следующая задача SKU)
+pub async fn create_offer_collection(
+    db: &PgPool,
+    product: &Collection,
+) -> sqlx::Result<Collection> {
+    let mut tx = db.begin().await?;
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO collections (code, name, api_enabled, sort, is_catalog)
+         VALUES ($1, $2, $3, $4, TRUE) RETURNING id",
+    )
+    .bind(format!("{}_offers", product.code))
+    .bind(format!("{} — предложения", product.name))
+    .bind(product.api_enabled)
+    .bind(product.sort)
+    .fetch_one(&mut *tx)
+    .await?;
+    ensure_link(&mut tx, product.id, id).await?;
+    let created = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLLECTION_COLS} FROM collections WHERE id = $1"
+    )))
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(created)
+}
+
+/// Делает `offers_id` коллекцией предложений коллекции товаров `product_id`
+/// (id коллекций, не записей); поле связи создаётся, если его нет.
+#[allow(dead_code)] // подключается в админке (следующая задача SKU)
+pub async fn link_offers(db: &PgPool, product_id: i64, offers_id: i64) -> sqlx::Result<()> {
+    let mut tx = db.begin().await?;
+    ensure_link(&mut tx, product_id, offers_id).await?;
+    tx.commit().await
+}
+
+#[allow(dead_code)] // подключается в админке (следующая задача SKU)
+#[derive(Debug)]
+pub enum UnlinkError {
+    /// В коллекции предложений есть записи (их число).
+    HasOffers(i64),
+    Db(sqlx::Error),
+}
+
+impl From<sqlx::Error> for UnlinkError {
+    fn from(e: sqlx::Error) -> Self {
+        Self::Db(e)
+    }
+}
+
+/// Снимает связь: у коллекции предложений коллекции товаров `product_id` (id коллекции)
+/// очищается привязка, поле связи удаляется. Только если в ней нет записей.
+#[allow(dead_code)] // подключается в админке (следующая задача SKU)
+pub async fn unlink_offers(db: &PgPool, product_id: i64) -> Result<(), UnlinkError> {
+    let mut tx = db.begin().await?;
+    let offers: Option<(i64, Option<i64>)> = sqlx::query_as(
+        "SELECT id, sku_field_id FROM collections WHERE product_collection_id = $1 FOR UPDATE",
+    )
+    .bind(product_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((offers_id, field_id)) = offers else {
+        return Ok(());
+    };
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM collection_items WHERE collection_id = $1")
+            .bind(offers_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if count > 0 {
+        return Err(UnlinkError::HasOffers(count));
+    }
+    sqlx::query(
+        "UPDATE collections SET product_collection_id = NULL, sku_field_id = NULL, updated_at = now()
+         WHERE id = $1",
+    )
+    .bind(offers_id)
+    .execute(&mut *tx)
+    .await?;
+    if let Some(field_id) = field_id {
+        sqlx::query("DELETE FROM collection_fields WHERE id = $1")
+            .bind(field_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }

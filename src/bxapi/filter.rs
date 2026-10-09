@@ -571,7 +571,16 @@ fn push_exists(
     qb.push(if negative { "NOT EXISTS (" } else { "EXISTS (" });
     qb.push(format!(
         "SELECT 1 FROM jsonb_array_elements({}) AS {v}(x) WHERE ",
-        prop_values_sql(&ctx.alias, &prop.code)
+        if ctx.schema.collection.sku_field_id == Some(prop.id) {
+            // Связь предложения с товаром хранится в колонке, не в field_values
+            format!(
+                "(CASE WHEN {a}.product_id IS NULL THEN '[]'::jsonb \
+                 ELSE jsonb_build_array({a}.product_id) END)",
+                a = ctx.alias
+            )
+        } else {
+            prop_values_sql(&ctx.alias, &prop.code)
+        }
     ));
     cond(qb, &format!("{v}.x"))?;
     qb.push(")");

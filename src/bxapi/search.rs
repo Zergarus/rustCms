@@ -161,7 +161,8 @@ async fn find(
 
     let mut qb: QueryBuilder<Postgres> = {
         let mut qb = QueryBuilder::new(format!(
-            "SELECT {ROW_COLS} FROM collection_items e WHERE e.collection_id = "
+            "SELECT {} FROM collection_items e WHERE e.collection_id = ",
+            *ROW_COLS
         ));
         qb.push_bind(schema.collection.id).push(" AND e.active");
         let mut haystack = String::from("e.name");

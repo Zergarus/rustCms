@@ -605,3 +605,82 @@ fn no_broken_russian_in_ui() {
         }
     }
 }
+
+/// Каталог с товаром и предложением через `create_offer_collection`.
+async fn sku_fixture(db: &PgPool) -> (i64, i64) {
+    let products: i64 = sqlx::query_scalar(
+        "INSERT INTO collections (code, name, is_catalog) VALUES ('catalog', 'Каталог', TRUE) RETURNING id",
+    )
+    .fetch_one(db)
+    .await
+    .unwrap();
+    let product: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_items (collection_id, code, name) VALUES ($1, 'tovar', 'Товар') RETURNING id",
+    )
+    .bind(products)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    let parent = crate::collection::repo::get_collection(db, products)
+        .await
+        .unwrap()
+        .unwrap();
+    let offers = crate::collection::repo::create_offer_collection(db, &parent)
+        .await
+        .unwrap();
+    let offer: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_items (collection_id, code, name, product_id)
+         VALUES ($1, 'offer', 'Предложение', $2) RETURNING id",
+    )
+    .bind(offers.id)
+    .bind(product)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    (product, offer)
+}
+
+#[sqlx::test]
+async fn bxapi_filters_and_selects_cml2link(db: PgPool) {
+    let (product, offer) = sku_fixture(&db).await;
+    let app = app(&db);
+    let (status, body) = post_json(
+        &app,
+        "/api/v1/iblock/catalog_offers/element/list",
+        json!({"select": ["id", "cml2Link.element.name"],
+               "filter": {"cml2Link.element.id": [product]}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({"status": "success", "data": {"items": [{
+            "id": offer, "cml2Link": "Товар", "stocks": [], "name": "Предложение",
+            "code": "offer", "active": true, "sort": 500, "dateCreate": body["data"]["items"][0]["dateCreate"],
+            "previewText": "", "detailText": "", "iblockSectionId": 0,
+        }]}, "errors": []})
+    );
+    let (_, none) = post_json(
+        &app,
+        "/api/v1/iblock/catalog_offers/element/list",
+        json!({"select": ["id"], "filter": {"cml2Link.element.id": [product + 1000]}}),
+    )
+    .await;
+    assert_eq!(none["data"]["items"], json!([]));
+}
+
+#[sqlx::test]
+async fn own_api_shows_product_link(db: PgPool) {
+    let (product, offer) = sku_fixture(&db).await;
+    let app = app(&db);
+    let offers = get_json(&app, "/api/v1/iblocks/catalog_offers/elements").await;
+    let first = &offers["items"][0];
+    assert_eq!(first["id"], json!(offer));
+    assert_eq!(first["product_id"], json!(product));
+    assert_eq!(first["catalog"], json!({"type": 4}));
+    assert_eq!(first["properties"]["cml2_link"], json!(product));
+    let products = get_json(&app, "/api/v1/iblocks/catalog/elements").await;
+    let first = &products["items"][0];
+    assert!(first.get("product_id").is_none());
+    assert_eq!(first["catalog"], json!({"type": 3}));
+}

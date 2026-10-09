@@ -159,6 +159,8 @@ pub struct ItemInput {
     pub detail_picture_id: Option<i64>,
     pub published_at: Option<DateTime<Utc>>,
     pub field_values: Map<String, Value>,
+    /// Для предложения: родительский товар (не путать с `product_id` позиции корзины).
+    pub product_id: Option<i64>,
 }
 
 /// Упорядочивает разделы деревом: родитель, затем его потомки (для списков и
