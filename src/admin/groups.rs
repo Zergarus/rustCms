@@ -1,4 +1,4 @@
-//! Раздел «Группы»: права на разделы и доступ к инфоблокам. Только для суперадминистраторов —
+//! Раздел «Группы»: права на разделы и доступ к коллекциям. Только для суперадминистраторов —
 //! иначе пользователь с правом управления мог бы выдать себе любые права.
 
 use std::collections::HashMap;
@@ -14,14 +14,14 @@ use serde::Serialize;
 use super::{parse_sort, render};
 use crate::{
     access::{Access, Level, PERMISSIONS, is_known_permission},
-    collection::{is_valid_code, repo as iblock_repo},
+    collection::{is_valid_code, repo as collection_repo},
     error::{AppError, AppResult, is_unique_violation},
     groups::{self, GroupInput},
     state::AppState,
 };
 
 /// Поля формы: code, name, description, sort, `permission` (повторяется),
-/// `iblock_<id>` = none | read | write.
+/// `collection_<id>` = none | read | write.
 type FormFields = Vec<(String, String)>;
 
 #[derive(Default, Serialize)]
@@ -53,7 +53,7 @@ fn parse_form(fields: &FormFields) -> (GroupFormView, Result<GroupInput, String>
             }
             key => {
                 if let Some(id) = key
-                    .strip_prefix("iblock_")
+                    .strip_prefix("collection_")
                     .and_then(|s| s.parse::<i64>().ok())
                 {
                     let level = Level::from_db(value);
@@ -94,7 +94,7 @@ async fn render_form(
     form: GroupFormView,
     error: Option<String>,
 ) -> AppResult<Html<String>> {
-    let iblocks = iblock_repo::list_collections(&state.db).await?;
+    let collections = collection_repo::list_collections(&state.db).await?;
     let members = match group_id {
         Some(id) => groups::members(&state.db, id).await?,
         None => Vec::new(),
@@ -107,7 +107,7 @@ async fn render_form(
             group_id,
             form,
             error,
-            iblocks,
+            collections,
             members,
             all_permissions => Value::from_serialize(PERMISSIONS),
         },
@@ -231,9 +231,9 @@ mod tests {
             ("permission", "admin.access"),
             ("permission", "users.manage"),
             ("permission", "bogus.perm"),
-            ("iblock_1", "write"),
-            ("iblock_2", "none"),
-            ("iblock_x", "read"),
+            ("collection_1", "write"),
+            ("collection_2", "none"),
+            ("collection_x", "read"),
         ]));
         let input = input.unwrap();
         assert_eq!(input.permissions, vec!["admin.access", "users.manage"]);

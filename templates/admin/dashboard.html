@@ -4,13 +4,13 @@
 {% block content %}
 <h1>Рабочий стол</h1>
 <div class="stats">
-  <a class="card stat" href="/admin/iblocks">
-    <span class="stat-value">{{ stats.iblocks }}</span>
-    <span class="stat-label">инфоблоков</span>
+  <a class="card stat" href="/admin/collections">
+    <span class="stat-value">{{ stats.collections }}</span>
+    <span class="stat-label">коллекций</span>
   </a>
   <div class="card stat">
     <span class="stat-value">{{ stats.elements }}</span>
-    <span class="stat-label">элементов</span>
+    <span class="stat-label">записей</span>
   </div>
   <a class="card stat" href="/admin/users">
     <span class="stat-value">{{ stats.users }}</span>
@@ -20,10 +20,10 @@
 
 <section class="card">
   <h2>Публичный API</h2>
-  <p class="muted">Фронтенд получает контент через JSON API. Доступны только инфоблоки с включённой галочкой «Доступен в API».</p>
+  <p class="muted">Фронтенд получает контент через JSON API. Доступны только коллекции с включённой галочкой «Доступен в API».</p>
   <ul class="api-list">
-    <li><code>GET /api/v1/iblocks</code> — список инфоблоков</li>
-    <li><code>GET /api/v1/iblocks/{code}</code> — инфоблок и схема свойств</li>
+    <li><code>GET /api/v1/iblocks</code> — список коллекций</li>
+    <li><code>GET /api/v1/iblocks/{code}</code> — коллекция и схема полей</li>
     <li><code>GET /api/v1/iblocks/{code}/elements?page=1&amp;per_page=20&amp;sort=-published_at&amp;prop.color=red</code></li>
     <li><code>GET /api/v1/iblocks/{code}/elements/{element_code}</code></li>
   </ul>

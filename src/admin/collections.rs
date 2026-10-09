@@ -76,12 +76,12 @@ impl FieldForm {
         let name = self.name.trim();
         let code = self.code.trim();
         if name.is_empty() {
-            return Err("Укажите название свойства".into());
+            return Err("Укажите название поля".into());
         }
         if !is_valid_code(code) {
-            return Err("Код свойства: только латиница в нижнем регистре, цифры, «_» и «-»".into());
+            return Err("Код поля: только латиница в нижнем регистре, цифры, «_» и «-»".into());
         }
-        let kind = fields::kind(&self.kind).ok_or("Неизвестный тип свойства")?;
+        let kind = fields::kind(&self.kind).ok_or("Неизвестный тип поля")?;
         let multiple = self.multiple.is_some();
         if multiple && !kind.multiple {
             return Err(format!("Тип «{}» не может быть множественным", kind.name));
@@ -89,7 +89,7 @@ impl FieldForm {
         let link_collection_id = match self.link_collection_id.trim() {
             "" => None,
             _ if kind.code != "element" => None,
-            raw => Some(raw.parse().map_err(|_| "Неверный инфоблок привязки")?),
+            raw => Some(raw.parse().map_err(|_| "Неверная коллекция привязки")?),
         };
         Ok(FieldInput {
             code: code.to_string(),
@@ -113,7 +113,11 @@ pub async fn list(
         .filter(|s| user.collection_level(s.collection.id) >= Level::Read)
         .collect();
     let can_manage = user.can(COLLECTIONS_MANAGE);
-    render(&state, "iblocks.html", context! { user, items, can_manage })
+    render(
+        &state,
+        "collections.html",
+        context! { user, items, can_manage },
+    )
 }
 
 pub async fn new_form(
@@ -126,7 +130,7 @@ pub async fn new_form(
         sort: "500".into(),
         ..Default::default()
     };
-    render(&state, "iblock_form.html", context! { user, form })
+    render(&state, "collection_form.html", context! { user, form })
 }
 
 pub async fn create(
@@ -137,18 +141,25 @@ pub async fn create(
     user.require(COLLECTIONS_MANAGE)?;
     let error = match form.validate() {
         Ok(input) => match repo::create_collection(&state.db, &input).await {
-            Ok(iblock) => {
-                return Ok(Redirect::to(&format!("/admin/iblocks/{}", iblock.id)).into_response());
+            Ok(collection) => {
+                return Ok(
+                    Redirect::to(&format!("/admin/collections/{}", collection.id)).into_response(),
+                );
             }
-            Err(e) if is_unique_violation(&e) => "Инфоблок с таким кодом уже существует".into(),
+            Err(e) if is_unique_violation(&e) => "Коллекция с таким кодом уже существует".into(),
             Err(e) => return Err(e.into()),
         },
         Err(msg) => msg,
     };
-    Ok(render(&state, "iblock_form.html", context! { user, form, error })?.into_response())
+    Ok(render(
+        &state,
+        "collection_form.html",
+        context! { user, form, error },
+    )?
+    .into_response())
 }
 
-/// Страница редактирования инфоблока вместе со списком свойств.
+/// Страница редактирования коллекции вместе со списком полей.
 async fn render_edit(
     state: &AppState,
     user: Access,
@@ -158,30 +169,30 @@ async fn render_edit(
     prop_form: FieldForm,
     prop_error: Option<String>,
 ) -> AppResult<Html<String>> {
-    let iblock = repo::get_collection(&state.db, id)
+    let collection = repo::get_collection(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
     let properties = repo::list_fields(&state.db, id).await?;
     let form = form.unwrap_or_else(|| CollectionForm {
-        code: iblock.code.clone(),
-        name: iblock.name.clone(),
-        description: iblock.description.clone(),
-        api_enabled: iblock.api_enabled.then(|| "on".into()),
-        is_catalog: iblock.is_catalog.then(|| "on".into()),
-        sort: iblock.sort.to_string(),
+        code: collection.code.clone(),
+        name: collection.name.clone(),
+        description: collection.description.clone(),
+        api_enabled: collection.api_enabled.then(|| "on".into()),
+        is_catalog: collection.is_catalog.then(|| "on".into()),
+        sort: collection.sort.to_string(),
     });
     render(
         state,
-        "iblock_form.html",
+        "collection_form.html",
         context! {
             user,
-            iblock,
+            collection,
             form,
             error,
             properties,
             prop_form,
             prop_error,
-            iblocks => repo::list_collections(&state.db).await?,
+            collections => repo::list_collections(&state.db).await?,
             kinds => Value::from_serialize(fields::KINDS),
         },
     )
@@ -214,10 +225,10 @@ pub async fn update(
     let error = match form.validate() {
         Ok(input) => match repo::update_collection(&state.db, id, &input).await {
             Ok(true) => {
-                return Ok(Redirect::to(&format!("/admin/iblocks/{id}")).into_response());
+                return Ok(Redirect::to(&format!("/admin/collections/{id}")).into_response());
             }
             Ok(false) => return Err(AppError::NotFound),
-            Err(e) if is_unique_violation(&e) => "Инфоблок с таким кодом уже существует".into(),
+            Err(e) if is_unique_violation(&e) => "Коллекция с таким кодом уже существует".into(),
             Err(e) => return Err(e.into()),
         },
         Err(msg) => msg,
@@ -241,10 +252,10 @@ pub async fn delete(
 ) -> AppResult<Redirect> {
     user.require(COLLECTIONS_MANAGE)?;
     repo::delete_collection(&state.db, id).await?;
-    Ok(Redirect::to("/admin/iblocks"))
+    Ok(Redirect::to("/admin/collections"))
 }
 
-pub async fn add_property(
+pub async fn add_field(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
@@ -255,10 +266,10 @@ pub async fn add_property(
         Ok(input) => match repo::create_field(&state.db, id, &input).await {
             // У списка сразу переходим к вариантам значений
             Ok(prop_id) if input.kind == "list" => {
-                return Ok(Redirect::to(&format!("/admin/properties/{prop_id}")).into_response());
+                return Ok(Redirect::to(&format!("/admin/fields/{prop_id}")).into_response());
             }
-            Ok(_) => return Ok(Redirect::to(&format!("/admin/iblocks/{id}")).into_response()),
-            Err(e) if is_unique_violation(&e) => "Свойство с таким кодом уже есть".into(),
+            Ok(_) => return Ok(Redirect::to(&format!("/admin/collections/{id}")).into_response()),
+            Err(e) if is_unique_violation(&e) => "Поле с таким кодом уже есть".into(),
             Err(e) => return Err(e.into()),
         },
         Err(msg) => msg,
@@ -276,10 +287,10 @@ pub async fn delete_field(
     let collection_id = repo::delete_field(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    Ok(Redirect::to(&format!("/admin/iblocks/{collection_id}")))
+    Ok(Redirect::to(&format!("/admin/collections/{collection_id}")))
 }
 
-/// Страница свойства: основные настройки и (для списка) варианты значений.
+/// Страница полейа: основные настройки и (для списка) варианты.
 async fn render_property(
     state: &AppState,
     user: Access,
@@ -288,7 +299,7 @@ async fn render_property(
     error: Option<String>,
     enum_error: Option<String>,
 ) -> AppResult<Html<String>> {
-    let iblock = repo::get_collection(&state.db, property.collection_id)
+    let collection = repo::get_collection(&state.db, property.collection_id)
         .await?
         .ok_or(AppError::NotFound)?;
     let form = form.unwrap_or_else(|| FieldForm {
@@ -307,11 +318,11 @@ async fn render_property(
     let kind = fields::kind(&property.kind).map(|k| k.name);
     render(
         state,
-        "property_form.html",
+        "field_form.html",
         context! {
-            user, iblock, property, form, error, enums, enum_error, kind,
+            user, collection, property, form, error, enums, enum_error, kind,
             new_rows => NEW_ENUM_ROWS,
-            iblocks => repo::list_collections(&state.db).await?,
+            collections => repo::list_collections(&state.db).await?,
         },
     )
 }
@@ -326,7 +337,7 @@ async fn load_property(state: &AppState, user: &Access, id: i64) -> AppResult<Fi
         .ok_or(AppError::NotFound)
 }
 
-pub async fn property_form(
+pub async fn field_form(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
@@ -335,7 +346,7 @@ pub async fn property_form(
     render_property(&state, user, property, None, None, None).await
 }
 
-/// Код и тип свойства не меняются: от них зависят уже сохранённые значения.
+/// Код и тип полейа не меняются: от них зависят уже сохранённые значения.
 pub async fn update_field(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
@@ -349,7 +360,7 @@ pub async fn update_field(
     let error = match form.validate() {
         Ok(input) => {
             repo::update_field(&state.db, id, &input).await?;
-            let url = format!("/admin/iblocks/{}", property.collection_id);
+            let url = format!("/admin/collections/{}", property.collection_id);
             return Ok(Redirect::to(&url).into_response());
         }
         Err(msg) => msg,
@@ -433,14 +444,14 @@ pub async fn save_options(
 ) -> AppResult<Response> {
     let property = load_property(&state, &user, id).await?;
     if property.kind != "list" {
-        return Err(AppError::BadRequest("свойство не является списком".into()));
+        return Err(AppError::BadRequest("поле не является списком".into()));
     }
     let existing = repo::list_options(&state.db, id).await?;
     let error = match parse_enums(&fields, &existing) {
         Ok((items, delete)) => {
             match repo::save_options(&state.db, &property, &items, &delete).await {
                 Ok(()) => {
-                    return Ok(Redirect::to(&format!("/admin/properties/{id}")).into_response());
+                    return Ok(Redirect::to(&format!("/admin/fields/{id}")).into_response());
                 }
                 Err(e) if is_unique_violation(&e) => {
                     "XML_ID вариантов должны быть уникальны".into()

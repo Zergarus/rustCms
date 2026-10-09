@@ -1,4 +1,4 @@
-//! Запросы к БД для инфоблоков, разделов, свойств и элементов.
+//! Запросы к БД для коллекций, разделов, полей и записей.
 
 use sqlx::{PgPool, types::Json};
 
@@ -91,7 +91,7 @@ pub async fn delete_collection(db: &PgPool, id: i64) -> sqlx::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Свойства
+// Поля
 // ---------------------------------------------------------------------------
 
 pub async fn list_fields(db: &PgPool, collection_id: i64) -> sqlx::Result<Vec<Field>> {
@@ -136,7 +136,7 @@ pub async fn create_field(
 }
 
 /// Меняет только то, что не ломает уже сохранённые значения:
-/// название, сортировку, обязательность и инфоблок привязки.
+/// название, сортировку, обязательность и коллекцию привязки.
 pub async fn update_field(db: &PgPool, id: i64, input: &FieldInput) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE collection_fields SET name = $2, is_required = $3, sort = $4, link_collection_id = $5
@@ -152,8 +152,8 @@ pub async fn update_field(db: &PgPool, id: i64, input: &FieldInput) -> sqlx::Res
     Ok(())
 }
 
-/// Удаляет свойство и возвращает id инфоблока, к которому оно относилось.
-/// Значения свойства у элементов тоже вычищаются.
+/// Удаляет полейо и возвращает id коллекции, к которому оно относилось.
+/// Значения полейа у записей тоже вычищаются.
 pub async fn delete_field(db: &PgPool, id: i64) -> sqlx::Result<Option<i64>> {
     let mut tx = db.begin().await?;
     let row: Option<(i64, String)> =
@@ -174,7 +174,7 @@ pub async fn delete_field(db: &PgPool, id: i64) -> sqlx::Result<Option<i64>> {
     Ok(row.map(|(collection_id, _)| collection_id))
 }
 
-/// Варианты всех свойств-списков инфоблока.
+/// Варианты всех полей-списков коллекции.
 pub async fn list_collection_options(
     db: &PgPool,
     collection_id: i64,
@@ -212,7 +212,7 @@ pub struct OptionInput {
 }
 
 /// Сохраняет набор вариантов списка: обновляет существующие, добавляет новые,
-/// удаляет перечисленные в `delete` и вычищает их из значений элементов.
+/// удаляет перечисленные в `delete` и вычищает их из значений записей.
 pub async fn save_options(
     db: &PgPool,
     property: &Field,
@@ -263,7 +263,7 @@ pub async fn save_options(
     tx.commit().await
 }
 
-/// Убирает id из значения свойства у всех элементов инфоблока
+/// Убирает id из значения полейа у всех записей коллекции
 /// (одиночное значение становится null, из массива id вычёркиваются).
 async fn remove_prop_ids(
     tx: &mut sqlx::PgConnection,
@@ -375,7 +375,7 @@ pub async fn update_section(db: &PgPool, id: i64, input: &SectionInput) -> sqlx:
     tx.commit().await
 }
 
-/// Удаляет раздел вместе с подразделами; элементы остаются без раздела.
+/// Удаляет раздел вместе с подразделами; записи остаются без раздела.
 pub async fn delete_section(db: &PgPool, id: i64) -> sqlx::Result<Option<i64>> {
     let row: Option<(i64,)> =
         sqlx::query_as("DELETE FROM collection_sections WHERE id = $1 RETURNING collection_id")
@@ -386,11 +386,11 @@ pub async fn delete_section(db: &PgPool, id: i64) -> sqlx::Result<Option<i64>> {
 }
 
 // ---------------------------------------------------------------------------
-// Элементы
+// Записи
 // ---------------------------------------------------------------------------
 
-/// Список элементов для админки. `section_id` — только элементы этого раздела
-/// (без подразделов), `Some(0)` — элементы без раздела.
+/// Список записей для админки. `section_id` — только записи этого раздела
+/// (без подразделов), `Some(0)` — записи без раздела.
 pub async fn list_items(
     db: &PgPool,
     collection_id: i64,
@@ -429,8 +429,8 @@ pub async fn get_item(db: &PgPool, id: i64) -> sqlx::Result<Option<Item>> {
     .await
 }
 
-/// Названия элементов по id (для подписей у привязок). `collection_id` — если задан,
-/// учитываются только элементы этого инфоблока.
+/// Названия записей по id (для подписей у привязок). `collection_id` — если задан,
+/// учитываются только записи этого коллекции.
 pub async fn item_names(
     db: &PgPool,
     ids: &[i64],

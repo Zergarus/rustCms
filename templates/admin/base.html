@@ -2,7 +2,7 @@
 <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
   {%- if name == "dashboard" -%}
     <rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>
-  {%- elif name == "iblocks" -%}
+  {%- elif name == "collections" -%}
     <path d="M12 3 2.5 8 12 13l9.5-5L12 3Z"/><path d="m2.5 12.5 9.5 5 9.5-5"/><path d="m2.5 17 9.5 5 9.5-5"/>
   {%- elif name == "users" -%}
     <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
@@ -32,7 +32,7 @@
       show — видит ли пункт текущий пользователь (сервер всё равно проверяет права сам) -#}
   {% set menu = [
     {"id": "dashboard", "url": "/admin", "label": "Рабочий стол", "show": true},
-    {"id": "iblocks", "url": "/admin/iblocks", "label": "Инфоблоки", "show": user.can_see_collections},
+    {"id": "collections", "url": "/admin/collections", "label": "Коллекции", "show": user.can_see_collections},
     {"id": "shop", "url": "/admin/shop/orders" if "orders.manage" in user.permissions else "/admin/shop/stores", "label": "Магазин", "show": "shop.manage" in user.permissions or "orders.manage" in user.permissions},
     {"id": "users", "url": "/admin/users", "label": "Пользователи", "show": "users.manage" in user.permissions},
     {"id": "groups", "url": "/admin/groups", "label": "Группы", "show": user.is_admin},

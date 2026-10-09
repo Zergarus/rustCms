@@ -1,16 +1,16 @@
 {% extends "base.html" %}
-{% set section = "iblocks" %}
+{% set section = "collections" %}
 {% block title %}{% if section_id %}{{ form.name }}{% else %}Новый раздел{% endif %}{% endblock %}
 {% block content %}
-{% set back = "/admin/iblocks/" ~ iblock.id ~ "/elements" ~ ("?section=" ~ form.parent_id if form.parent_id else "") %}
+{% set back = "/admin/collections/" ~ collection.id ~ "/items" ~ ("?section=" ~ form.parent_id if form.parent_id else "") %}
 <div class="breadcrumbs">
-  <a href="/admin/iblocks">Инфоблоки</a> /
-  <a href="/admin/iblocks/{{ iblock.id }}/elements">{{ iblock.name }}</a> /
+  <a href="/admin/collections">Коллекции</a> /
+  <a href="/admin/collections/{{ collection.id }}/items">{{ collection.name }}</a> /
 </div>
 <h1>{% if section_id %}{{ form.name }}{% else %}Новый раздел{% endif %}</h1>
 
 <form class="card form" method="post" enctype="multipart/form-data"
-      action="{% if section_id %}/admin/sections/{{ section_id }}{% else %}/admin/iblocks/{{ iblock.id }}/sections{% endif %}">
+      action="{% if section_id %}/admin/sections/{{ section_id }}{% else %}/admin/collections/{{ collection.id }}/sections{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}
   <div class="grid-2">
     <label>Название *
@@ -64,7 +64,7 @@
 {% if section_id %}
 <section class="card danger-zone">
   <h2>Удаление</h2>
-  <p class="muted">Раздел будет удалён вместе с подразделами. Элементы останутся в инфоблоке без раздела.</p>
+  <p class="muted">Раздел будет удалён вместе с подразделами. Записи останутся в коллекции без раздела.</p>
   <form method="post" action="/admin/sections/{{ section_id }}/delete"
         hx-confirm="Удалить раздел «{{ form.name }}» вместе с подразделами?">
     <button class="btn danger" type="submit">Удалить раздел</button>

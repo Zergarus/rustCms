@@ -1,14 +1,14 @@
 {% extends "base.html" %}
-{% set section = "iblocks" %}
-{% block title %}{{ property.name }} — {{ iblock.name }}{% endblock %}
+{% set section = "collections" %}
+{% block title %}{{ property.name }} — {{ collection.name }}{% endblock %}
 {% block content %}
 <div class="breadcrumbs">
-  <a href="/admin/iblocks">Инфоблоки</a> /
-  <a href="/admin/iblocks/{{ iblock.id }}">{{ iblock.name }}</a> /
+  <a href="/admin/collections">Коллекции</a> /
+  <a href="/admin/collections/{{ collection.id }}">{{ collection.name }}</a> /
 </div>
 <h1>{{ property.name }}</h1>
 
-<form class="card form" method="post" action="/admin/properties/{{ property.id }}">
+<form class="card form" method="post" action="/admin/fields/{{ property.id }}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}
   <p class="muted">
     Код <code>{{ property.code }}</code>, тип «{{ kind }}»{% if property.multiple %}, множественное{% endif %}.
@@ -20,10 +20,10 @@
     <label class="check"><input type="checkbox" name="is_required" {% if form.is_required %}checked{% endif %}> Обязательное</label>
   </div>
   {% if property.kind == "element" %}
-  <label>Инфоблок привязки
+  <label>Коллекция привязки
     <select name="link_collection_id">
       <option value="">— любой —</option>
-      {% for i in iblocks %}
+      {% for i in collections %}
       <option value="{{ i.id }}" {% if form.link_collection_id == i.id|string %}selected{% endif %}>{{ i.name }}</option>
       {% endfor %}
     </select>
@@ -31,15 +31,15 @@
   {% endif %}
   <div class="form-actions">
     <button class="btn primary" type="submit">Сохранить</button>
-    <a class="btn" href="/admin/iblocks/{{ iblock.id }}">Отмена</a>
+    <a class="btn" href="/admin/collections/{{ collection.id }}">Отмена</a>
   </div>
 </form>
 
 {% if property.kind == "list" %}
 <section class="card">
-  <h2>Варианты значений</h2>
-  <p class="muted">В элементе хранится id варианта. XML_ID — стабильный код для фильтров API; пустой создастся из значения.</p>
-  <form class="form" method="post" action="/admin/properties/{{ property.id }}/enums">
+  <h2>Варианты</h2>
+  <p class="muted">В записи хранится id варианта. XML_ID — стабильный код для фильтров API; пустой создастся из значения.</p>
+  <form class="form" method="post" action="/admin/fields/{{ property.id }}/options">
     {% if enum_error %}<div class="alert">{{ enum_error }}</div>{% endif %}
     <div class="table-wrap">
       <table>

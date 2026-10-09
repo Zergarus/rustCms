@@ -1,14 +1,14 @@
 {% extends "base.html" %}
-{% set section = "iblocks" %}
-{% block title %}{% if iblock %}{{ iblock.name }}{% else %}Новый инфоблок{% endif %}{% endblock %}
+{% set section = "collections" %}
+{% block title %}{% if collection %}{{ collection.name }}{% else %}Новая коллекция{% endif %}{% endblock %}
 {% block content %}
-<div class="breadcrumbs"><a href="/admin/iblocks">Инфоблоки</a> /</div>
+<div class="breadcrumbs"><a href="/admin/collections">Коллекции</a> /</div>
 <div class="page-head">
-  <h1>{% if iblock %}{{ iblock.name }}{% else %}Новый инфоблок{% endif %}</h1>
-  {% if iblock %}<a class="btn" href="/admin/iblocks/{{ iblock.id }}/elements">Элементы →</a>{% endif %}
+  <h1>{% if collection %}{{ collection.name }}{% else %}Новая коллекция{% endif %}</h1>
+  {% if collection %}<a class="btn" href="/admin/collections/{{ collection.id }}/items">Записи →</a>{% endif %}
 </div>
 
-<form class="card form" method="post" action="{% if iblock %}/admin/iblocks/{{ iblock.id }}{% else %}/admin/iblocks{% endif %}">
+<form class="card form" method="post" action="{% if collection %}/admin/collections/{{ collection.id }}{% else %}/admin/collections{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}
   <div class="grid-2">
     <label>Название *
@@ -16,7 +16,7 @@
     </label>
     <label>Символьный код *
       <input name="code" value="{{ form.code }}" pattern="[a-z0-9_\-]+" placeholder="news" required>
-      <small>Используется в URL API: <code>/api/v1/iblocks/код</code></small>
+      <small>Используется в URL API: <code>/api/v1/collections/код</code></small>
     </label>
   </div>
   <label>Описание
@@ -32,19 +32,19 @@
     </label>
     <label class="check">
       <input type="checkbox" name="is_catalog" {% if form.is_catalog %}checked{% endif %}>
-      Торговый каталог — у элементов цены, остатки, покупка
+      Торговый каталог — у записей цены, остатки, покупка
     </label>
   </div>
   <div class="form-actions">
     <button class="btn primary" type="submit">Сохранить</button>
-    <a class="btn" href="/admin/iblocks">Отмена</a>
+    <a class="btn" href="/admin/collections">Отмена</a>
   </div>
 </form>
 
-{% if iblock %}
+{% if collection %}
 <section class="card">
-  <h2>Свойства</h2>
-  <p class="muted">Дополнительные поля элементов. Значения попадают в API в объект <code>properties</code>.</p>
+  <h2>Поля</h2>
+  <p class="muted">Дополнительные поля записей. Значения попадают в API в объект <code>properties</code>.</p>
   {% if properties %}
   <div class="table-wrap">
     <table>
@@ -52,18 +52,18 @@
       <tbody>
         {% for p in properties %}
         <tr>
-          <td><a href="/admin/properties/{{ p.id }}">{{ p.name }}</a></td>
+          <td><a href="/admin/fields/{{ p.id }}">{{ p.name }}</a></td>
           <td><code>{{ p.code }}</code></td>
           <td>
             {% for k in kinds %}{% if k.code == p.kind %}{{ k.name }}{% endif %}{% endfor %}
-            {% if p.link_collection_id %}{% for i in iblocks %}{% if i.id == p.link_collection_id %}<span class="muted">→ {{ i.name }}</span>{% endif %}{% endfor %}{% endif %}
+            {% if p.link_collection_id %}{% for i in collections %}{% if i.id == p.link_collection_id %}<span class="muted">→ {{ i.name }}</span>{% endif %}{% endfor %}{% endif %}
           </td>
           <td>{% if p.multiple %}да{% endif %}</td>
           <td>{% if p.is_required %}да{% endif %}</td>
           <td>{{ p.sort }}</td>
           <td class="actions">
-            <form method="post" action="/admin/properties/{{ p.id }}/delete"
-                  hx-confirm="Удалить свойство «{{ p.name }}»? Его значения у всех элементов будут стёрты.">
+            <form method="post" action="/admin/fields/{{ p.id }}/delete"
+                  hx-confirm="Удалить поле «{{ p.name }}»? Его значения у всех записей будут стёрты.">
               <button class="link danger" type="submit">Удалить</button>
             </form>
           </td>
@@ -74,8 +74,8 @@
   </div>
   {% endif %}
 
-  <form class="form prop-form" method="post" action="/admin/iblocks/{{ iblock.id }}/properties">
-    <h3>Добавить свойство</h3>
+  <form class="form prop-form" method="post" action="/admin/collections/{{ collection.id }}/fields">
+    <h3>Добавить поле</h3>
     {% if prop_error %}<div class="alert">{{ prop_error }}</div>{% endif %}
     <div class="grid-5">
       <label>Название *<input name="name" value="{{ prop_form.name }}" required></label>
@@ -88,14 +88,14 @@
         </select>
       </label>
       <label>Сорт.<input name="sort" type="number" value="{{ prop_form.sort }}"></label>
-      <label>Привязка к инфоблоку
+      <label>Привязка к коллекции
         <select name="link_collection_id">
           <option value="">— любой —</option>
-          {% for i in iblocks %}
+          {% for i in collections %}
           <option value="{{ i.id }}" {% if prop_form.link_collection_id == i.id|string %}selected{% endif %}>{{ i.name }}</option>
           {% endfor %}
         </select>
-        <small>Только для типа «Привязка к элементу»</small>
+        <small>Только для типа «Привязка к записи»</small>
       </label>
     </div>
     <div class="grid-2">
@@ -108,10 +108,10 @@
 
 <section class="card danger-zone">
   <h2>Удаление</h2>
-  <p class="muted">Инфоблок будет удалён вместе со всеми свойствами и элементами.</p>
-  <form method="post" action="/admin/iblocks/{{ iblock.id }}/delete"
-        hx-confirm="Удалить инфоблок «{{ iblock.name }}» со всеми элементами?">
-    <button class="btn danger" type="submit">Удалить инфоблок</button>
+  <p class="muted">Коллекция будет удалена вместе со всеми полями и записями.</p>
+  <form method="post" action="/admin/collections/{{ collection.id }}/delete"
+        hx-confirm="Удалить коллекцию «{{ collection.name }}» со всеми записями?">
+    <button class="btn danger" type="submit">Удалить коллекцию</button>
   </form>
 </section>
 {% endif %}

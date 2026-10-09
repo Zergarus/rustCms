@@ -25,10 +25,10 @@ use crate::{
 
 const PER_PAGE: i64 = 50;
 const DATETIME_FORMAT: &str = "%Y-%m-%dT%H:%M";
-/// Картинки элемента — одиночные файловые поля.
+/// Картинки записи — одиночные файловые поля.
 const PICTURE_FIELDS: [&str; 2] = ["preview_picture_id", "detail_picture_id"];
 
-/// Значения формы элемента: name, code, xml_id, section_id, active, sort, preview_text,
+/// Значения формы записи: name, code, xml_id, section_id, active, sort, preview_text,
 /// detail_text, published_at, preview_picture_id, detail_picture_id и `prop_<код>`.
 /// Ключ может повторяться (множественный список, файлы).
 #[derive(Debug, Default)]
@@ -127,7 +127,7 @@ fn build_input(
     }
     let section_id = parse_optional_id(get("section_id"), "Раздел", &mut errors);
     if section_id.is_some_and(|id| !sections.iter().any(|s| s.id == id)) {
-        errors.push("Раздел не найден в этом инфоблоке".into());
+        errors.push("Раздел не найден в этом коллекции".into());
     }
     let preview_picture_id =
         parse_optional_id(get("preview_picture_id"), "Картинка анонса", &mut errors);
@@ -179,7 +179,7 @@ fn build_input(
     })
 }
 
-/// Проверки, которым нужна БД: привязанные элементы и файлы существуют.
+/// Проверки, которым нужна БД: привязанные записи и файлы существуют.
 async fn check_references(
     state: &AppState,
     properties: &[Field],
@@ -205,7 +205,7 @@ async fn check_references(
                     .collect();
                 if !missing.is_empty() {
                     errors.push(format!(
-                        "«{}»: нет элементов с id {}",
+                        "«{}»: нет записей с id {}",
                         prop.name,
                         missing.join(", ")
                     ));
@@ -260,7 +260,7 @@ fn element_to_form(element: &Item, properties: &[Field]) -> FormValues {
     form
 }
 
-/// Всё, что нужно форме элемента кроме самих значений.
+/// Всё, что нужно форме записи кроме самих значений.
 struct CollectionContext {
     collection: Collection,
     properties: Vec<Field>,
@@ -402,10 +402,10 @@ async fn purchase_to_form(state: &AppState, item_id: i64, form: &mut FormValues)
 }
 
 async fn load_collection(state: &AppState, id: i64) -> AppResult<CollectionContext> {
-    let iblock = repo::get_collection(&state.db, id)
+    let collection = repo::get_collection(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let catalog = if iblock.is_catalog {
+    let catalog = if collection.is_catalog {
         Some(CatalogContext {
             price_types: sqlx::query_as(
                 "SELECT id, name FROM catalog_price_types ORDER BY sort, id",
@@ -424,7 +424,7 @@ async fn load_collection(state: &AppState, id: i64) -> AppResult<CollectionConte
         enums: repo::list_collection_options(&state.db, id).await?,
         sections: section_tree(repo::list_sections(&state.db, id).await?),
         catalog,
-        collection: iblock,
+        collection: collection,
     })
 }
 
@@ -445,14 +445,14 @@ async fn render_form(
     error: Option<String>,
 ) -> AppResult<Html<String>> {
     let CollectionContext {
-        collection: iblock,
+        collection: collection,
         catalog,
         properties,
         enums,
         sections,
     } = ctx;
 
-    // Файлы и подписи привязанных элементов для текущих значений формы
+    // Файлы и подписи привязанных записей для текущих значений формы
     let mut file_ids: Vec<i64> = PICTURE_FIELDS
         .iter()
         .filter_map(|key| form.get(key).parse().ok())
@@ -506,12 +506,12 @@ async fn render_form(
         .collect();
     multi.extend(form.0.iter().map(|(k, v)| (k.clone(), v.clone())));
 
-    let can_write = user.collection_level(iblock.id) >= Level::Write;
+    let can_write = user.collection_level(collection.id) >= Level::Write;
     render(
         state,
-        "element_form.html",
+        "item_form.html",
         context! {
-            user, iblock, properties, item_id, error, can_write, sections, enums, files, linked,
+            user, collection, properties, item_id, error, can_write, sections, enums, files, linked,
             multi, catalog, form => form.first_values(),
         },
     )
@@ -523,8 +523,8 @@ pub struct ListQuery {
     section: Option<i64>,
 }
 
-/// Список элементов по разделам, как в Битриксе: подразделы текущего раздела,
-/// затем его элементы. В корне — разделы верхнего уровня и элементы без раздела.
+/// Список записей по разделам, как в Битриксе: подразделы текущего раздела,
+/// затем его записи. В корне — разделы верхнего уровня и записи без раздела.
 pub async fn list(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
@@ -532,7 +532,7 @@ pub async fn list(
     Query(q): Query<ListQuery>,
 ) -> AppResult<Html<String>> {
     user.require_collection(id, Level::Read)?;
-    let iblock = repo::get_collection(&state.db, id)
+    let collection = repo::get_collection(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
     let all_sections = repo::list_sections(&state.db, id).await?;
@@ -577,10 +577,10 @@ pub async fn list(
     let pages = ((total + PER_PAGE - 1) / PER_PAGE).max(1);
     render(
         &state,
-        "elements.html",
+        "items.html",
         context! {
             can_write => user.collection_level(id) >= Level::Write,
-            user, iblock, items, total, page, pages, subsections, chain,
+            user, collection, items, total, page, pages, subsections, chain,
         },
     )
 }
@@ -622,7 +622,7 @@ pub async fn new_form(
     render_form(&state, user, ctx, None, form, None).await
 }
 
-/// Разбирает отправленную форму и сохраняет элемент (`item_id` = None — создание).
+/// Разбирает отправленную форму и сохраняет запись (`item_id` = None — создание).
 async fn save(
     state: &AppState,
     user: Access,
@@ -682,13 +682,13 @@ async fn save(
                     if let Some(Ok(p)) = &purchase {
                         catalog::save_purchase(&state.db, saved_id, p).await?;
                     }
-                    let mut url = format!("/admin/iblocks/{}/elements", ctx.collection.id);
+                    let mut url = format!("/admin/collections/{}/items", ctx.collection.id);
                     if let Some(section) = input.section_id {
                         url.push_str(&format!("?section={section}"));
                     }
                     return Ok(Redirect::to(&url).into_response());
                 }
-                Err(e) if is_unique_violation(&e) => "Элемент с таким кодом уже есть".into(),
+                Err(e) if is_unique_violation(&e) => "Запись с таким кодом уже есть".into(),
                 Err(e) => return Err(e.into()),
             }
         }
@@ -752,7 +752,7 @@ pub async fn delete(
     let collection_id = repo::delete_item(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let mut url = format!("/admin/iblocks/{collection_id}/elements");
+    let mut url = format!("/admin/collections/{collection_id}/items");
     if let Some(section) = element.section_id {
         url.push_str(&format!("?section={section}"));
     }

@@ -1,4 +1,4 @@
-//! Инфоблоки — настраиваемые типы контента по мотивам Битрикса.
+//! Коллекции — настраиваемые типы контента (аналог коллекций Битрикса).
 
 pub mod fields;
 pub mod repo;
@@ -22,7 +22,7 @@ pub struct Collection {
     pub detail_page_url: String,
     pub section_page_url: String,
     pub list_page_url: String,
-    /// Торговый каталог: у элементов есть цены и остатки.
+    /// Торговый каталог: у записей есть цены и остатки.
     pub is_catalog: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -46,13 +46,13 @@ pub struct Field {
     pub is_required: bool,
     pub sort: i32,
     pub multiple: bool,
-    /// Для привязки к элементу: инфоблок, из которого выбираются элементы.
+    /// Для привязки к записьу: коллекция, из которого выбираются записи.
     pub link_collection_id: Option<i64>,
-    /// `directory` — привязка по внешнему коду элемента (бывший справочник HL-блока).
+    /// `directory` — привязка по внешнему коду записи (бывший справочник HL-блока).
     pub user_type: String,
 }
 
-/// Вариант значения свойства-списка.
+/// Вариант значения поля-списка.
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct FieldOption {
     pub id: i64,
@@ -119,7 +119,7 @@ pub struct CollectionInput {
     pub description: String,
     pub api_enabled: bool,
     pub sort: i32,
-    /// Торговый каталог: у элементов цены, остатки, покупка.
+    /// Торговый каталог: у записей цены, остатки, покупка.
     pub is_catalog: bool,
 }
 
@@ -156,7 +156,7 @@ pub fn section_tree(sections: Vec<Section>) -> Vec<Section> {
     let mut children: HashMap<Option<i64>, Vec<Section>> = HashMap::new();
     let known: HashSet<i64> = sections.iter().map(|s| s.id).collect();
     for s in sections {
-        // Родитель из другого инфоблока или удалённый — показываем как корень
+        // Родитель из другого коллекции или удалённый — показываем как корень
         let parent = s.parent_id.filter(|p| known.contains(p));
         children.entry(parent).or_default().push(s);
     }
@@ -198,7 +198,7 @@ pub fn is_valid_code(code: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
-/// Символьный код элемента или раздела: как у инфоблока, но допускает
+/// Символьный код записи или раздела: как у коллекции, но допускает
 /// заглавные буквы (в данных из Битрикса встречаются коды вида `01M`).
 pub fn is_valid_slug(code: &str) -> bool {
     !code.is_empty()

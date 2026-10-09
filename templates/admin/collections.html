@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% set section = "collections" %}
+{% block title %}Коллекции{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Коллекции</h1>
+  {% if can_manage %}<a class="btn primary" href="/admin/collections/new">Добавить коллекцию</a>{% endif %}
+</div>
+
+{% if items %}
+<div class="card table-wrap">
+  <table>
+    <thead>
+      <tr><th>ID</th><th>Название</th><th>Код</th><th>Записей</th><th>API</th><th>Сорт.</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for ib in items %}
+      <tr>
+        <td class="muted">{{ ib.id }}</td>
+        <td><a href="/admin/collections/{{ ib.id }}/items">{{ ib.name }}</a></td>
+        <td><code>{{ ib.code }}</code></td>
+        <td>{{ ib.item_count }}</td>
+        <td>{% if ib.api_enabled %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}</td>
+        <td>{{ ib.sort }}</td>
+        <td class="actions">
+          <a href="/admin/collections/{{ ib.id }}/items">Записи</a>
+          {% if can_manage %}<a href="/admin/collections/{{ ib.id }}">Настройки</a>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card empty">
+  {% if can_manage %}
+  <p>Коллекций пока нет. Коллекция — это тип контента: новости, статьи, товары, отзывы.</p>
+  <a class="btn primary" href="/admin/collections/new">Создать первый</a>
+  {% else %}
+  <p>Нет доступных вам коллекций.</p>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

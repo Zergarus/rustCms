@@ -35,34 +35,37 @@ pub fn router(state: AppState) -> Router<AppState> {
     let protected = Router::new()
         .route("/", get(dashboard))
         .route("/logout", post(auth_pages::logout))
-        .route("/iblocks", get(collections::list).post(collections::create))
-        .route("/iblocks/new", get(collections::new_form))
         .route(
-            "/iblocks/{id}",
+            "/collections",
+            get(collections::list).post(collections::create),
+        )
+        .route("/collections/new", get(collections::new_form))
+        .route(
+            "/collections/{id}",
             get(collections::edit_form).post(collections::update),
         )
-        .route("/iblocks/{id}/delete", post(collections::delete))
-        .route("/iblocks/{id}/properties", post(collections::add_property))
+        .route("/collections/{id}/delete", post(collections::delete))
+        .route("/collections/{id}/fields", post(collections::add_field))
         .route(
-            "/properties/{id}",
-            get(collections::property_form).post(collections::update_field),
+            "/fields/{id}",
+            get(collections::field_form).post(collections::update_field),
         )
-        .route("/properties/{id}/enums", post(collections::save_options))
-        .route("/properties/{id}/delete", post(collections::delete_field))
-        .route("/iblocks/{id}/sections", post(sections::create))
-        .route("/iblocks/{id}/sections/new", get(sections::new_form))
+        .route("/fields/{id}/options", post(collections::save_options))
+        .route("/fields/{id}/delete", post(collections::delete_field))
+        .route("/collections/{id}/sections", post(sections::create))
+        .route("/collections/{id}/sections/new", get(sections::new_form))
         .route(
             "/sections/{id}",
             get(sections::edit_form).post(sections::update),
         )
         .route("/sections/{id}/delete", post(sections::delete))
         .route(
-            "/iblocks/{id}/elements",
+            "/collections/{id}/items",
             get(items::list).post(items::create),
         )
-        .route("/iblocks/{id}/elements/new", get(items::new_form))
-        .route("/elements/{id}", get(items::edit_form).post(items::update))
-        .route("/elements/{id}/delete", post(items::delete))
+        .route("/collections/{id}/items/new", get(items::new_form))
+        .route("/items/{id}", get(items::edit_form).post(items::update))
+        .route("/items/{id}/delete", post(items::delete))
         .route(
             "/shop/stores",
             get(shop::stores::list).post(shop::stores::create),
@@ -338,7 +341,7 @@ async fn dashboard(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
 ) -> AppResult<Html<String>> {
-    let (iblocks, elements, users): (i64, i64, i64) = sqlx::query_as(
+    let (collections, elements, users): (i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM collections),
                 (SELECT count(*) FROM collection_items),
                 (SELECT count(*) FROM users)",
@@ -348,7 +351,7 @@ async fn dashboard(
     render(
         &state,
         "dashboard.html",
-        context! { user, stats => context! { iblocks, elements, users } },
+        context! { user, stats => context! { collections, elements, users } },
     )
 }
 

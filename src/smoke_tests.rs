@@ -46,6 +46,34 @@ pub async fn post_form(app: &Router, path: &str, cookie: &str, body: &str) -> (S
     send(app, req).await
 }
 
+/// POST multipart-формы админки (формы записей и разделов).
+pub async fn post_multipart(
+    app: &Router,
+    path: &str,
+    cookie: &str,
+    fields: &[(&str, &str)],
+) -> (StatusCode, String) {
+    let boundary = "smokeboundary";
+    let mut body = String::new();
+    for (name, value) in fields {
+        body.push_str(&format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+        ));
+    }
+    body.push_str(&format!("--{boundary}--\r\n"));
+    let req = Request::post(path)
+        .header(header::COOKIE, cookie)
+        .header(header::HOST, "127.0.0.1:3000")
+        .header(header::ORIGIN, ORIGIN)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    send(app, req).await
+}
+
 pub async fn post_json(app: &Router, path: &str, body: Value) -> (StatusCode, Value) {
     let req = Request::post(path)
         .header(header::CONTENT_TYPE, "application/json")
@@ -71,6 +99,10 @@ async fn page_has(app: &Router, cookie: &str, path: &str, needles: &[&str]) {
     for n in needles {
         assert!(html.contains(n), "{path}: нет «{n}»");
     }
+    assert!(
+        !html.contains("нфоблок"),
+        "{path}: осталось слово «инфоблок»"
+    );
 }
 
 #[sqlx::test]
@@ -85,25 +117,25 @@ async fn admin_pages_render(db: PgPool) {
         c.item_id,
         c.group_id,
     );
-    page_has(&app, &cookie, "/admin/iblocks", &["Новости"]).await;
+    page_has(&app, &cookie, "/admin/collections", &["Новости"]).await;
     page_has(
         &app,
         &cookie,
-        &format!("/admin/iblocks/{col}"),
+        &format!("/admin/collections/{col}"),
         &["Цвет", "Связь"],
     )
     .await;
     page_has(
         &app,
         &cookie,
-        &format!("/admin/properties/{field}"),
+        &format!("/admin/fields/{field}"),
         &["Красный"],
     )
     .await;
     page_has(
         &app,
         &cookie,
-        &format!("/admin/iblocks/{col}/sections/new"),
+        &format!("/admin/collections/{col}/sections/new"),
         &["Раздел А"],
     )
     .await;
@@ -117,21 +149,21 @@ async fn admin_pages_render(db: PgPool) {
     page_has(
         &app,
         &cookie,
-        &format!("/admin/iblocks/{col}/elements?section={sec}"),
+        &format!("/admin/collections/{col}/items?section={sec}"),
         &["Первая новость", "Раздел А"],
     )
     .await;
     page_has(
         &app,
         &cookie,
-        &format!("/admin/iblocks/{col}/elements/new"),
+        &format!("/admin/collections/{col}/items/new"),
         &["Красный"],
     )
     .await;
     page_has(
         &app,
         &cookie,
-        &format!("/admin/elements/{item}"),
+        &format!("/admin/items/{item}"),
         &["Первая новость", "Красный"],
     )
     .await;
@@ -141,11 +173,11 @@ async fn admin_pages_render(db: PgPool) {
         &format!("/admin/groups/{group}"),
         &[
             "Новости",
-            &format!("name=\"iblock_{col}\" value=\"write\" checked"),
+            &format!("name=\"collection_{col}\" value=\"write\" checked"),
         ],
     )
     .await;
-    page_has(&app, &cookie, "/admin", &["Инфоблоки"]).await;
+    page_has(&app, &cookie, "/admin", &["Коллекции"]).await;
 }
 
 #[sqlx::test]
@@ -319,8 +351,8 @@ async fn collections_manage_permission(db: PgPool) {
         .await
         .unwrap();
     let app = app(&db);
-    page_has(&app, &cookie, "/admin/iblocks", &["Новости"]).await;
-    page_has(&app, &cookie, "/admin", &["href=\"/admin/iblocks\""]).await;
+    page_has(&app, &cookie, "/admin/collections", &["Новости"]).await;
+    page_has(&app, &cookie, "/admin", &["href=\"/admin/collections\""]).await;
 }
 
 /// Фильтр и сортировка по полям собираются в SQL на лету — проверяем их через API.
@@ -385,13 +417,13 @@ async fn field_link_roundtrip(db: PgPool) {
     page_has(
         &app,
         &cookie,
-        &format!("/admin/iblocks/{col}"),
+        &format!("/admin/collections/{col}"),
         &["→ Новости"],
     )
     .await;
     let (status, _) = post_form(
         &app,
-        &format!("/admin/iblocks/{col}/properties"),
+        &format!("/admin/collections/{col}/fields"),
         &cookie,
         &format!("code=rel&name=Ещё&kind=element&sort=500&link_collection_id={col}"),
     )
@@ -404,4 +436,69 @@ async fn field_link_roundtrip(db: PgPool) {
             .unwrap();
     assert_eq!(link, Some(col));
     let _ = c.link_field_id;
+}
+
+#[sqlx::test]
+async fn old_admin_urls_gone(db: PgPool) {
+    let c = content_fixture(&db).await;
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    for path in [
+        "/admin/iblocks".to_string(),
+        format!("/admin/elements/{}", c.item_id),
+        format!("/admin/properties/{}", c.field_id),
+    ] {
+        assert_eq!(
+            get(&app, &path, &cookie).await.0,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+}
+
+#[sqlx::test]
+async fn group_collection_access_roundtrip(db: PgPool) {
+    let c = content_fixture(&db).await;
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (col, group) = (c.collection_id, c.group_id);
+    let (status, _) = post_form(
+        &app,
+        &format!("/admin/groups/{group}"),
+        &cookie,
+        &format!(
+            "code=editors&name=Редакторы&sort=500&permission=admin.access&collection_{col}=read"
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    page_has(
+        &app,
+        &cookie,
+        &format!("/admin/groups/{group}"),
+        &[&format!("name=\"collection_{col}\" value=\"read\" checked")],
+    )
+    .await;
+    let (user_id, user_cookie) = crate::test_support::user_cookie(&db, "editor", false).await;
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(group)
+        .execute(&db)
+        .await
+        .unwrap();
+    page_has(
+        &app,
+        &user_cookie,
+        &format!("/admin/collections/{col}/items"),
+        &[],
+    )
+    .await;
+    let (status, _) = post_multipart(
+        &app,
+        &format!("/admin/collections/{col}/items"),
+        &user_cookie,
+        &[("name", "Чужая"), ("sort", "500")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }

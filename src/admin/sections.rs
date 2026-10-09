@@ -1,4 +1,4 @@
-//! Разделы инфоблока. Права — как на элементы: нужен уровень «изменение».
+//! Разделы коллекции. Права — как на записи: нужен уровень «изменение».
 
 use std::collections::HashMap;
 
@@ -111,17 +111,17 @@ fn section_to_form(section: &Section) -> FormValues {
 }
 
 async fn load(state: &AppState, collection_id: i64) -> AppResult<(Collection, Vec<Section>)> {
-    let iblock = repo::get_collection(&state.db, collection_id)
+    let collection = repo::get_collection(&state.db, collection_id)
         .await?
         .ok_or(AppError::NotFound)?;
     let sections = section_tree(repo::list_sections(&state.db, collection_id).await?);
-    Ok((iblock, sections))
+    Ok((collection, sections))
 }
 
 async fn render_form(
     state: &AppState,
     user: Access,
-    iblock: Collection,
+    collection: Collection,
     sections: Vec<Section>,
     section_id: Option<i64>,
     form: FormValues,
@@ -141,7 +141,7 @@ async fn render_form(
     render(
         state,
         "section_form.html",
-        context! { user, iblock, sections, section_id, form, error, picture, forbidden },
+        context! { user, collection, sections, section_id, form, error, picture, forbidden },
     )
 }
 
@@ -157,7 +157,7 @@ pub async fn new_form(
     Query(q): Query<NewQuery>,
 ) -> AppResult<Html<String>> {
     user.require_collection(id, Level::Write)?;
-    let (iblock, sections) = load(&state, id).await?;
+    let (collection, sections) = load(&state, id).await?;
     let mut form = FormValues::from([
         ("active".into(), "on".into()),
         ("sort".into(), "500".into()),
@@ -165,13 +165,13 @@ pub async fn new_form(
     if let Some(parent) = q.parent {
         form.insert("parent_id".into(), parent.to_string());
     }
-    render_form(&state, user, iblock, sections, None, form, None).await
+    render_form(&state, user, collection, sections, None, form, None).await
 }
 
 async fn save(
     state: &AppState,
     user: Access,
-    iblock: Collection,
+    collection: Collection,
     sections: Vec<Section>,
     section_id: Option<i64>,
     multipart: Multipart,
@@ -197,10 +197,10 @@ async fn save(
             match section_id {
                 Some(id) => repo::update_section(&state.db, id, &input).await?,
                 None => {
-                    repo::create_section(&state.db, iblock.id, &input).await?;
+                    repo::create_section(&state.db, collection.id, &input).await?;
                 }
             }
-            let mut url = format!("/admin/iblocks/{}/elements", iblock.id);
+            let mut url = format!("/admin/collections/{}/items", collection.id);
             if let Some(parent) = input.parent_id {
                 url.push_str(&format!("?section={parent}"));
             }
@@ -208,7 +208,16 @@ async fn save(
         }
         Err(msg) => msg,
     };
-    let page = render_form(state, user, iblock, sections, section_id, form, Some(error)).await?;
+    let page = render_form(
+        state,
+        user,
+        collection,
+        sections,
+        section_id,
+        form,
+        Some(error),
+    )
+    .await?;
     Ok(page.into_response())
 }
 
@@ -219,8 +228,8 @@ pub async fn create(
     multipart: Multipart,
 ) -> AppResult<Response> {
     user.require_collection(id, Level::Write)?;
-    let (iblock, sections) = load(&state, id).await?;
-    save(&state, user, iblock, sections, None, multipart).await
+    let (collection, sections) = load(&state, id).await?;
+    save(&state, user, collection, sections, None, multipart).await
 }
 
 pub async fn edit_form(
@@ -232,9 +241,9 @@ pub async fn edit_form(
         .await?
         .ok_or(AppError::NotFound)?;
     user.require_collection(section.collection_id, Level::Write)?;
-    let (iblock, sections) = load(&state, section.collection_id).await?;
+    let (collection, sections) = load(&state, section.collection_id).await?;
     let form = section_to_form(&section);
-    render_form(&state, user, iblock, sections, Some(id), form, None).await
+    render_form(&state, user, collection, sections, Some(id), form, None).await
 }
 
 pub async fn update(
@@ -247,8 +256,8 @@ pub async fn update(
         .await?
         .ok_or(AppError::NotFound)?;
     user.require_collection(section.collection_id, Level::Write)?;
-    let (iblock, sections) = load(&state, section.collection_id).await?;
-    save(&state, user, iblock, sections, Some(id), multipart).await
+    let (collection, sections) = load(&state, section.collection_id).await?;
+    save(&state, user, collection, sections, Some(id), multipart).await
 }
 
 pub async fn delete(
@@ -261,7 +270,7 @@ pub async fn delete(
         .ok_or(AppError::NotFound)?;
     user.require_collection(section.collection_id, Level::Write)?;
     repo::delete_section(&state.db, id).await?;
-    let mut url = format!("/admin/iblocks/{}/elements", section.collection_id);
+    let mut url = format!("/admin/collections/{}/items", section.collection_id);
     if let Some(parent) = section.parent_id {
         url.push_str(&format!("?section={parent}"));
     }

@@ -1,7 +1,7 @@
-//! Типы свойств инфоблока и преобразование значений из формы в JSON и обратно.
+//! Типы полей коллекции и преобразование значений из формы в JSON и обратно.
 //!
 //! Одиночное значение хранится скаляром или `null`, множественное — массивом.
-//! Список хранит id варианта, привязка к элементу — id элемента, файл — id файла.
+//! Список хранит id варианта, привязка к записьу — id записи, файл — id файла.
 
 use chrono::NaiveDate;
 use serde::Serialize;
@@ -13,7 +13,7 @@ use super::{Field, FieldOption};
 pub struct FieldKind {
     pub code: &'static str,
     pub name: &'static str,
-    /// Можно ли сделать свойство множественным.
+    /// Можно ли сделать полейо множественным.
     pub multiple: bool,
 }
 
@@ -50,7 +50,7 @@ pub const KINDS: &[FieldKind] = &[
     },
     FieldKind {
         code: "element",
-        name: "Привязка к элементу",
+        name: "Привязка к записи",
         multiple: true,
     },
     FieldKind {
@@ -64,10 +64,10 @@ pub fn kind(code: &str) -> Option<&'static FieldKind> {
     KINDS.iter().find(|k| k.code == code)
 }
 
-/// Разбирает значение свойства из полей формы. `raws` — все значения,
-/// пришедшие под ключом свойства (пусто — поле не пришло, так браузер передаёт
+/// Разбирает значение полейа из полей формы. `raws` — все значения,
+/// пришедшие под ключом полейа (пусто — поле не пришло, так браузер передаёт
 /// снятый чекбокс). Множественные строки, числа и даты вводятся по одному на строку,
-/// id привязок — через запятую или пробел. `enums` — варианты свойства-списка.
+/// id привязок — через запятую или пробел. `enums` — варианты поля-списка.
 pub fn parse_value(prop: &Field, raws: &[&str], enums: &[FieldOption]) -> Result<Value, String> {
     if prop.kind == "boolean" {
         return Ok(Value::Bool(raws.iter().any(|s| !s.trim().is_empty())));
@@ -133,12 +133,12 @@ fn parse_item(prop: &Field, s: &str, enums: &[FieldOption]) -> Result<Value, Str
         "list" => {
             let id = parse_id(prop, s)?;
             if !enums.iter().any(|e| e.id == id) {
-                return Err(format!("«{}»: неизвестное значение списка", prop.name));
+                return Err(format!("«{}»: неизвестный вариант", prop.name));
             }
             Value::from(id)
         }
         "element" | "file" => Value::from(parse_id(prop, s)?),
-        kind => return Err(format!("неизвестный тип свойства {kind}")),
+        kind => return Err(format!("неизвестный тип поля {kind}")),
     })
 }
 
@@ -157,7 +157,7 @@ fn is_empty(value: &Value) -> bool {
     }
 }
 
-/// Id из значения свойства-привязки или файла (скаляр или массив).
+/// Id из значения поля-привязки или файла (скаляр или массив).
 pub fn ids(value: &Value) -> Vec<i64> {
     match value {
         Value::Array(items) => items.iter().filter_map(Value::as_i64).collect(),
@@ -165,7 +165,7 @@ pub fn ids(value: &Value) -> Vec<i64> {
     }
 }
 
-/// Значения свойства для подстановки обратно в поля формы: по одному на
+/// Значения полейа для подстановки обратно в поля формы: по одному на
 /// каждый выбранный вариант / файл, либо одна строка для текстовых полей.
 pub fn to_form_values(prop: &Field, value: &Value) -> Vec<String> {
     let scalar = |v: &Value| match v {

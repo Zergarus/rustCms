@@ -1,6 +1,6 @@
 {% extends "base.html" %}
-{% set section = "iblocks" %}
-{% block title %}{% if item_id %}{{ form.name }}{% else %}Новый элемент{% endif %}{% endblock %}
+{% set section = "collections" %}
+{% block title %}{% if item_id %}{{ form.name }}{% else %}Новая запись{% endif %}{% endblock %}
 
 {#- Уже загруженные файлы поля: отмеченный чекбокс — оставить, снятый — убрать -#}
 {% macro file_list(key, ids) %}
@@ -15,15 +15,15 @@
 
 {% block content %}
 <div class="breadcrumbs">
-  <a href="/admin/iblocks">Инфоблоки</a> /
-  <a href="/admin/iblocks/{{ iblock.id }}/elements">{{ iblock.name }}</a> /
+  <a href="/admin/collections">Коллекции</a> /
+  <a href="/admin/collections/{{ collection.id }}/items">{{ collection.name }}</a> /
 </div>
-<h1>{% if item_id %}{{ form.name }}{% else %}Новый элемент{% endif %}</h1>
+<h1>{% if item_id %}{{ form.name }}{% else %}Новая запись{% endif %}</h1>
 
 <form class="card form" method="post" enctype="multipart/form-data"
-      action="{% if item_id %}/admin/elements/{{ item_id }}{% else %}/admin/iblocks/{{ iblock.id }}/elements{% endif %}">
+      action="{% if item_id %}/admin/items/{{ item_id }}{% else %}/admin/collections/{{ collection.id }}/items{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}
-  {% if not can_write %}<div class="notice">Только просмотр: у вас нет прав на изменение элементов этого инфоблока.</div>{% endif %}
+  {% if not can_write %}<div class="notice">Только просмотр: у вас нет прав на изменение записей этого коллекции.</div>{% endif %}
   <fieldset class="plain" {% if not can_write %}disabled{% endif %}>
 
   <div class="grid-2">
@@ -79,7 +79,7 @@
 
   {% if properties %}
   <fieldset>
-    <legend>Свойства</legend>
+    <legend>Поля</legend>
     {% for p in properties %}
       {% set key = "prop_" ~ p.code %}
       {% if p.kind == "boolean" %}
@@ -102,7 +102,7 @@
               {% endfor %}
             </select>
           {% elif p.kind == "element" %}
-            <input name="{{ key }}" value="{{ form[key] }}" placeholder="id элемента{% if p.multiple %}, через запятую{% endif %}">
+            <input name="{{ key }}" value="{{ form[key] }}" placeholder="id записи{% if p.multiple %}, через запятую{% endif %}">
             {% if linked[key] %}<small>{% for id, name in linked[key] %}{{ id }} — {{ name }}{% if not loop.last %}; {% endif %}{% endfor %}</small>{% endif %}
           {% elif p.kind == "text" %}
             <textarea name="{{ key }}" rows="4">{{ form[key] }}</textarea>
@@ -162,7 +162,7 @@
   </fieldset>
   <div class="form-actions">
     {% if can_write %}<button class="btn primary" type="submit">Сохранить</button>{% endif %}
-    <a class="btn" href="/admin/iblocks/{{ iblock.id }}/elements{% if form.section_id %}?section={{ form.section_id }}{% endif %}">{% if can_write %}Отмена{% else %}Назад{% endif %}</a>
+    <a class="btn" href="/admin/collections/{{ collection.id }}/items{% if form.section_id %}?section={{ form.section_id }}{% endif %}">{% if can_write %}Отмена{% else %}Назад{% endif %}</a>
   </div>
 </form>
 {% endblock %}

@@ -1,4 +1,4 @@
-//! Права доступа: группы → права на разделы + уровни доступа к инфоблокам.
+//! Права доступа: группы → права на разделы + уровни доступа к коллекциям.
 //!
 //! Суперадминистратор (`users.is_admin`) проходит любые проверки. Остальные
 //! получают объединение прав всех своих групп.
@@ -34,8 +34,8 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     },
     PermissionDef {
         code: COLLECTIONS_MANAGE,
-        name: "Управление инфоблоками",
-        description: "Создание и настройка инфоблоков и свойств, изменение элементов во всех инфоблоках",
+        name: "Управление коллекциями",
+        description: "Создание и настройка коллекций и полей, изменение записей во всех коллекциих",
     },
     PermissionDef {
         code: USERS_MANAGE,
@@ -50,7 +50,7 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     PermissionDef {
         code: ORDERS_MANAGE,
         name: "Работа с заказами",
-        description: "Просмотр заказов, смена статуса, оплата, отмена, правка свойств и состава",
+        description: "Просмотр заказов, смена статуса, оплата, отмена, правка полей и состава",
     },
 ];
 
@@ -58,7 +58,7 @@ pub fn is_known_permission(code: &str) -> bool {
     PERMISSIONS.iter().any(|p| p.code == code)
 }
 
-/// Уровень доступа к элементам инфоблока.
+/// Уровень доступа к записям коллекции.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
@@ -93,7 +93,7 @@ pub struct Access {
     pub user: User,
     /// Для суперадминистратора — все права.
     pub permissions: BTreeSet<String>,
-    /// Показывать ли раздел «Инфоблоки» в меню.
+    /// Показывать ли раздел «Коллекции» в меню.
     pub can_see_collections: bool,
     #[serde(skip)]
     collection_levels: HashMap<i64, Level>,
