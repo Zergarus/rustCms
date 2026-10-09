@@ -68,7 +68,7 @@ pub fn build_snapshot(
         let product = info.get(&item.product_id);
         let price = product.and_then(|p| main_price(&p.prices));
         let available =
-            product.is_some_and(|p| p.active && p.is_catalog && p.available) && price.is_some();
+            product.is_some_and(|p| crate::catalog::sellable(p) && p.available) && price.is_some();
         let unit = price.map_or(0.0, |p| p.price);
         if currency.is_none() {
             currency = price.map(|p| p.currency.clone());

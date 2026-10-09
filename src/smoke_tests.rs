@@ -2031,11 +2031,9 @@ async fn offer_of_inactive_product_not_purchasable(db: PgPool) {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-#[sqlx::test]
-async fn order_keeps_props(db: PgPool) {
+/// Оформляет заказ из предложения `offer` (через корзину гостя); возвращает id заказа.
+async fn offer_order(db: &PgPool, app: &Router, offer: i64) -> i64 {
     use crate::sale::repo::{NewOrder, create};
-    let (_, offer) = offer_cart_fixture(&db).await;
-    let app = app(&db);
     let (_, body) = cart_post(
         &app,
         "/api/v1/cart/items",
@@ -2046,20 +2044,20 @@ async fn order_keeps_props(db: PgPool) {
     let cart_item = body["data"]["items"][0]["id"].as_i64().unwrap();
     let buyer: i64 = sqlx::query_scalar("SELECT buyer_id FROM cart_items WHERE id = $1")
         .bind(cart_item)
-        .fetch_one(&db)
+        .fetch_one(db)
         .await
         .unwrap();
     sqlx::query("INSERT INTO catalog_stores (id, name) VALUES (1, 'Склад')")
-        .execute(&db)
+        .execute(db)
         .await
         .unwrap();
     let person: i64 =
         sqlx::query_scalar("INSERT INTO person_types (name) VALUES ('Клиент') RETURNING id")
-            .fetch_one(&db)
+            .fetch_one(db)
             .await
             .unwrap();
     sqlx::query("INSERT INTO order_statuses (code, name) VALUES ('N', 'Принят')")
-        .execute(&db)
+        .execute(db)
         .await
         .unwrap();
     let order = NewOrder {
@@ -2081,6 +2079,15 @@ async fn order_keeps_props(db: PgPool) {
     let order_id = create(&mut tx, &order).await.unwrap();
     tx.commit().await.unwrap();
 
+    order_id
+}
+
+#[sqlx::test]
+async fn order_keeps_props(db: PgPool) {
+    let (_, offer) = offer_cart_fixture(&db).await;
+    let app = app(&db);
+    let order_id = offer_order(&db, &app, offer).await;
+
     let loaded = crate::sale::repo::load(&db, order_id)
         .await
         .unwrap()
@@ -2094,4 +2101,109 @@ async fn order_keeps_props(db: PgPool) {
     assert!(html.contains("Объём: 4 л"), "нет свойства в карточке");
     assert!(html.contains("Бренд: Mobil"));
     assert!(!html.contains("XML_ID"));
+}
+
+#[sqlx::test]
+async fn deactivated_parent_blocks_cart_and_submit(db: PgPool) {
+    let (product, offer) = offer_cart_fixture(&db).await;
+    sqlx::query("INSERT INTO person_types (name) VALUES ('Клиент')")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO order_statuses (code, name) VALUES ('N', 'Принят')")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO deliveries (name) VALUES ('Курьер')")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO pay_systems (name) VALUES ('Наличные')")
+        .execute(&db)
+        .await
+        .unwrap();
+    let app = app(&db);
+    let (_, body) = cart_post(
+        &app,
+        "/api/v1/cart/items",
+        "tok",
+        json!({"productId": offer}),
+    )
+    .await;
+    assert_eq!(body["data"]["items"][0]["isAvailable"], json!(true));
+    assert_eq!(body["data"]["canCheckout"], json!(true));
+
+    sqlx::query("UPDATE collection_items SET active = FALSE WHERE id = $1")
+        .bind(product)
+        .execute(&db)
+        .await
+        .unwrap();
+    let req = Request::get("/api/v1/cart")
+        .header(header::COOKIE, "CMS_BUYER=tok")
+        .body(Body::empty())
+        .unwrap();
+    let (_, text) = send(&app, req).await;
+    let cart: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        cart["data"]["items"][0]["isAvailable"],
+        json!(false),
+        "{text}"
+    );
+    assert_eq!(cart["data"]["canCheckout"], json!(false));
+
+    let (status, refused) = cart_post(
+        &app,
+        "/api/v1/order/submit",
+        "tok",
+        json!({"personTypeId": 1, "deliveryId": 1, "paymentId": 1,
+               "basketSnapshot": cart["data"]["snapshot"]}),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{refused}");
+    assert_eq!(refused["errors"][0]["code"], "basket_changed", "{refused}");
+    let orders: i64 = sqlx::query_scalar("SELECT count(*) FROM orders")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(orders, 0);
+}
+
+#[sqlx::test]
+async fn admin_cannot_add_sku_parent_to_order(db: PgPool) {
+    let (product, offer) = offer_cart_fixture(&db).await;
+    let app = app(&db);
+    let order_id = offer_order(&db, &app, offer).await;
+    sqlx::query("INSERT INTO deliveries (name) VALUES ('Курьер')")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO pay_systems (name) VALUES ('Наличные')")
+        .execute(&db)
+        .await
+        .unwrap();
+    let (version,): (chrono::DateTime<chrono::Utc>,) =
+        sqlx::query_as("SELECT updated_at FROM orders WHERE id = $1")
+            .bind(order_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    let version = version.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+    let cookie = admin_cookie(&db).await;
+    let path = format!("/admin/shop/orders/{order_id}/items");
+    let line: i64 = sqlx::query_scalar("SELECT id FROM cart_items WHERE order_id = $1")
+        .bind(order_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    let form = |add: i64| {
+        format!(
+            "item_{line}_quantity=1&version={}&add_element={add}&add_quantity=1&delivery_id=1&pay_system_id=1&delivery_price=0",
+            version.replace(':', "%3A").replace('+', "%2B")
+        )
+    };
+    let (_, html) = post_form(&app, &path, &cookie, &form(product)).await;
+    assert!(html.contains("нельзя добавить в заказ"), "{html}");
+    // предложение активного товара добавить можно
+    let (status, html) = post_form(&app, &path, &cookie, &form(offer)).await;
+    assert!(status.is_redirection(), "{html}");
 }

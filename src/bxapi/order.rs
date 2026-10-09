@@ -303,7 +303,14 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
     let product_ids: Vec<i64> = lines.iter().map(|l| l.product_id).collect();
     let mut tx = state.db.begin().await?;
     let info = catalog::load_locked(&mut tx, &product_ids).await?;
-    if let Err(message) = stock::check(&lines, &info) {
+    let checked = match lines
+        .iter()
+        .find(|l| !info.get(&l.product_id).is_some_and(catalog::sellable))
+    {
+        Some(_) => Err("Товар недоступен для покупки".to_string()),
+        None => stock::check(&lines, &info),
+    };
+    if let Err(message) = checked {
         tx.rollback().await?;
         let mut e = SubmitError::basket_changed();
         e.message = message;

@@ -46,6 +46,15 @@ pub struct PurchaseInfo {
     pub total: f64,
 }
 
+/// Запись можно продавать: активна, из торгового каталога, не товар с предложениями
+/// (тип 3/6), а у предложения активный родитель.
+pub fn sellable(info: &PurchaseInfo) -> bool {
+    info.active
+        && info.is_catalog
+        && !matches!(info.product_type, TYPE_SKU | TYPE_EMPTY_SKU)
+        && info.parent_active
+}
+
 /// Основная цена: базового типа, иначе первая по сортировке типа.
 pub fn main_price(prices: &[Price]) -> Option<&Price> {
     prices.iter().find(|p| p.is_base).or_else(|| prices.first())

@@ -73,13 +73,7 @@ pub(super) fn parse_quantity(v: Option<&Value>, allow_zero: bool) -> Result<f64,
 /// Товар можно положить в корзину: есть, активен, из торгового каталога, не товар с
 /// предложениями (продаются предложения), а у предложения — активный родитель.
 pub(super) fn ensure_purchasable(info: Option<&PurchaseInfo>) -> Result<&PurchaseInfo, BxError> {
-    let sellable = |i: &&PurchaseInfo| {
-        i.active
-            && i.is_catalog
-            && !matches!(i.product_type, catalog::TYPE_SKU | catalog::TYPE_EMPTY_SKU)
-            && i.parent_active
-    };
-    info.filter(sellable).ok_or_else(|| {
+    info.filter(|i| catalog::sellable(i)).ok_or_else(|| {
         BxError::with_status(
             StatusCode::NOT_FOUND,
             "product_not_found",

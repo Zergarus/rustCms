@@ -239,6 +239,12 @@ pub async fn save_composition(
         let Some(product) = info.get(&line.product_id) else {
             return Ok(Err(format!("Товар {} не найден", line.product_id)));
         };
+        if !catalog::sellable(product) {
+            return Ok(Err(format!(
+                "Товар {} нельзя добавить в заказ",
+                line.product_id
+            )));
+        }
         line.price = main_price(&product.prices).map_or(0.0, |p| p.price);
         line.name = sqlx::query_scalar("SELECT name FROM collection_items WHERE id = $1")
             .bind(line.product_id)
