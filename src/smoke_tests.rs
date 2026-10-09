@@ -1824,3 +1824,24 @@ async fn filter_by_offers(db: PgPool) {
         assert!(body.to_string().contains("Unknown filter field"), "{body}");
     }
 }
+
+#[sqlx::test]
+async fn offers_filter_rejects_operator_prefix(db: PgPool) {
+    price_from_fixture(&db).await;
+    let app = app(&db);
+    for key in ["!offers", "=offers", "@offers", "%offers"] {
+        let (status, body) = post_json(
+            &app,
+            "/api/v1/iblock/catalog/element/list",
+            json!({"select": ["id"], "filter": {key: {"volume": "4 л"}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], json!("error"), "{key}: {body}");
+        assert!(
+            body.to_string()
+                .contains(&format!("Unknown filter field: {key}")),
+            "{key}: {body}"
+        );
+    }
+}

@@ -226,6 +226,8 @@ pub fn push_leaf(
     let a = ctx.alias.clone();
 
     match segments.as_slice() {
+        // Ключ `offers` — без операторов
+        ["offers"] if ctx.schema.offers.is_some() && key != "offers" => Err(unknown_field(key)),
         ["offers"] if ctx.schema.offers.is_some() => push_offers(qb, ctx, &value),
         ["id"] => push_column(qb, &format!("{a}.id"), Ty::Int, op, &values),
         ["name"] => push_column(qb, &format!("{a}.name"), Ty::Text, op, &values),
