@@ -1555,3 +1555,272 @@ async fn generator_needs_write_on_both_collections(db: PgPool) {
             .unwrap();
     assert_eq!(count, 0);
 }
+
+/// Товар `catalog` в разделе и два предложения: 500 (склад 1: 2) и 300 (склад 1: 1, склад 2: 4).
+/// Поле предложений `volume` (строка): «4 л» и «1 л».
+async fn price_from_fixture(db: &PgPool) -> (i64, i64, i64, i64) {
+    let (product, cheap) = sku_fixture(db).await;
+    let offers: i64 =
+        sqlx::query_scalar("SELECT collection_id FROM collection_items WHERE id = $1")
+            .bind(cheap)
+            .fetch_one(db)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO collection_fields (collection_id, code, name, kind) VALUES ($1, 'volume', 'Объём', 'string')",
+    )
+    .bind(offers)
+    .execute(db)
+    .await
+    .unwrap();
+    let dear: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_items (collection_id, code, name, product_id, field_values)
+         VALUES ($1, 'offer2', 'Дорогое', $2, '{\"volume\": \"1 л\"}') RETURNING id",
+    )
+    .bind(offers)
+    .bind(product)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE collection_items SET field_values = '{\"volume\": \"4 л\"}' WHERE id = $1")
+        .bind(cheap)
+        .execute(db)
+        .await
+        .unwrap();
+    let base: i64 = sqlx::query_scalar(
+        "INSERT INTO catalog_price_types (code, name, is_base) VALUES ('BASE', 'Базовая', TRUE) RETURNING id",
+    )
+    .fetch_one(db)
+    .await
+    .unwrap();
+    for (id, price) in [(dear, 500), (cheap, 300)] {
+        sqlx::query(
+            "INSERT INTO catalog_prices (item_id, price_type_id, price, currency) VALUES ($1, $2, $3, 'RUB')",
+        )
+        .bind(id)
+        .bind(base)
+        .bind(price)
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO catalog_products (item_id, quantity) VALUES ($1, 5)
+             ON CONFLICT (item_id) DO UPDATE SET quantity = 5",
+        )
+        .bind(id)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+    sqlx::query("INSERT INTO catalog_stores (id, name) VALUES (1, 'Склад 1'), (2, 'Склад 2')")
+        .execute(db)
+        .await
+        .unwrap();
+    for (id, store, amount) in [(dear, 1, 2), (cheap, 1, 1), (cheap, 2, 4)] {
+        sqlx::query(
+            "INSERT INTO catalog_store_amounts (item_id, store_id, amount) VALUES ($1, $2, $3)",
+        )
+        .bind(id)
+        .bind(store)
+        .bind(amount)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+    (product, cheap, dear, offers)
+}
+
+async fn bx_list(app: &Router, code: &str, body: Value) -> Value {
+    let (status, body) = post_json(app, &format!("/api/v1/iblock/{code}/element/list"), body).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
+
+#[sqlx::test]
+async fn price_from_and_stocks(db: PgPool) {
+    let (product, _, _, _) = price_from_fixture(&db).await;
+    let app = app(&db);
+    let body = bx_list(
+        &app,
+        "catalog",
+        json!({"select": ["id", "catalogPrice", "stocks", "catalogType"]}),
+    )
+    .await;
+    let item = &body["data"]["items"][0];
+    assert_eq!(item["id"], json!(product));
+    assert_eq!(item["catalogType"], json!(3));
+    assert_eq!(item["catalogPrice"]["value"], json!(300));
+    assert_eq!(item["catalogPrice"]["fromOffers"], json!(true));
+    assert_eq!(
+        item["stocks"],
+        json!([
+            {"storeName": "Склад 1", "amount": 3},
+            {"storeName": "Склад 2", "amount": 4},
+        ])
+    );
+    // Предложение: тип 4, цена своя, без fromOffers
+    let body = bx_list(
+        &app,
+        "catalog_offers",
+        json!({"select": ["id", "catalogPrice", "catalogType"], "order": {"id": "asc"}}),
+    )
+    .await;
+    let first = &body["data"]["items"][0];
+    assert_eq!(first["catalogType"], json!(4));
+    assert!(first["catalogPrice"].get("fromOffers").is_none());
+}
+
+#[sqlx::test]
+async fn price_from_falls_back_to_active(db: PgPool) {
+    let (_, cheap, dear, _) = price_from_fixture(&db).await;
+    let app = app(&db);
+    sqlx::query("UPDATE catalog_products SET available = FALSE WHERE item_id = ANY($1)")
+        .bind(vec![cheap, dear])
+        .execute(&db)
+        .await
+        .unwrap();
+    let body = bx_list(
+        &app,
+        "catalog",
+        json!({"select": ["catalogPrice", "catalogType"]}),
+    )
+    .await;
+    assert_eq!(
+        body["data"]["items"][0]["catalogPrice"]["value"],
+        json!(300)
+    );
+    sqlx::query("UPDATE collection_items SET active = FALSE WHERE id = ANY($1)")
+        .bind(vec![cheap, dear])
+        .execute(&db)
+        .await
+        .unwrap();
+    let body = bx_list(
+        &app,
+        "catalog",
+        json!({"select": ["catalogPrice", "stocks", "catalogType"]}),
+    )
+    .await;
+    let item = &body["data"]["items"][0];
+    assert_eq!(item["catalogPrice"], json!([]));
+    assert_eq!(item["stocks"], json!([]));
+    assert_eq!(item["catalogType"], json!(3));
+}
+
+#[sqlx::test]
+async fn catalog_type_null_outside_catalog(db: PgPool) {
+    content_fixture(&db).await;
+    let app = app(&db);
+    let body = bx_list(&app, "news", json!({"select": ["id", "catalogType"]})).await;
+    assert_eq!(body["data"]["items"][0]["catalogType"], json!(null));
+}
+
+#[sqlx::test]
+async fn catalog_type_defaults_to_simple(db: PgPool) {
+    let c = content_fixture(&db).await;
+    sqlx::query("UPDATE collections SET is_catalog = TRUE WHERE id = $1")
+        .bind(c.collection_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let app = app(&db);
+    let body = bx_list(&app, "news", json!({"select": ["id", "catalogType"]})).await;
+    assert_eq!(body["data"]["items"][0]["catalogType"], json!(1));
+}
+
+#[sqlx::test]
+async fn filter_by_offers(db: PgPool) {
+    let (a, _, dear, offers) = price_from_fixture(&db).await;
+    let section: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_sections (collection_id, name, code)
+         SELECT collection_id, 'Раздел А', 'a' FROM collection_items WHERE id = $1 RETURNING id",
+    )
+    .bind(a)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE collection_items SET section_id = $2 WHERE id = $1")
+        .bind(a)
+        .bind(section)
+        .execute(&db)
+        .await
+        .unwrap();
+    // Товар B: одно предложение «1 л»
+    let products: i64 =
+        sqlx::query_scalar("SELECT collection_id FROM collection_items WHERE id = $1")
+            .bind(a)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    let b: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_items (collection_id, code, name) VALUES ($1, 'b', 'Б') RETURNING id",
+    )
+    .bind(products)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE collection_items SET product_id = $2 WHERE id = $1")
+        .bind(dear)
+        .bind(b)
+        .execute(&db)
+        .await
+        .unwrap();
+    let _ = offers;
+    let app = app(&db);
+    let ids = |v: &Value| -> Vec<i64> {
+        let mut ids: Vec<i64> = v["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_i64().unwrap())
+            .collect();
+        ids.sort();
+        ids
+    };
+    let body = bx_list(
+        &app,
+        "catalog",
+        json!({"select": ["id"], "filter": {"offers": {"volume": "4 л"}}}),
+    )
+    .await;
+    assert_eq!(ids(&body), vec![a]);
+    let body = bx_list(
+        &app,
+        "catalog",
+        json!({"select": ["id"], "filter": {"logic": "OR", "0": {"offers": {"volume": "1 л"}}, "1": {"id": a}}}),
+    )
+    .await;
+    let mut want = vec![a, b];
+    want.sort();
+    assert_eq!(ids(&body), want);
+    let (status, body) = post_json(
+        &app,
+        "/api/v1/iblock/catalog/section/list",
+        json!({"select": ["id", "name"], "hasElements": {"filter": {"offers": {"volume": "4 л"}}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["items"].as_array().unwrap().len(), 1);
+    let (status, body) = post_json(
+        &app,
+        "/api/v1/iblock/catalog/section/list",
+        json!({"select": ["id", "name"], "hasElements": {"filter": {"offers": {"volume": "1 л"}}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["items"], json!([]));
+    // offers внутри offers и на коллекции без предложений
+    for (code, filter) in [
+        ("catalog", json!({"offers": {"offers": {}}})),
+        ("catalog_offers", json!({"offers": {}})),
+    ] {
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/v1/iblock/{code}/element/list"),
+            json!({"select": ["id"], "filter": filter}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], json!("error"), "{body}");
+        assert!(body.to_string().contains("Unknown filter field"), "{body}");
+    }
+}

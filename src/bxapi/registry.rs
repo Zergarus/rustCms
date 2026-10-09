@@ -22,6 +22,8 @@ pub struct Schema {
     pub sections: HashMap<i64, Section>,
     /// Разделы, активные вместе со всеми предками (GLOBAL_ACTIVE в Битриксе).
     pub globally_active: HashSet<i64>,
+    /// Коллекция предложений этой коллекции товаров (`product_collection_id` = её id).
+    pub offers: Option<i64>,
 }
 
 impl Schema {
@@ -178,6 +180,10 @@ async fn load(db: &PgPool) -> sqlx::Result<Snapshot> {
     .map(|e| (e.id, e))
     .collect();
 
+    let offers_of: HashMap<i64, i64> = iblocks
+        .iter()
+        .filter_map(|s| Some((s.collection.product_collection_id?, s.collection.id)))
+        .collect();
     let mut by_id = HashMap::new();
     let mut by_code = HashMap::new();
     for summary in iblocks {
@@ -191,6 +197,7 @@ async fn load(db: &PgPool) -> sqlx::Result<Snapshot> {
                 props: props.remove(&iblock.id).unwrap_or_default(),
                 sections,
                 globally_active,
+                offers: offers_of.get(&iblock.id).copied(),
                 collection: iblock,
             }),
         );

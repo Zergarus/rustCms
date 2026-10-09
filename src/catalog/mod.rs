@@ -7,7 +7,6 @@ use sqlx::{FromRow, PgConnection, PgPool};
 /// Коды типов товара (как `CATALOG_TYPE` в Битриксе).
 pub const TYPE_SIMPLE: i16 = 1;
 pub const TYPE_SKU: i16 = 3;
-#[allow(dead_code)]
 pub const TYPE_OFFER: i16 = 4;
 pub const TYPE_EMPTY_SKU: i16 = 6;
 

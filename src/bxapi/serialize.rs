@@ -289,6 +289,25 @@ struct Loaded {
     prices: HashMap<i64, Vec<catalog::Price>>,
     stocks: HashMap<i64, Vec<(i64, f64)>>,
     quantities: HashMap<i64, f64>,
+    /// Тип товара (`catalog_products.type`) записей каталога страницы.
+    types: HashMap<i64, i16>,
+    /// Товары с предложениями, у которых цена и остатки взяты из предложений.
+    from_offers: HashSet<i64>,
+}
+
+/// Предложение, чья цена показывается у товара («от»): самая низкая основная цена среди
+/// доступных предложений, нет доступных — среди всех активных. Предложения без цены
+/// выбираются, только если цены нет ни у кого. `offers`: (id, доступно, цены).
+pub fn pick_from_offer(offers: &[(i64, bool, Vec<catalog::Price>)]) -> Option<i64> {
+    let cheapest = |only_available: bool| {
+        offers
+            .iter()
+            .filter(|(_, available, _)| *available || !only_available)
+            .filter_map(|(id, _, prices)| Some((*id, catalog::main_price(prices)?.price)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(id, _)| id)
+    };
+    cheapest(true).or_else(|| cheapest(false))
 }
 
 impl Loaded {
@@ -426,6 +445,9 @@ impl Loaded {
                     loaded.stocks.entry(el).or_default().push((store, amount));
                 }
             }
+            if select.has("catalogType") || select.has("catalogPrice") || select.has("stocks") {
+                loaded.load_types(env, &row_ids).await?;
+            }
             if select.has("catalogQuantity") {
                 let qty: Vec<(i64, f64)> = sqlx::query_as(
                     "SELECT item_id, quantity::float8 FROM catalog_products WHERE item_id = ANY($1)",
@@ -437,6 +459,73 @@ impl Loaded {
             }
         }
         Ok(loaded)
+    }
+
+    /// Типы товаров страницы и, для товаров с предложениями, цена «от» и суммарные
+    /// остатки по активным предложениям — одним пакетом на страницу.
+    async fn load_types(&mut self, env: &Env<'_>, row_ids: &[i64]) -> Result<(), BxError> {
+        let types: Vec<(i64, i16)> = sqlx::query_as(
+            "SELECT i.id, COALESCE(c.type, CASE WHEN i.product_id IS NULL THEN $2 ELSE $3 END)::int2
+             FROM collection_items i LEFT JOIN catalog_products c ON c.item_id = i.id
+             WHERE i.id = ANY($1)",
+        )
+        .bind(row_ids)
+        .bind(catalog::TYPE_SIMPLE)
+        .bind(catalog::TYPE_OFFER)
+        .fetch_all(&env.state.db)
+        .await?;
+        self.types = types.into_iter().collect();
+        let parents: Vec<i64> = self
+            .types
+            .iter()
+            .filter(|(_, t)| matches!(**t, catalog::TYPE_SKU | catalog::TYPE_EMPTY_SKU))
+            .map(|(id, _)| *id)
+            .collect();
+        if parents.is_empty() {
+            return Ok(());
+        }
+        // Своих цен и остатков у товара с предложениями нет: только от предложений
+        for id in &parents {
+            self.prices.remove(id);
+            self.stocks.remove(id);
+        }
+        let links: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT product_id, id FROM collection_items
+             WHERE product_id = ANY($1) AND active ORDER BY id",
+        )
+        .bind(&parents)
+        .fetch_all(&env.state.db)
+        .await?;
+        let offer_ids: Vec<i64> = links.iter().map(|(_, o)| *o).collect();
+        let infos = catalog::load(&env.state.db, &offer_ids).await?;
+        let mut by_product: HashMap<i64, Vec<(i64, bool, Vec<catalog::Price>)>> = HashMap::new();
+        let mut sums: HashMap<i64, HashMap<i64, f64>> = HashMap::new();
+        for (product, offer) in links {
+            let Some(info) = infos.get(&offer) else {
+                continue;
+            };
+            let buyable =
+                info.available && (info.total > 0.0 || !info.quantity_trace || info.can_buy_zero);
+            by_product
+                .entry(product)
+                .or_default()
+                .push((offer, buyable, info.prices.clone()));
+            for (store, amount) in &info.amounts {
+                *sums.entry(product).or_default().entry(*store).or_default() += amount;
+            }
+        }
+        for (product, offers) in by_product {
+            if let Some(offer) = pick_from_offer(&offers)
+                && let Some((_, _, prices)) = offers.into_iter().find(|(id, _, _)| *id == offer)
+            {
+                self.prices.insert(product, prices);
+                self.from_offers.insert(product);
+            }
+            if let Some(sum) = sums.remove(&product) {
+                self.stocks.insert(product, sum.into_iter().collect());
+            }
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -468,7 +557,12 @@ impl Loaded {
                     .get(&row.id)
                     .map_or(Value::Null, |q| number_value(*q)),
             ),
-            "catalogPrice" | "stocks" | "catalogQuantity" => None,
+            "catalogType" if schema.collection.is_catalog => Some(
+                self.types
+                    .get(&row.id)
+                    .map_or(Value::from(catalog::TYPE_SIMPLE), |t| Value::from(*t)),
+            ),
+            "catalogPrice" | "stocks" | "catalogQuantity" | "catalogType" => None,
             _ => {
                 if let Some(v) = base_value(schema, row, root) {
                     return Some(v);
@@ -666,12 +760,16 @@ impl Loaded {
                 })
             })
             .collect();
-        json!({
+        let mut value = json!({
             "value": number_value(main.price),
             "currency": main.currency,
             "formatted": format_price(main.price, snap.currencies.get(&main.currency)),
             "byType": by_type,
-        })
+        });
+        if self.from_offers.contains(&item_id) {
+            value["fromOffers"] = Value::Bool(true); // цена «от» — самого дешёвого предложения
+        }
+        value
     }
 
     /// Остатки по активным складам, где у товара есть запись; без записей — `[]`.
@@ -811,5 +909,36 @@ mod tests {
             .with_timezone(&Utc);
         assert_eq!(format_date(dt), "24.07.2026 11:45:07");
         assert_eq!(collapse_slashes("//catalog//a/1/"), "/catalog/a/1/");
+    }
+
+    fn price(value: f64) -> catalog::Price {
+        catalog::Price {
+            type_id: 1,
+            type_name: "Базовая".into(),
+            is_base: true,
+            price: value,
+            currency: "RUB".into(),
+            quantity_from: None,
+            quantity_to: None,
+        }
+    }
+
+    #[test]
+    fn pick_cheapest_available_then_active() {
+        let offers = [
+            (1, false, vec![price(100.0)]),
+            (2, true, vec![price(300.0)]),
+            (3, true, vec![price(200.0)]),
+        ];
+        assert_eq!(pick_from_offer(&offers), Some(3));
+        let none_available = [
+            (1, false, vec![price(100.0)]),
+            (2, false, vec![price(300.0)]),
+        ];
+        assert_eq!(pick_from_offer(&none_available), Some(1));
+        // Без цены предложение не выбирается, пока есть с ценой
+        let unpriced = [(1, true, vec![]), (2, true, vec![price(50.0)])];
+        assert_eq!(pick_from_offer(&unpriced), Some(2));
+        assert_eq!(pick_from_offer(&[]), None);
     }
 }

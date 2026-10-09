@@ -226,6 +226,7 @@ pub fn push_leaf(
     let a = ctx.alias.clone();
 
     match segments.as_slice() {
+        ["offers"] if ctx.schema.offers.is_some() => push_offers(qb, ctx, &value),
         ["id"] => push_column(qb, &format!("{a}.id"), Ty::Int, op, &values),
         ["name"] => push_column(qb, &format!("{a}.name"), Ty::Text, op, &values),
         ["code"] => push_column(qb, &format!("{a}.code"), Ty::Text, op, &values),
@@ -314,6 +315,39 @@ pub fn push_leaf(
         }
         [] => Err(unknown_field(path)),
     }
+}
+
+/// `offers: {<фильтр>}` — у товара есть предложение (записи с `product_id` = товар
+/// в коллекции предложений), удовлетворяющее вложенному фильтру.
+fn push_offers(qb: &mut QueryBuilder<Postgres>, ctx: &Ctx, value: &Value) -> Result<(), BxError> {
+    if ctx.depth >= MAX_DEPTH {
+        return Err(BxError::new(
+            "invalid_filter",
+            "Relation depth limit exceeded",
+        ));
+    }
+    let Value::Object(sub) = value else {
+        return Err(BxError::new(
+            "invalid_filter",
+            "Filter offers must be an object",
+        ));
+    };
+    let schema = ctx
+        .schema
+        .offers
+        .and_then(|id| ctx.snap.get(id))
+        .ok_or_else(|| unknown_field("offers"))?
+        .clone();
+    let o = ctx.next_alias("o");
+    let nested = ctx.nested(&schema, o.clone());
+    qb.push(format!(
+        "EXISTS (SELECT 1 FROM collection_items {o} WHERE {o}.product_id = {}.id AND {o}.collection_id = ",
+        ctx.alias
+    ));
+    qb.push_bind(schema.collection.id).push(" AND ");
+    push_group(qb, &nested, sub)?;
+    qb.push(")");
+    Ok(())
 }
 
 /// `true`/`false` → маркеры (`Y`/`N`), в том числе внутри массива.
