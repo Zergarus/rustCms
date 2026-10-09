@@ -122,6 +122,33 @@ mod tests {
             .unwrap();
         assert_eq!(state(&db, a).await, Some((6, false)));
         assert_eq!(state(&db, b).await, Some((3, true)));
+        assert_eq!(state(&db, offer).await.unwrap().0, 4);
+    }
+
+    #[sqlx::test]
+    async fn offer_type_follows_link(db: PgPool) {
+        let (products, offers) = collections(&db).await;
+        let product = item(&db, products, "tovar", None).await;
+        let rec = item(&db, offers, "rec", None).await;
+        stock(&db, rec, 5, true, false).await;
+        assert_eq!(state(&db, rec).await.unwrap().0, 1);
+
+        sqlx::query("UPDATE collection_items SET product_id = $1 WHERE id = $2")
+            .bind(product)
+            .bind(rec)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(state(&db, rec).await.unwrap().0, 4);
+        assert_eq!(state(&db, product).await, Some((3, true)));
+
+        sqlx::query("UPDATE collection_items SET product_id = NULL WHERE id = $1")
+            .bind(rec)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(state(&db, rec).await.unwrap().0, 1);
+        assert_eq!(state(&db, product).await, Some((6, false)));
     }
 
     #[sqlx::test]

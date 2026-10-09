@@ -59,6 +59,11 @@ $$ LANGUAGE plpgsql;
 
 CREATE FUNCTION collection_items_sku_trg() RETURNS TRIGGER AS $$
 BEGIN
+    IF TG_OP = 'UPDATE' AND NEW.product_id IS DISTINCT FROM OLD.product_id THEN
+        -- Запись стала предложением (4) или перестала им быть (1)
+        UPDATE catalog_products SET type = CASE WHEN NEW.product_id IS NULL THEN 1 ELSE 4 END
+        WHERE item_id = NEW.id;
+    END IF;
     IF TG_OP IN ('UPDATE', 'DELETE') THEN
         PERFORM refresh_sku_product(OLD.product_id);
     END IF;
