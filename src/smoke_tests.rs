@@ -2035,7 +2035,7 @@ async fn offer_of_inactive_product_not_purchasable(db: PgPool) {
 async fn offer_order(db: &PgPool, app: &Router, offer: i64) -> i64 {
     use crate::sale::repo::{NewOrder, create};
     let (_, body) = cart_post(
-        &app,
+        app,
         "/api/v1/cart/items",
         "tok",
         json!({"productId": offer}),
