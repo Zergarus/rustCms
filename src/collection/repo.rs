@@ -152,8 +152,8 @@ pub async fn update_field(db: &PgPool, id: i64, input: &FieldInput) -> sqlx::Res
     Ok(())
 }
 
-/// Удаляет полейо и возвращает id коллекции, к которому оно относилось.
-/// Значения полейа у записей тоже вычищаются.
+/// Удаляет поле и возвращает id коллекции, к которой оно относилось.
+/// Значения поля у записей тоже вычищаются.
 pub async fn delete_field(db: &PgPool, id: i64) -> sqlx::Result<Option<i64>> {
     let mut tx = db.begin().await?;
     let row: Option<(i64, String)> =
@@ -263,7 +263,7 @@ pub async fn save_options(
     tx.commit().await
 }
 
-/// Убирает id из значения полейа у всех записей коллекции
+/// Убирает id из значения поля у всех записей коллекции
 /// (одиночное значение становится null, из массива id вычёркиваются).
 async fn remove_prop_ids(
     tx: &mut sqlx::PgConnection,
@@ -430,7 +430,7 @@ pub async fn get_item(db: &PgPool, id: i64) -> sqlx::Result<Option<Item>> {
 }
 
 /// Названия записей по id (для подписей у привязок). `collection_id` — если задан,
-/// учитываются только записи этого коллекции.
+/// учитываются только записи этой коллекции.
 pub async fn item_names(
     db: &PgPool,
     ids: &[i64],

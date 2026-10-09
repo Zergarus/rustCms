@@ -502,3 +502,106 @@ async fn group_collection_access_roundtrip(db: PgPool) {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
+
+/// Карточка корзины ведёт на запись, подсказка формы коллекции — на наш API.
+#[sqlx::test]
+async fn shop_cart_links_and_api_hint(db: PgPool) {
+    let f = crate::test_support::order_fixture(&db).await;
+    let c = content_fixture(&db).await;
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (status, html) = get(&app, &format!("/admin/shop/carts/{}", f.buyer_id), &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.contains(&format!("/admin/items/{}", f.product_id)),
+        "{html}"
+    );
+    assert!(!html.contains("/admin/elements/"));
+    page_has(
+        &app,
+        &cookie,
+        &format!("/admin/collections/{}", c.collection_id),
+        &["/api/v1/iblocks/код"],
+    )
+    .await;
+}
+
+/// Тексты ошибок bxapi — часть контракта, переименование их не меняет.
+#[sqlx::test]
+async fn bxapi_error_messages_unchanged(db: PgPool) {
+    let c = content_fixture(&db).await;
+    sqlx::query("INSERT INTO collection_fields (collection_id, code, name, kind) VALUES ($1, 'free', 'Без привязки', 'element')")
+        .bind(c.collection_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let app = app(&db);
+    let (_, body) = post_json(&app, "/api/v1/iblock/nope/element/list", json!({})).await;
+    assert_eq!(
+        body["errors"][0]["message"],
+        "Iblock with API_CODE=\"nope\" not found"
+    );
+    let (_, body) = post_json(
+        &app,
+        "/api/v1/iblock/news/element/list",
+        json!({"filter": {"free.element.name": "x"}}),
+    )
+    .await;
+    assert_eq!(
+        body["errors"][0]["message"],
+        "Property free has no linked iblock"
+    );
+}
+
+/// Пустой список коллекций и текст права «Работа с заказами».
+#[sqlx::test]
+async fn empty_collections_and_order_permission_text(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    page_has(
+        &app(&db),
+        &cookie,
+        "/admin/collections",
+        &["Создать первую"],
+    )
+    .await;
+    let orders = crate::access::PERMISSIONS
+        .iter()
+        .find(|p| p.code == crate::access::ORDERS_MANAGE)
+        .unwrap();
+    assert!(orders.description.contains("правка свойств и состава"));
+}
+
+/// Обломки автозамены словаря не должны попадать в интерфейс.
+#[test]
+fn no_broken_russian_in_ui() {
+    let broken = [
+        "коллекциих",
+        "этого коллекции",
+        "этом коллекции",
+        "полейа",
+        "полейо",
+        "записьу",
+    ];
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for dir in [
+        "templates/admin",
+        "templates/admin/shop",
+        "src/admin",
+        "src/admin/shop",
+        "src/collection",
+    ] {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    files.push("src/access.rs".into());
+    for path in files {
+        let text = std::fs::read_to_string(&path).unwrap();
+        for b in broken {
+            assert!(!text.contains(b), "{}: «{b}»", path.display());
+        }
+    }
+}

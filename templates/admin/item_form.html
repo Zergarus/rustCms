@@ -23,7 +23,7 @@
 <form class="card form" method="post" enctype="multipart/form-data"
       action="{% if item_id %}/admin/items/{{ item_id }}{% else %}/admin/collections/{{ collection.id }}/items{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}
-  {% if not can_write %}<div class="notice">Только просмотр: у вас нет прав на изменение записей этого коллекции.</div>{% endif %}
+  {% if not can_write %}<div class="notice">Только просмотр: у вас нет прав на изменение записей этой коллекции.</div>{% endif %}
   <fieldset class="plain" {% if not can_write %}disabled{% endif %}>
 
   <div class="grid-2">

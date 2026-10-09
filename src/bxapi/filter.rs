@@ -615,7 +615,7 @@ fn push_prop_related(
         .ok_or_else(|| {
             BxError::new(
                 "invalid_filter",
-                format!("Field {} has no linked iblock", prop.code),
+                format!("Property {} has no linked iblock", prop.code),
             )
         })?
         .clone();

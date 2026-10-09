@@ -38,7 +38,7 @@
   <fieldset>
     <legend>Доступ к коллекциям</legend>
     {% if collections %}
-    <p class="muted hint">Право «Управление коллекциями» даёт изменение во всех коллекциих — тогда настройки ниже не нужны.</p>
+    <p class="muted hint">Право «Управление коллекциями» даёт изменение во всех коллекциях — тогда настройки ниже не нужны.</p>
     <div class="access-grid">
       {% for ib in collections %}
       {% set current = form.levels[ib.id|string] or "none" %}

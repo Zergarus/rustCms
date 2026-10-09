@@ -290,7 +290,7 @@ pub async fn delete_field(
     Ok(Redirect::to(&format!("/admin/collections/{collection_id}")))
 }
 
-/// Страница полейа: основные настройки и (для списка) варианты.
+/// Страница поля: основные настройки и (для списка) варианты.
 async fn render_property(
     state: &AppState,
     user: Access,
@@ -346,7 +346,7 @@ pub async fn field_form(
     render_property(&state, user, property, None, None, None).await
 }
 
-/// Код и тип полейа не меняются: от них зависят уже сохранённые значения.
+/// Код и тип поля не меняются: от них зависят уже сохранённые значения.
 pub async fn update_field(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,

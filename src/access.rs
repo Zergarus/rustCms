@@ -35,7 +35,7 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     PermissionDef {
         code: COLLECTIONS_MANAGE,
         name: "Управление коллекциями",
-        description: "Создание и настройка коллекций и полей, изменение записей во всех коллекциих",
+        description: "Создание и настройка коллекций и полей, изменение записей во всех коллекциях",
     },
     PermissionDef {
         code: USERS_MANAGE,
@@ -50,7 +50,7 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     PermissionDef {
         code: ORDERS_MANAGE,
         name: "Работа с заказами",
-        description: "Просмотр заказов, смена статуса, оплата, отмена, правка полей и состава",
+        description: "Просмотр заказов, смена статуса, оплата, отмена, правка свойств и состава",
     },
 ];
 

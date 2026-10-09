@@ -33,7 +33,7 @@ pub async fn schema_for(
         .ok_or_else(|| {
             BxError::new(
                 "iblock_not_found",
-                format!("Collection with API_CODE=\"{api_code}\" not found"),
+                format!("Iblock with API_CODE=\"{api_code}\" not found"),
             )
         })?;
     Ok((snap, schema))

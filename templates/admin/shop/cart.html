@@ -12,7 +12,7 @@
     <tbody>
       {% for i in snap["items"] %}
       <tr {% if not i.isAvailable %}class="inactive"{% endif %}>
-        <td><a href="/admin/elements/{{ i.productId }}">{{ i.name }}</a></td>
+        <td><a href="/admin/items/{{ i.productId }}">{{ i.name }}</a></td>
         <td>{% if i.store %}{{ i.store.name }}{% else %}<span class="muted">не выбран</span>{% endif %}</td>
         <td>{{ i.quantity }}</td>
         <td>{{ i.price }}</td>

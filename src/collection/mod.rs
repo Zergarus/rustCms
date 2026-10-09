@@ -46,7 +46,7 @@ pub struct Field {
     pub is_required: bool,
     pub sort: i32,
     pub multiple: bool,
-    /// Для привязки к записьу: коллекция, из которого выбираются записи.
+    /// Для привязки к записи: коллекция, из которой выбираются записи.
     pub link_collection_id: Option<i64>,
     /// `directory` — привязка по внешнему коду записи (бывший справочник HL-блока).
     pub user_type: String,

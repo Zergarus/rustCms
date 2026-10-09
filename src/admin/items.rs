@@ -127,7 +127,7 @@ fn build_input(
     }
     let section_id = parse_optional_id(get("section_id"), "Раздел", &mut errors);
     if section_id.is_some_and(|id| !sections.iter().any(|s| s.id == id)) {
-        errors.push("Раздел не найден в этом коллекции".into());
+        errors.push("Раздел не найден в этой коллекции".into());
     }
     let preview_picture_id =
         parse_optional_id(get("preview_picture_id"), "Картинка анонса", &mut errors);
