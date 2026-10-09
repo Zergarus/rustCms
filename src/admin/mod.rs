@@ -46,6 +46,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         )
         .route("/collections/{id}/delete", post(collections::delete))
         .route("/collections/{id}/fields", post(collections::add_field))
+        .route("/collections/{id}/offers", post(collections::set_offers))
         .route(
             "/fields/{id}",
             get(collections::field_form).post(collections::update_field),

@@ -69,7 +69,21 @@ pub struct FieldForm {
     multiple: Option<String>,
     #[serde(default)]
     link_collection_id: String,
+    in_basket: Option<String>,
+    offer_tree: Option<String>,
 }
+
+/// Подключение коллекции предложений: `mode` = `none` | `existing` | `create`.
+#[derive(Deserialize)]
+pub struct OffersForm {
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    offers_id: String,
+}
+
+/// Ошибка для системного поля связи предложения с товаром.
+const SYSTEM_LINK_ERROR: &str = "Системное поле связи с товаром";
 
 impl FieldForm {
     fn validate(&self) -> Result<FieldInput, String> {
@@ -91,7 +105,13 @@ impl FieldForm {
             _ if kind.code != "element" => None,
             raw => Some(raw.parse().map_err(|_| "Неверная коллекция привязки")?),
         };
+        let offer_tree = self.offer_tree.is_some();
+        if offer_tree && !matches!(kind.code, "list" | "element" | "string") {
+            return Err("Поле выбора предложения — только список, привязка или строка".into());
+        }
         Ok(FieldInput {
+            in_basket: self.in_basket.is_some(),
+            offer_tree,
             code: code.to_string(),
             name: name.to_string(),
             kind: self.kind.clone(),
@@ -159,6 +179,15 @@ pub async fn create(
     .into_response())
 }
 
+/// Ошибки блоков страницы коллекции, кроме основной формы.
+#[derive(Default)]
+struct BlockErrors {
+    /// Форма добавления поля (и действия над полями).
+    field: Option<String>,
+    /// Блок «Торговые предложения».
+    offers: Option<String>,
+}
+
 /// Страница редактирования коллекции вместе со списком полей.
 async fn render_edit(
     state: &AppState,
@@ -167,12 +196,21 @@ async fn render_edit(
     form: Option<CollectionForm>,
     error: Option<String>,
     prop_form: FieldForm,
-    prop_error: Option<String>,
+    errors: BlockErrors,
 ) -> AppResult<Html<String>> {
+    let BlockErrors {
+        field: prop_error,
+        offers: offers_error,
+    } = errors;
     let collection = repo::get_collection(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
     let properties = repo::list_fields(&state.db, id).await?;
+    let offers = repo::offers_collection(&state.db, id).await?;
+    let product_collection = match collection.product_collection_id {
+        Some(p) => repo::get_collection(&state.db, p).await?,
+        None => None,
+    };
     let form = form.unwrap_or_else(|| CollectionForm {
         code: collection.code.clone(),
         name: collection.name.clone(),
@@ -192,6 +230,9 @@ async fn render_edit(
             properties,
             prop_form,
             prop_error,
+            offers,
+            product_collection,
+            offers_error,
             collections => repo::list_collections(&state.db).await?,
             kinds => Value::from_serialize(fields::KINDS),
         },
@@ -212,7 +253,16 @@ pub async fn edit_form(
     Path(id): Path<i64>,
 ) -> AppResult<Html<String>> {
     user.require(COLLECTIONS_MANAGE)?;
-    render_edit(&state, user, id, None, None, empty_field_form(), None).await
+    render_edit(
+        &state,
+        user,
+        id,
+        None,
+        None,
+        empty_field_form(),
+        BlockErrors::default(),
+    )
+    .await
 }
 
 pub async fn update(
@@ -240,7 +290,7 @@ pub async fn update(
         Some(form),
         Some(error),
         empty_field_form(),
-        None,
+        BlockErrors::default(),
     );
     Ok(page.await?.into_response())
 }
@@ -274,20 +324,158 @@ pub async fn add_field(
         },
         Err(msg) => msg,
     };
-    let page = render_edit(&state, user, id, None, None, form, Some(error));
+    let page = render_edit(
+        &state,
+        user,
+        id,
+        None,
+        None,
+        form,
+        BlockErrors {
+            field: Some(error),
+            ..Default::default()
+        },
+    );
     Ok(page.await?.into_response())
+}
+
+/// Блок «Торговые предложения»: нет / существующая коллекция / новая.
+pub async fn set_offers(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+    Form(form): Form<OffersForm>,
+) -> AppResult<Response> {
+    user.require(COLLECTIONS_MANAGE)?;
+    let collection = repo::get_collection(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let result = apply_offers(&state, &collection, &form).await?;
+    match result {
+        Ok(()) => Ok(Redirect::to(&format!("/admin/collections/{id}")).into_response()),
+        Err(error) => {
+            let page = render_edit(
+                &state,
+                user,
+                id,
+                None,
+                None,
+                empty_field_form(),
+                BlockErrors {
+                    offers: Some(error),
+                    ..Default::default()
+                },
+            );
+            Ok(page.await?.into_response())
+        }
+    }
+}
+
+/// Меняет связь коллекции товаров с коллекцией предложений; `Err` — текст для формы.
+async fn apply_offers(
+    state: &AppState,
+    collection: &crate::collection::Collection,
+    form: &OffersForm,
+) -> AppResult<Result<(), String>> {
+    let db = &state.db;
+    if collection.product_collection_id.is_some() {
+        return Ok(Err(
+            "Это коллекция предложений: подключать к ней предложения нельзя".into(),
+        ));
+    }
+    let current = repo::offers_collection(db, collection.id).await?;
+    let target = match form.mode.as_str() {
+        "none" => None,
+        "existing" => {
+            let Some(target) = form
+                .offers_id
+                .trim()
+                .parse::<i64>()
+                .ok()
+                .filter(|t| *t != collection.id)
+            else {
+                return Ok(Err("Выберите коллекцию предложений".into()));
+            };
+            let Some(offers) = repo::get_collection(db, target).await? else {
+                return Ok(Err("Коллекция предложений не найдена".into()));
+            };
+            if repo::offers_collection(db, offers.id).await?.is_some() {
+                return Ok(Err(
+                    "У выбранной коллекции есть свои предложения — она не может быть предложениями"
+                        .into(),
+                ));
+            }
+            let foreign = repo::foreign_offers_count(db, offers.id, collection.id).await?;
+            if foreign > 0 {
+                return Ok(Err(format!(
+                    "В коллекции «{}» есть предложения другого товара ({foreign}) — её нельзя использовать",
+                    offers.name
+                )));
+            }
+            Some(Some(offers.id))
+        }
+        "create" => Some(None),
+        _ => return Ok(Err("Неизвестный вариант".into())),
+    };
+    // Прежняя связь снимается, если заменяется другой; с записями — отказ
+    let keep = matches!((&target, &current), (Some(Some(t)), Some(c)) if *t == c.id);
+    if keep {
+        return Ok(Ok(()));
+    }
+    if current.is_some() {
+        match repo::unlink_offers(db, collection.id).await {
+            Ok(()) => {}
+            Err(repo::UnlinkError::HasOffers(n)) => {
+                return Ok(Err(format!("Сначала удалите предложения ({n})")));
+            }
+            Err(repo::UnlinkError::Db(e)) => return Err(e.into()),
+        }
+    }
+    match target {
+        None => {}
+        Some(Some(offers_id)) => repo::link_offers(db, collection.id, offers_id).await?,
+        Some(None) => match repo::create_offer_collection(db, collection).await {
+            Ok(_) => {}
+            Err(e) if is_unique_violation(&e) => {
+                return Ok(Err(format!(
+                    "Коллекция с кодом «{}_offers» уже существует",
+                    collection.code
+                )));
+            }
+            Err(e) => return Err(e.into()),
+        },
+    }
+    Ok(Ok(()))
 }
 
 pub async fn delete_field(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
-) -> AppResult<Redirect> {
+) -> AppResult<Response> {
     user.require(COLLECTIONS_MANAGE)?;
+    if repo::is_sku_field(&state.db, id).await? {
+        let field = repo::get_field(&state.db, id)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        let page = render_edit(
+            &state,
+            user,
+            field.collection_id,
+            None,
+            None,
+            empty_field_form(),
+            BlockErrors {
+                field: Some(SYSTEM_LINK_ERROR.to_string()),
+                ..Default::default()
+            },
+        );
+        return Ok(page.await?.into_response());
+    }
     let collection_id = repo::delete_field(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    Ok(Redirect::to(&format!("/admin/collections/{collection_id}")))
+    Ok(Redirect::to(&format!("/admin/collections/{collection_id}")).into_response())
 }
 
 /// Страница поля: основные настройки и (для списка) варианты.
@@ -313,6 +501,8 @@ async fn render_property(
             .link_collection_id
             .map(|id| id.to_string())
             .unwrap_or_default(),
+        in_basket: property.in_basket.then(|| "on".into()),
+        offer_tree: property.offer_tree.then(|| "on".into()),
     });
     let enums = repo::list_options(&state.db, property.id).await?;
     let kind = fields::kind(&property.kind).map(|k| k.name);
@@ -357,7 +547,12 @@ pub async fn update_field(
     form.code = property.code.clone();
     form.kind = property.kind.clone();
     form.multiple = property.multiple.then(|| "on".into());
+    // Связь предложения с товаром: привязку не меняем, пока связь есть
+    let system = repo::is_sku_field(&state.db, id).await?;
     let error = match form.validate() {
+        Ok(input) if system && input.link_collection_id != property.link_collection_id => {
+            SYSTEM_LINK_ERROR.to_string()
+        }
         Ok(input) => {
             repo::update_field(&state.db, id, &input).await?;
             let url = format!("/admin/collections/{}", property.collection_id);
@@ -517,6 +712,12 @@ mod tests {
             link_collection_id: "3".into(),
             ..Default::default()
         };
+        let tree = |kind: &str| FieldForm {
+            offer_tree: Some("on".into()),
+            ..form(kind, false)
+        };
+        assert!(tree("text").validate().is_err());
+        assert!(tree("list").validate().unwrap().offer_tree);
         assert!(form("boolean", true).validate().is_err());
         assert_eq!(
             form("element", true).validate().unwrap().link_collection_id,

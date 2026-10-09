@@ -6,7 +6,6 @@ use serde_json::{Map, Value};
 use super::{Collection, Field};
 
 /// Код системного поля связи, которое создаёт `create_offer_collection`.
-#[allow(dead_code)] // подключается в админке (следующая задача SKU)
 pub const LINK_CODE: &str = "cml2_link";
 
 /// SQL-выражение `field_values` записи `alias` (алиас или имя таблицы `collection_items`).

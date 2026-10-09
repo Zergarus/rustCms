@@ -143,6 +143,10 @@ pub struct FieldInput {
     pub sort: i32,
     pub multiple: bool,
     pub link_collection_id: Option<i64>,
+    /// Показывать значение в позиции корзины.
+    pub in_basket: bool,
+    /// Поле выбора предложения.
+    pub offer_tree: bool,
 }
 
 #[derive(Debug)]

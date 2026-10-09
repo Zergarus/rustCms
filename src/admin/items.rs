@@ -270,6 +270,10 @@ struct CollectionContext {
     sections: Vec<Section>,
     /// Для торгового каталога — типы цен и склады вкладки «Торговый каталог».
     catalog: Option<CatalogContext>,
+    /// Для коллекции товаров — её коллекция предложений.
+    offers: Option<Collection>,
+    /// Для коллекции предложений — коллекция товаров.
+    product_collection: Option<Collection>,
 }
 
 #[derive(Serialize)]
@@ -321,6 +325,12 @@ fn purchase_input_from_form(
             amounts.push((*st, number(raw).ok_or("Остаток: ожидается число")?));
         }
     }
+    let weight = match form.get("weight") {
+        "" => 0.0,
+        raw => number(raw)
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .ok_or("Вес: ожидается число не меньше нуля")?,
+    };
     let flag = |key: &str| match form.get(key) {
         "Y" => Some(true),
         "N" => Some(false),
@@ -331,7 +341,7 @@ fn purchase_input_from_form(
         amounts,
         quantity,
         available: form.0.contains_key("available"),
-        weight: 0.0,
+        weight,
         quantity_trace: flag("quantity_trace"),
         can_buy_zero: flag("can_buy_zero"),
     })
@@ -383,13 +393,15 @@ async fn purchase_to_form(state: &AppState, item_id: i64, form: &mut FormValues)
             form.set(&format!("price_{}", p.type_id), p.price.to_string());
         }
     }
-    let quantity: Option<f64> =
-        sqlx::query_scalar("SELECT quantity::float8 FROM catalog_products WHERE item_id = $1")
-            .bind(item_id)
-            .fetch_optional(&state.db)
-            .await?;
-    if let Some(q) = quantity {
+    let stock: Option<(f64, f64)> = sqlx::query_as(
+        "SELECT quantity::float8, weight::float8 FROM catalog_products WHERE item_id = $1",
+    )
+    .bind(item_id)
+    .fetch_optional(&state.db)
+    .await?;
+    if let Some((q, weight)) = stock {
         form.set("quantity", q.to_string());
+        form.set("weight", weight.to_string());
     }
     let amounts: Vec<(i64, f64)> = sqlx::query_as(
         "SELECT store_id, amount::float8 FROM catalog_store_amounts WHERE item_id = $1",
@@ -421,7 +433,13 @@ async fn load_collection(state: &AppState, id: i64) -> AppResult<CollectionConte
     } else {
         None
     };
+    let product_collection = match collection.product_collection_id {
+        Some(p) => repo::get_collection(&state.db, p).await?,
+        None => None,
+    };
     Ok(CollectionContext {
+        offers: repo::offers_collection(&state.db, id).await?,
+        product_collection,
         properties: repo::list_fields(&state.db, id).await?,
         enums: repo::list_collection_options(&state.db, id).await?,
         sections: section_tree(repo::list_sections(&state.db, id).await?),
@@ -452,6 +470,8 @@ async fn render_form(
         properties,
         enums,
         sections,
+        offers,
+        product_collection,
     } = ctx;
 
     // Файлы и подписи привязанных записей для текущих значений формы
@@ -509,14 +529,135 @@ async fn render_form(
     multi.extend(form.0.iter().map(|(k, v)| (k.clone(), v.clone())));
 
     let can_write = user.collection_level(collection.id) >= Level::Write;
+    // У товара с предложениями цены и остатки задаются у предложений
+    let offers_priced = match item_id {
+        Some(id) => matches!(
+            product_type(&state.db, id).await?,
+            Some(catalog::TYPE_SKU | catalog::TYPE_EMPTY_SKU)
+        ),
+        None => false,
+    };
+    let offers_tab = match (&offers, item_id) {
+        (Some(o), Some(id)) if user.collection_level(o.id) >= Level::Read => {
+            Some(offers_tab(state, o, id).await?)
+        }
+        _ => None,
+    };
+    let can_write_offers = offers_tab.is_some()
+        && can_write
+        && offers
+            .as_ref()
+            .is_some_and(|o| user.collection_level(o.id) >= Level::Write);
+    let offer_product = product_collection.as_ref().map(|c| c.name.clone());
     render(
         state,
         "item_form.html",
         context! {
             user, collection, properties, item_id, error, can_write, sections, enums, files, linked,
-            multi, catalog, form => form.first_values(),
+            multi, catalog, offers_priced, offers, offers_tab, can_write_offers, offer_product,
+            form => form.first_values(),
         },
     )
+}
+
+/// Тип товара из `catalog_products`; `None` — записи каталога нет.
+async fn product_type(db: &sqlx::PgPool, item_id: i64) -> sqlx::Result<Option<i16>> {
+    sqlx::query_scalar("SELECT type FROM catalog_products WHERE item_id = $1")
+        .bind(item_id)
+        .fetch_optional(db)
+        .await
+}
+
+#[derive(Serialize)]
+struct OfferView {
+    id: i64,
+    name: String,
+    active: bool,
+    /// Значения полей выбора предложения, по порядку `OffersTab::fields`.
+    tree: Vec<String>,
+    price: Option<f64>,
+    stock: f64,
+}
+
+#[derive(Serialize)]
+struct OffersTab {
+    /// Названия полей выбора предложения (`offer_tree`).
+    fields: Vec<String>,
+    rows: Vec<OfferView>,
+}
+
+/// Таблица предложений товара `product_id`: одна выборка на вкладку, подписи значений
+/// полей выбора — по одному запросу на все предложения.
+async fn offers_tab(
+    state: &AppState,
+    offers: &Collection,
+    product_id: i64,
+) -> AppResult<OffersTab> {
+    let rows = repo::list_offer_rows(&state.db, offers.id, product_id).await?;
+    let tree: Vec<Field> = repo::list_fields(&state.db, offers.id)
+        .await?
+        .into_iter()
+        .filter(|f| f.offer_tree)
+        .collect();
+    let options = repo::list_collection_options(&state.db, offers.id).await?;
+    let mut linked_ids = Vec::new();
+    for f in tree.iter().filter(|f| f.kind == "element") {
+        for row in &rows {
+            if let Some(v) = row.field_values.0.get(&f.code) {
+                linked_ids.extend(fields::ids(v));
+            }
+        }
+    }
+    let names = repo::item_names(&state.db, &linked_ids, None).await?;
+    let label = |f: &Field, v: &serde_json::Value| -> String {
+        match f.kind.as_str() {
+            "list" => fields::ids(v)
+                .iter()
+                .filter_map(|id| options.iter().find(|o| o.id == *id))
+                .map(|o| o.value.clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+            "element" => fields::ids(v)
+                .iter()
+                .filter_map(|id| names.iter().find(|(n, _)| n == id))
+                .map(|(_, name)| name.clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+            _ => match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Array(a) => a
+                    .iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                _ => String::new(),
+            },
+        }
+    };
+    let rows = rows
+        .iter()
+        .map(|row| OfferView {
+            id: row.id,
+            name: row.name.clone(),
+            active: row.active,
+            tree: tree
+                .iter()
+                .map(|f| {
+                    row.field_values
+                        .0
+                        .get(&f.code)
+                        .map(|v| label(f, v))
+                        .unwrap_or_default()
+                })
+                .collect(),
+            price: row.price,
+            stock: row.stock,
+        })
+        .collect();
+    Ok(OffersTab {
+        fields: tree.into_iter().map(|f| f.name).collect(),
+        rows,
+    })
 }
 
 #[derive(Deserialize)]
@@ -590,6 +731,8 @@ pub async fn list(
 #[derive(Deserialize)]
 pub struct NewQuery {
     section: Option<i64>,
+    /// Для предложения: товар (запись коллекции товаров), к которому оно добавляется.
+    product: Option<i64>,
 }
 
 pub async fn new_form(
@@ -610,6 +753,11 @@ pub async fn new_form(
     }
     if let Some(section) = q.section {
         form.set("section_id", section.to_string());
+    }
+    if let (Some(product), Some(field)) = (q.product, ctx.collection.sku_field_id)
+        && let Some(f) = ctx.properties.iter().find(|f| f.id == field)
+    {
+        form.set(&format!("prop_{}", f.code), product.to_string());
     }
     // Варианты списков «по умолчанию»
     for prop in ctx.properties.iter().filter(|p| p.kind == "list") {
@@ -636,8 +784,17 @@ async fn save(
     let mut form = FormValues::from_pairs(upload.fields);
     form.apply_uploads(upload.uploads, &ctx.properties);
 
+    // У товара с предложениями цены, остатки и доступность принадлежат предложениям
+    let offers_priced = match item_id {
+        Some(id) => matches!(
+            product_type(&state.db, id).await?,
+            Some(catalog::TYPE_SKU | catalog::TYPE_EMPTY_SKU)
+        ),
+        None => false,
+    };
     // Вкладка каталога проверяется вместе с формой — до любой записи
     let purchase = match &ctx.catalog {
+        Some(_) if offers_priced => None,
         Some(c) => {
             // Цены с диапазонами по количеству вкладка не меняет
             let tiered = match item_id {
@@ -661,12 +818,28 @@ async fn save(
         None => None,
     };
     let purchase_error = purchase.as_ref().and_then(|p| p.as_ref().err().cloned());
-    let result = match build_input(&form, &ctx.properties, &ctx.enums, &ctx.sections) {
+    // Поле связи с товаром проверяется отдельно (build_input не знает про «Укажите товар»)
+    let sku_field = ctx.collection.sku_field_id;
+    let parse_props: Vec<Field> = ctx
+        .properties
+        .iter()
+        .cloned()
+        .map(|mut p| {
+            if Some(p.id) == sku_field {
+                p.is_required = false;
+            }
+            p
+        })
+        .collect();
+    let result = match build_input(&form, &parse_props, &ctx.enums, &ctx.sections) {
         Ok(_) if purchase_error.is_some() => Err(purchase_error.clone().unwrap_or_default()),
         Ok(input) if upload.rejected.is_empty() => {
-            match check_references(state, &ctx.properties, &input).await? {
-                Ok(()) => Ok(input),
-                Err(e) => Err(e),
+            match offer_link_error(state, &ctx, &input).await? {
+                Some(e) => Err(e),
+                None => match check_references(state, &ctx.properties, &input).await? {
+                    Ok(()) => Ok(input),
+                    Err(e) => Err(e),
+                },
             }
         }
         Ok(_) => Err(upload.rejected.join("; ")),
@@ -687,10 +860,17 @@ async fn save(
                     if let Some(Ok(p)) = &purchase {
                         catalog::save_purchase(&state.db, saved_id, p).await?;
                     }
-                    let mut url = format!("/admin/collections/{}/items", ctx.collection.id);
-                    if let Some(section) = input.section_id {
-                        url.push_str(&format!("?section={section}"));
-                    }
+                    let url = match input.product_id {
+                        // Предложение: назад в карточку товара, на вкладку предложений
+                        Some(product) => format!("/admin/items/{product}#offers"),
+                        None => {
+                            let mut url = format!("/admin/collections/{}/items", ctx.collection.id);
+                            if let Some(section) = input.section_id {
+                                url.push_str(&format!("?section={section}"));
+                            }
+                            url
+                        }
+                    };
                     return Ok(Redirect::to(&url).into_response());
                 }
                 Err(e) if is_unique_violation(&e) => "Запись с таким кодом уже есть".into(),
@@ -701,6 +881,38 @@ async fn save(
     };
     let page = render_form(state, user, ctx, item_id, form, Some(error)).await?;
     Ok(page.into_response())
+}
+
+/// Предложение обязано ссылаться на существующий товар из коллекции товаров,
+/// независимо от флага «обязательное» у поля связи.
+async fn offer_link_error(
+    state: &AppState,
+    ctx: &CollectionContext,
+    input: &ItemInput,
+) -> AppResult<Option<String>> {
+    let (Some(_), Some(parent)) = (
+        ctx.collection.sku_field_id,
+        ctx.collection.product_collection_id,
+    ) else {
+        return Ok(None);
+    };
+    let mut values = input.field_values.clone();
+    let linked = sku::take_link(&ctx.collection, &ctx.properties, &mut values);
+    let exists = match linked {
+        Some(id) => !repo::item_names(&state.db, &[id], Some(parent))
+            .await?
+            .is_empty(),
+        None => false,
+    };
+    if exists {
+        return Ok(None);
+    }
+    let name = ctx
+        .product_collection
+        .as_ref()
+        .map(|c| c.name.as_str())
+        .unwrap_or_default();
+    Ok(Some(format!("Укажите товар из коллекции {name}")))
 }
 
 pub async fn create(
@@ -757,6 +969,10 @@ pub async fn delete(
     let collection_id = repo::delete_item(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
+    if let Some(product) = element.product_id {
+        // Предложение: назад на вкладку предложений товара
+        return Ok(Redirect::to(&format!("/admin/items/{product}#offers")));
+    }
     let mut url = format!("/admin/collections/{collection_id}/items");
     if let Some(section) = element.section_id {
         url.push_str(&format!("?section={section}"));

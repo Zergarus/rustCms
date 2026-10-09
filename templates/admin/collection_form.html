@@ -42,6 +42,35 @@
 </form>
 
 {% if collection %}
+<section class="card" id="offers">
+  <h2>Торговые предложения</h2>
+  {% if collection.product_collection_id %}
+  <p class="muted">Это коллекция предложений товаров{% if product_collection %} коллекции <a href="/admin/collections/{{ product_collection.id }}">{{ product_collection.name }}</a>{% endif %}. Её настраивают в коллекции товаров.</p>
+  {% else %}
+  <p class="muted">Варианты товара (размер, цвет) — записи отдельной коллекции, привязанные к товару полем «Товар».</p>
+  <form class="form" method="post" action="/admin/collections/{{ collection.id }}/offers">
+    {% if offers_error %}<div class="alert">{{ offers_error }}</div>{% endif %}
+    <div class="grid-2">
+      <label class="check"><input type="radio" name="mode" value="none" {% if not offers %}checked{% endif %}> Нет</label>
+      <label class="check"><input type="radio" name="mode" value="create"> Создать новую коллекцию «{{ collection.code }}_offers»</label>
+    </div>
+    <div class="grid-2">
+      <label class="check"><input type="radio" name="mode" value="existing" {% if offers %}checked{% endif %}> Использовать коллекцию</label>
+      <label>
+        <select name="offers_id">
+          <option value="">—</option>
+          {% for i in collections %}{% if i.id != collection.id %}
+          <option value="{{ i.id }}" {% if offers and offers.id == i.id %}selected{% endif %}>{{ i.name }}</option>
+          {% endif %}{% endfor %}
+        </select>
+      </label>
+    </div>
+    {% if offers %}<p class="muted">Сейчас: <a href="/admin/collections/{{ offers.id }}">{{ offers.name }}</a></p>{% endif %}
+    <button class="btn" type="submit">Применить</button>
+  </form>
+  {% endif %}
+</section>
+
 <section class="card">
   <h2>Поля</h2>
   <p class="muted">Дополнительные поля записей. Значения попадают в API в объект <code>properties</code>.</p>
@@ -101,6 +130,8 @@
     <div class="grid-2">
       <label class="check"><input type="checkbox" name="is_required" {% if prop_form.is_required %}checked{% endif %}> Обязательное</label>
       <label class="check"><input type="checkbox" name="multiple" {% if prop_form.multiple %}checked{% endif %}> Множественное</label>
+      <label class="check"><input type="checkbox" name="in_basket" {% if prop_form.in_basket %}checked{% endif %}> Показывать в корзине</label>
+      <label class="check"><input type="checkbox" name="offer_tree" {% if prop_form.offer_tree %}checked{% endif %}> Поле выбора предложения</label>
     </div>
     <button class="btn" type="submit">Добавить</button>
   </form>

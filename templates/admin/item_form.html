@@ -122,7 +122,12 @@
   </fieldset>
   {% endif %}
 
-  {% if catalog %}
+  {% if offers_priced %}
+  <fieldset>
+    <legend>Торговый каталог</legend>
+    <p class="muted">Цены и остатки задаются у предложений. Доступность товара считается по ним.</p>
+  </fieldset>
+  {% elif catalog %}
   <fieldset>
     <legend>Торговый каталог</legend>
     <div class="grid-3">
@@ -137,6 +142,7 @@
       </label>
       {% endfor %}
     </div>
+    <label>Вес, г<input name="weight" inputmode="decimal" value="{{ form.weight }}" placeholder="0"></label>
     <div class="grid-2">
       <div class="field">
         <span class="field-label">Цены</span>
@@ -165,4 +171,45 @@
     <a class="btn" href="/admin/collections/{{ collection.id }}/items{% if form.section_id %}?section={{ form.section_id }}{% endif %}">{% if can_write %}Отмена{% else %}Назад{% endif %}</a>
   </div>
 </form>
+
+{% if offers_tab %}
+<section class="card" id="offers">
+  <div class="page-head">
+    <h2>Торговые предложения</h2>
+    {% if can_write_offers %}<a class="btn" href="/admin/collections/{{ offers.id }}/items/new?product={{ item_id }}">Добавить предложение</a>{% endif %}
+  </div>
+  {% if offers_tab.rows %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Название</th><th>Активно</th>
+        {% for f in offers_tab.fields %}<th>{{ f }}</th>{% endfor %}
+        <th>Цена</th><th>Остаток</th><th></th>
+      </tr></thead>
+      <tbody>
+        {% for o in offers_tab.rows %}
+        <tr>
+          <td><a href="/admin/items/{{ o.id }}">{{ o.name }}</a></td>
+          <td>{% if o.active %}да{% else %}нет{% endif %}</td>
+          {% for v in o.tree %}<td>{{ v }}</td>{% endfor %}
+          <td>{% if o.price is not none %}{{ o.price }}{% endif %}</td>
+          <td>{{ o.stock }}</td>
+          <td class="actions">
+            <a href="/admin/items/{{ o.id }}">изменить</a>
+            {% if can_write_offers %}
+            <form method="post" action="/admin/items/{{ o.id }}/delete" hx-confirm="Удалить предложение «{{ o.name }}»?">
+              <button class="link danger" type="submit">удалить</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">Предложений пока нет.</p>
+  {% endif %}
+</section>
+{% endif %}
 {% endblock %}

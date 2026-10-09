@@ -19,6 +19,10 @@
     <label>Сортировка<input name="sort" type="number" value="{{ form.sort }}"></label>
     <label class="check"><input type="checkbox" name="is_required" {% if form.is_required %}checked{% endif %}> Обязательное</label>
   </div>
+  <div class="grid-2">
+    <label class="check"><input type="checkbox" name="in_basket" {% if form.in_basket %}checked{% endif %}> Показывать в корзине</label>
+    <label class="check"><input type="checkbox" name="offer_tree" {% if form.offer_tree %}checked{% endif %}> Поле выбора предложения</label>
+  </div>
   {% if property.kind == "element" %}
   <label>Коллекция привязки
     <select name="link_collection_id">

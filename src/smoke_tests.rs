@@ -46,13 +46,7 @@ pub async fn post_form(app: &Router, path: &str, cookie: &str, body: &str) -> (S
     send(app, req).await
 }
 
-/// POST multipart-формы админки (формы записей и разделов).
-pub async fn post_multipart(
-    app: &Router,
-    path: &str,
-    cookie: &str,
-    fields: &[(&str, &str)],
-) -> (StatusCode, String) {
+fn multipart_request(path: &str, cookie: &str, fields: &[(&str, &str)]) -> Request<Body> {
     let boundary = "smokeboundary";
     let mut body = String::new();
     for (name, value) in fields {
@@ -61,7 +55,7 @@ pub async fn post_multipart(
         ));
     }
     body.push_str(&format!("--{boundary}--\r\n"));
-    let req = Request::post(path)
+    Request::post(path)
         .header(header::COOKIE, cookie)
         .header(header::HOST, "127.0.0.1:3000")
         .header(header::ORIGIN, ORIGIN)
@@ -70,8 +64,37 @@ pub async fn post_multipart(
             format!("multipart/form-data; boundary={boundary}"),
         )
         .body(Body::from(body))
+        .unwrap()
+}
+
+/// POST multipart-формы админки (формы записей и разделов).
+pub async fn post_multipart(
+    app: &Router,
+    path: &str,
+    cookie: &str,
+    fields: &[(&str, &str)],
+) -> (StatusCode, String) {
+    send(app, multipart_request(path, cookie, fields)).await
+}
+
+/// То же, но вместо тела ответа — заголовок `Location` редиректа.
+async fn post_multipart_location(
+    app: &Router,
+    path: &str,
+    cookie: &str,
+    fields: &[(&str, &str)],
+) -> (StatusCode, String) {
+    let res = app
+        .clone()
+        .oneshot(multipart_request(path, cookie, fields))
+        .await
         .unwrap();
-    send(app, req).await
+    let location = res
+        .headers()
+        .get(header::LOCATION)
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    (res.status(), location)
 }
 
 pub async fn post_json(app: &Router, path: &str, body: Value) -> (StatusCode, Value) {
@@ -683,4 +706,421 @@ async fn own_api_shows_product_link(db: PgPool) {
     let first = &products["items"][0];
     assert!(first.get("product_id").is_none());
     assert_eq!(first["catalog"], json!({"type": 3}));
+}
+
+/// Товар `news` (каталог) и подключённая через админку коллекция предложений.
+async fn sku_setup(db: &PgPool, app: &Router, cookie: &str) -> (crate::test_support::Content, i64) {
+    let c = content_fixture(db).await;
+    sqlx::query("UPDATE collections SET is_catalog = TRUE WHERE id = $1")
+        .bind(c.collection_id)
+        .execute(db)
+        .await
+        .unwrap();
+    let (status, _) = post_form(
+        app,
+        &format!("/admin/collections/{}/offers", c.collection_id),
+        cookie,
+        "mode=create",
+    )
+    .await;
+    assert!(status.is_redirection() || status.is_success(), "{status}");
+    let offers: i64 = sqlx::query_scalar("SELECT id FROM collections WHERE code = 'news_offers'")
+        .fetch_one(db)
+        .await
+        .unwrap();
+    (c, offers)
+}
+
+async fn create_offer(
+    app: &Router,
+    cookie: &str,
+    offers: i64,
+    product: i64,
+    name: &str,
+) -> (StatusCode, String) {
+    post_multipart_location(
+        app,
+        &format!("/admin/collections/{offers}/items"),
+        cookie,
+        &[
+            ("name", name),
+            ("sort", "500"),
+            ("active", "on"),
+            ("prop_cml2_link", &product.to_string()),
+            ("weight", "250"),
+        ],
+    )
+    .await
+}
+
+#[sqlx::test]
+async fn offers_tab_and_offer_form(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    let link: (Option<i64>, i64) = sqlx::query_as(
+        "SELECT sku_field_id, (SELECT count(*) FROM collection_fields WHERE collection_id = c.id AND code = 'cml2_link')
+         FROM collections c WHERE c.id = $1",
+    )
+    .bind(offers)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert!(link.0.is_some());
+    assert_eq!(link.1, 1);
+
+    let new_path = format!(
+        "/admin/collections/{offers}/items/new?product={}",
+        c.item_id
+    );
+    page_has(&app, &cookie, &new_path, &["Первая новость", "Вес"]).await;
+
+    let (status, location) = create_offer(&app, &cookie, offers, c.item_id, "Вариант 1").await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(location, format!("/admin/items/{}#offers", c.item_id));
+
+    page_has(
+        &app,
+        &cookie,
+        &format!("/admin/items/{}", c.item_id),
+        &[
+            "Торговые предложения",
+            "Вариант 1",
+            "Цены и остатки задаются у предложений",
+        ],
+    )
+    .await;
+    let (weight, kind): (f64, i16) = sqlx::query_as(
+        "SELECT c.weight::float8, c.type FROM catalog_products c
+         JOIN collection_items i ON i.id = c.item_id WHERE i.name = 'Вариант 1'",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!((weight, kind), (250.0, 4));
+}
+
+#[sqlx::test]
+async fn offer_requires_product(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    let path = format!("/admin/collections/{offers}/items");
+    let error = "Укажите товар из коллекции Новости";
+    let (status, html) = post_multipart(
+        &app,
+        &path,
+        &cookie,
+        &[("name", "Без товара"), ("sort", "1")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains(error), "{html}");
+    // запись другой коллекции (сама коллекция предложений) тоже не подходит
+    let foreign: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_items (collection_id, code, name) VALUES ($1, 'x', 'x') RETURNING id",
+    )
+    .bind(offers)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let (status, html) = post_multipart(
+        &app,
+        &path,
+        &cookie,
+        &[
+            ("name", "Чужой"),
+            ("sort", "1"),
+            ("prop_cml2_link", &foreign.to_string()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains(error), "{html}");
+    // не обязательное поле связи тоже не отключает проверку
+    sqlx::query("UPDATE collection_fields SET is_required = FALSE WHERE code = 'cml2_link'")
+        .execute(&db)
+        .await
+        .unwrap();
+    let (_, html) = post_multipart(
+        &app,
+        &path,
+        &cookie,
+        &[("name", "Без товара"), ("sort", "1")],
+    )
+    .await;
+    assert!(html.contains(error), "{html}");
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM collection_items WHERE collection_id = $1 AND id <> $2",
+    )
+    .bind(offers)
+    .bind(foreign)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+    let _ = c;
+}
+
+#[sqlx::test]
+async fn unlink_refused_with_offers(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    create_offer(&app, &cookie, offers, c.item_id, "Вариант 1").await;
+    let (status, html) = post_form(
+        &app,
+        &format!("/admin/collections/{}/offers", c.collection_id),
+        &cookie,
+        "mode=none",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Сначала удалите предложения (1)"), "{html}");
+    let linked: Option<i64> =
+        sqlx::query_scalar("SELECT product_collection_id FROM collections WHERE id = $1")
+            .bind(offers)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(linked, Some(c.collection_id));
+
+    let field: i64 = sqlx::query_scalar("SELECT sku_field_id FROM collections WHERE id = $1")
+        .bind(offers)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    let (status, html) =
+        post_form(&app, &format!("/admin/fields/{field}/delete"), &cookie, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Системное поле связи с товаром"), "{html}");
+    // смена привязки тоже запрещена
+    let (_, html) = post_form(
+        &app,
+        &format!("/admin/fields/{field}"),
+        &cookie,
+        &format!(
+            "name=Товар&sort=100&is_required=on&link_collection_id={}",
+            offers
+        ),
+    )
+    .await;
+    assert!(html.contains("Системное поле связи с товаром"), "{html}");
+}
+
+#[sqlx::test]
+async fn relink_refused_with_foreign_offers(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    create_offer(&app, &cookie, offers, c.item_id, "Вариант 1").await;
+    // другая коллекция товаров хочет забрать коллекцию с чужими предложениями
+    let other: i64 = sqlx::query_scalar(
+        "INSERT INTO collections (code, name, is_catalog) VALUES ('shoes', 'Обувь', TRUE) RETURNING id",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let (status, html) = post_form(
+        &app,
+        &format!("/admin/collections/{other}/offers"),
+        &cookie,
+        &format!("mode=existing&offers_id={offers}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("другого товара"), "{html}");
+    let linked: Option<i64> =
+        sqlx::query_scalar("SELECT product_collection_id FROM collections WHERE id = $1")
+            .bind(offers)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(linked, Some(c.collection_id));
+}
+
+#[sqlx::test]
+async fn existing_collection_becomes_offers(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let c = content_fixture(&db).await;
+    let spare: i64 = sqlx::query_scalar(
+        "INSERT INTO collections (code, name, is_catalog) VALUES ('spare', 'Запас', TRUE) RETURNING id",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let (status, _) = post_form(
+        &app,
+        &format!("/admin/collections/{}/offers", c.collection_id),
+        &cookie,
+        &format!("mode=existing&offers_id={spare}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let row: (Option<i64>, Option<i64>) =
+        sqlx::query_as("SELECT product_collection_id, sku_field_id FROM collections WHERE id = $1")
+            .bind(spare)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(row.0, Some(c.collection_id));
+    assert!(row.1.is_some());
+    let (status, _) = post_form(
+        &app,
+        &format!("/admin/collections/{}/offers", c.collection_id),
+        &cookie,
+        "mode=none",
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let row: Option<i64> =
+        sqlx::query_scalar("SELECT product_collection_id FROM collections WHERE id = $1")
+            .bind(spare)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(row, None);
+}
+
+#[sqlx::test]
+async fn field_flags_saved(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let c = content_fixture(&db).await;
+    let (status, _) = post_form(
+        &app,
+        &format!("/admin/collections/{}/fields", c.collection_id),
+        &cookie,
+        "name=Размер&code=razmer&kind=list&sort=10&in_basket=on&offer_tree=on",
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let flags: (bool, bool) =
+        sqlx::query_as("SELECT in_basket, offer_tree FROM collection_fields WHERE code = 'razmer'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(flags, (true, true));
+    // изменение на странице поля
+    let id: i64 = sqlx::query_scalar("SELECT id FROM collection_fields WHERE code = 'razmer'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    post_form(
+        &app,
+        &format!("/admin/fields/{id}"),
+        &cookie,
+        "name=Размер&sort=10",
+    )
+    .await;
+    let flags: (bool, bool) =
+        sqlx::query_as("SELECT in_basket, offer_tree FROM collection_fields WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(flags, (false, false));
+    page_has(
+        &app,
+        &cookie,
+        &format!("/admin/fields/{id}"),
+        &["Показывать в корзине", "Поле выбора предложения"],
+    )
+    .await;
+    // у текстового вида — ошибка формы, поле не создаётся
+    let (status, html) = post_form(
+        &app,
+        &format!("/admin/collections/{}/fields", c.collection_id),
+        &cookie,
+        "name=Заметка&code=note&kind=text&sort=10&offer_tree=on",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.contains("Поле выбора предложения — только список, привязка или строка"),
+        "{html}"
+    );
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM collection_fields WHERE code = 'note'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[sqlx::test]
+async fn admin_save_keeps_weight_and_offer_stock(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    let path = format!("/admin/items/{}", c.item_id);
+    // простой товар: вес сохраняется, показывается в форме и не обнуляется повторным сохранением
+    let (status, _) = post_multipart(
+        &app,
+        &path,
+        &cookie,
+        &[
+            ("name", "Первая новость"),
+            ("sort", "500"),
+            ("weight", "1200"),
+            ("available", "on"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let weight = |id: i64| {
+        let db = db.clone();
+        async move {
+            sqlx::query_scalar::<_, f64>(
+                "SELECT weight::float8 FROM catalog_products WHERE item_id = $1",
+            )
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(weight(c.item_id).await, 1200.0);
+    let (_, html) = get(&app, &path, &cookie).await;
+    assert!(html.contains("value=\"1200"), "{html}");
+
+    // у товара с предложениями цены и доступность принадлежат предложениям
+    sqlx::query("UPDATE catalog_products SET quantity = 7, available = TRUE WHERE item_id = $1")
+        .bind(c.item_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    create_offer(&app, &cookie, offers, c.item_id, "Вариант 1").await;
+    sqlx::query(
+        "UPDATE catalog_products SET available = TRUE, quantity = 5, quantity_trace = TRUE
+         WHERE item_id = (SELECT id FROM collection_items WHERE name = 'Вариант 1')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let before: (bool, f64) = sqlx::query_as(
+        "SELECT available, quantity::float8 FROM catalog_products WHERE item_id = $1",
+    )
+    .bind(c.item_id)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert!(before.0);
+    let (status, _) = post_multipart(
+        &app,
+        &path,
+        &cookie,
+        &[("name", "Первая новость"), ("sort", "500")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let after: (bool, f64) = sqlx::query_as(
+        "SELECT available, quantity::float8 FROM catalog_products WHERE item_id = $1",
+    )
+    .bind(c.item_id)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(after, before);
+    assert_eq!(weight(c.item_id).await, 1200.0);
 }

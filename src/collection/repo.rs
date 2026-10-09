@@ -126,8 +126,9 @@ pub async fn create_field(
 ) -> sqlx::Result<i64> {
     let (id,): (i64,) = sqlx::query_as(
         "INSERT INTO collection_fields
-            (collection_id, code, name, kind, is_required, sort, multiple, link_collection_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+            (collection_id, code, name, kind, is_required, sort, multiple, link_collection_id,
+             in_basket, offer_tree)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
     )
     .bind(collection_id)
     .bind(&input.code)
@@ -137,16 +138,19 @@ pub async fn create_field(
     .bind(input.sort)
     .bind(input.multiple)
     .bind(input.link_collection_id)
+    .bind(input.in_basket)
+    .bind(input.offer_tree)
     .fetch_one(db)
     .await?;
     Ok(id)
 }
 
 /// Меняет только то, что не ломает уже сохранённые значения:
-/// название, сортировку, обязательность и коллекцию привязки.
+/// название, сортировку, обязательность, коллекцию привязки и флаги корзины и выбора предложения.
 pub async fn update_field(db: &PgPool, id: i64, input: &FieldInput) -> sqlx::Result<()> {
     sqlx::query(
-        "UPDATE collection_fields SET name = $2, is_required = $3, sort = $4, link_collection_id = $5
+        "UPDATE collection_fields SET name = $2, is_required = $3, sort = $4, link_collection_id = $5,
+                in_basket = $6, offer_tree = $7
          WHERE id = $1",
     )
     .bind(id)
@@ -154,6 +158,8 @@ pub async fn update_field(db: &PgPool, id: i64, input: &FieldInput) -> sqlx::Res
     .bind(input.is_required)
     .bind(input.sort)
     .bind(input.link_collection_id)
+    .bind(input.in_basket)
+    .bind(input.offer_tree)
     .execute(db)
     .await?;
     Ok(())
@@ -526,7 +532,6 @@ pub async fn delete_item(db: &PgPool, id: i64) -> sqlx::Result<Option<i64>> {
 
 /// Создаёт поле связи в коллекции предложений (если его ещё нет) и записывает его
 /// в `sku_field_id`; привязывает коллекцию к товарам. Всё в переданной транзакции.
-#[allow(dead_code)] // подключается в админке (следующая задача SKU)
 async fn ensure_link(
     tx: &mut sqlx::PgConnection,
     product_id: i64,
@@ -575,7 +580,6 @@ async fn ensure_link(
 
 /// Создаёт коллекцию предложений для коллекции товаров `product`: код `<код>_offers`,
 /// название «<название> — предложения», каталог, поле связи и сама связь — в одной транзакции.
-#[allow(dead_code)] // подключается в админке (следующая задача SKU)
 pub async fn create_offer_collection(
     db: &PgPool,
     product: &Collection,
@@ -604,14 +608,12 @@ pub async fn create_offer_collection(
 
 /// Делает `offers_id` коллекцией предложений коллекции товаров `product_id`
 /// (id коллекций, не записей); поле связи создаётся, если его нет.
-#[allow(dead_code)] // подключается в админке (следующая задача SKU)
 pub async fn link_offers(db: &PgPool, product_id: i64, offers_id: i64) -> sqlx::Result<()> {
     let mut tx = db.begin().await?;
     ensure_link(&mut tx, product_id, offers_id).await?;
     tx.commit().await
 }
 
-#[allow(dead_code)] // подключается в админке (следующая задача SKU)
 #[derive(Debug)]
 pub enum UnlinkError {
     /// В коллекции предложений есть записи (их число).
@@ -627,7 +629,6 @@ impl From<sqlx::Error> for UnlinkError {
 
 /// Снимает связь: у коллекции предложений коллекции товаров `product_id` (id коллекции)
 /// очищается привязка, поле связи удаляется. Только если в ней нет записей.
-#[allow(dead_code)] // подключается в админке (следующая задача SKU)
 pub async fn unlink_offers(db: &PgPool, product_id: i64) -> Result<(), UnlinkError> {
     let mut tx = db.begin().await?;
     let offers: Option<(i64, Option<i64>)> = sqlx::query_as(
@@ -662,4 +663,80 @@ pub async fn unlink_offers(db: &PgPool, product_id: i64) -> Result<(), UnlinkErr
     }
     tx.commit().await?;
     Ok(())
+}
+
+/// Коллекция предложений коллекции товаров `product_collection_id` (id коллекции).
+pub async fn offers_collection(
+    db: &PgPool,
+    product_collection_id: i64,
+) -> sqlx::Result<Option<Collection>> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLLECTION_COLS} FROM collections WHERE product_collection_id = $1
+         ORDER BY id LIMIT 1"
+    )))
+    .bind(product_collection_id)
+    .fetch_optional(db)
+    .await
+}
+
+/// Сколько записей коллекции `offers_id` привязано (`product_id`) к товарам не из
+/// коллекции `product_collection_id`.
+pub async fn foreign_offers_count(
+    db: &PgPool,
+    offers_id: i64,
+    product_collection_id: i64,
+) -> sqlx::Result<i64> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM collection_items o JOIN collection_items p ON p.id = o.product_id
+         WHERE o.collection_id = $1 AND p.collection_id <> $2",
+    )
+    .bind(offers_id)
+    .bind(product_collection_id)
+    .fetch_one(db)
+    .await
+}
+
+/// Поле — системное поле связи с товаром какой-либо коллекции предложений.
+pub async fn is_sku_field(db: &PgPool, field_id: i64) -> sqlx::Result<bool> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM collections WHERE sku_field_id = $1)")
+        .bind(field_id)
+        .fetch_one(db)
+        .await
+}
+
+/// Строка таблицы предложений на карточке товара.
+#[derive(Debug, sqlx::FromRow)]
+pub struct OfferRow {
+    pub id: i64,
+    pub name: String,
+    pub active: bool,
+    pub field_values: Json<serde_json::Map<String, serde_json::Value>>,
+    /// Наименьшая цена базового типа.
+    pub price: Option<f64>,
+    /// Сумма остатков по складам.
+    pub stock: f64,
+}
+
+/// Предложения товара `product_id` (запись коллекции товаров) из коллекции `offers_id`
+/// одним запросом: с базовой ценой и суммой остатков.
+pub async fn list_offer_rows(
+    db: &PgPool,
+    offers_id: i64,
+    product_id: i64,
+) -> sqlx::Result<Vec<OfferRow>> {
+    sqlx::query_as(
+        "SELECT o.id, o.name, o.active, o.field_values,
+                (SELECT min(pr.price)::float8 FROM catalog_prices pr
+                 JOIN catalog_price_types t ON t.id = pr.price_type_id
+                 WHERE pr.item_id = o.id AND t.is_base) AS price,
+                COALESCE((SELECT sum(a.amount)::float8 FROM catalog_store_amounts a
+                          WHERE a.item_id = o.id), 0) AS stock
+         FROM collection_items o
+         WHERE o.collection_id = $1 AND o.product_id = $2
+         ORDER BY o.sort, o.id",
+    )
+    .bind(offers_id)
+    .bind(product_id)
+    .fetch_all(db)
+    .await
 }
