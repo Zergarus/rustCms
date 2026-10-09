@@ -26,7 +26,7 @@ pub struct OrderPropertyValue {
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct OrderItem {
     pub id: i64,
-    pub element_id: i64,
+    pub product_id: i64,
     pub store_id: Option<i64>,
     pub quantity: f64,
     pub price: f64,
@@ -260,7 +260,7 @@ pub async fn load(db: &PgPool, id: i64) -> sqlx::Result<Option<OrderView>> {
     .fetch_all(db)
     .await?;
     order.items = sqlx::query_as(
-        "SELECT id, item_id AS element_id, store_id, quantity::float8 AS quantity,
+        "SELECT id, item_id AS product_id, store_id, quantity::float8 AS quantity,
                 COALESCE(price, 0)::float8 AS price, name, custom_price
          FROM cart_items WHERE order_id = $1 ORDER BY id",
     )
@@ -389,8 +389,8 @@ pub async fn stock_lines(tx: &mut PgConnection, order_id: i64) -> sqlx::Result<V
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(element_id, store_id, quantity)| StockLine {
-            element_id,
+        .map(|(product_id, store_id, quantity)| StockLine {
+            product_id,
             store_id,
             quantity,
         })
@@ -402,7 +402,7 @@ pub async fn traced_locked(
     tx: &mut PgConnection,
     lines: &[StockLine],
 ) -> sqlx::Result<HashSet<i64>> {
-    let ids: Vec<i64> = lines.iter().map(|l| l.element_id).collect();
+    let ids: Vec<i64> = lines.iter().map(|l| l.product_id).collect();
     Ok(catalog::load_locked(tx, &ids)
         .await?
         .into_iter()
@@ -648,7 +648,7 @@ mod tests {
 
     fn new_order(f: &crate::test_support::Fixture, quantity: f64) -> NewOrder {
         let lines = [StockLine {
-            element_id: f.element_id,
+            product_id: f.product_id,
             store_id: Some(1),
             quantity,
         }];
@@ -665,7 +665,7 @@ mod tests {
             delivery: (1, "Самовывоз".into(), 0.0, Some(1)),
             payment: (1, "QR".into()),
             items: vec![(f.item_id, quantity, 100.0, "Товар".into())],
-            stock: plan(&[], &lines, &[f.element_id].into_iter().collect()),
+            stock: plan(&[], &lines, &[f.product_id].into_iter().collect()),
         }
     }
 
@@ -685,7 +685,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(orders, 1);
-        assert_eq!(amounts(&db, f.element_id).await, (9.0, 4.0));
+        assert_eq!(amounts(&db, f.product_id).await, (9.0, 4.0));
     }
 
     #[sqlx::test]

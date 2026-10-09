@@ -18,7 +18,7 @@ use super::{
     registry::{Schema, Snapshot},
     to_snake,
 };
-use crate::iblock::{Property, is_valid_code};
+use crate::collection::{Field, is_valid_code};
 
 /// Глубина вложенных связей `a.element.b.element.c` (`bxapi.relation_depth.max`).
 pub const MAX_DEPTH: usize = 3;
@@ -71,7 +71,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn iblock_code(&self) -> &str {
-        &self.schema.iblock.code
+        &self.schema.collection.code
     }
 }
 
@@ -387,7 +387,7 @@ fn matching_sections(
     schema: &Schema,
     op: Op,
     values: &[Value],
-    field: impl Fn(&crate::iblock::Section) -> Value,
+    field: impl Fn(&crate::collection::Section) -> Value,
 ) -> Vec<i64> {
     schema
         .sections
@@ -560,7 +560,7 @@ fn prop_values_sql(alias: &str, code: &str) -> String {
 fn push_exists(
     qb: &mut QueryBuilder<Postgres>,
     ctx: &Ctx,
-    prop: &Property,
+    prop: &Field,
     negative: bool,
     cond: impl FnOnce(&mut QueryBuilder<Postgres>, &str) -> Result<(), BxError>,
 ) -> Result<(), BxError> {
@@ -581,7 +581,7 @@ fn push_exists(
 fn push_prop_ids(
     qb: &mut QueryBuilder<Postgres>,
     ctx: &Ctx,
-    prop: &Property,
+    prop: &Field,
     negative: bool,
     ids: Vec<i64>,
 ) -> Result<(), BxError> {
@@ -598,7 +598,7 @@ fn push_prop_ids(
 fn push_prop_related(
     qb: &mut QueryBuilder<Postgres>,
     ctx: &Ctx,
-    prop: &Property,
+    prop: &Field,
     negative: bool,
     key: &str,
     values: &[Value],
@@ -615,7 +615,7 @@ fn push_prop_related(
         .ok_or_else(|| {
             BxError::new(
                 "invalid_filter",
-                format!("Property {} has no linked iblock", prop.code),
+                format!("Field {} has no linked iblock", prop.code),
             )
         })?
         .clone();
@@ -626,7 +626,7 @@ fn push_prop_related(
         qb.push(format!(
             "({x} #>> '{{}}') IN (SELECT {le}.id::text FROM collection_items {le} WHERE {le}.collection_id = "
         ));
-        qb.push_bind(linked.iblock.id).push(" AND ");
+        qb.push_bind(linked.collection.id).push(" AND ");
         push_leaf(qb, &nested, key, &value)?;
         qb.push(")");
         Ok(())
@@ -636,7 +636,7 @@ fn push_prop_related(
 fn push_prop(
     qb: &mut QueryBuilder<Postgres>,
     ctx: &Ctx,
-    prop: &Property,
+    prop: &Field,
     rest: &[&str],
     op: Op,
     values: &[Value],
@@ -709,7 +709,7 @@ fn push_prop(
 }
 
 /// Поле связанного элемента-справочника по имени UF-поля HL-блока.
-fn directory_field(ctx: &Ctx, prop: &Property, field: &str) -> Option<String> {
+fn directory_field(ctx: &Ctx, prop: &Field, field: &str) -> Option<String> {
     if field == "ufXmlId" {
         return Some("xmlId".into());
     }
@@ -739,7 +739,7 @@ fn op_key(op: Op, path: &str) -> String {
 fn push_prop_scalar(
     qb: &mut QueryBuilder<Postgres>,
     ctx: &Ctx,
-    prop: &Property,
+    prop: &Field,
     op: Op,
     negative: bool,
     values: &[Value],

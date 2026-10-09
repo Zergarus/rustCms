@@ -14,8 +14,8 @@ use serde_json::{Map, Value, json};
 use sqlx::{FromRow, Postgres, QueryBuilder, types::Json as SqlJson};
 
 use crate::{
+    collection::{Collection, is_valid_code, repo},
     error::{AppError, AppResult},
-    iblock::{Iblock, is_valid_code, repo},
     state::AppState,
 };
 
@@ -25,10 +25,10 @@ const MAX_PER_PAGE: i64 = 100;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
-        .route("/v1/iblocks", get(list_iblocks))
-        .route("/v1/iblocks/{iblock}", get(get_iblock))
-        .route("/v1/iblocks/{iblock}/elements", get(list_elements))
-        .route("/v1/iblocks/{iblock}/elements/{element}", get(get_element))
+        .route("/v1/iblocks", get(list_collections))
+        .route("/v1/iblocks/{iblock}", get(get_collection))
+        .route("/v1/iblocks/{iblock}/elements", get(list_items))
+        .route("/v1/iblocks/{iblock}/elements/{element}", get(get_item))
 }
 
 async fn health(State(state): State<AppState>) -> AppResult<Json<Value>> {
@@ -73,33 +73,33 @@ struct Pagination {
     pages: i64,
 }
 
-async fn list_iblocks(State(state): State<AppState>) -> AppResult<Json<Value>> {
-    let items: Vec<ApiIblock> = repo::list_iblocks(&state.db)
+async fn list_collections(State(state): State<AppState>) -> AppResult<Json<Value>> {
+    let items: Vec<ApiIblock> = repo::list_collections(&state.db)
         .await?
         .into_iter()
-        .filter(|s| s.iblock.api_enabled)
+        .filter(|s| s.collection.api_enabled)
         .map(|s| ApiIblock {
-            code: s.iblock.code,
-            name: s.iblock.name,
-            description: s.iblock.description,
+            code: s.collection.code,
+            name: s.collection.name,
+            description: s.collection.description,
         })
         .collect();
     Ok(Json(json!({ "items": items })))
 }
 
-async fn public_iblock(state: &AppState, code: &str) -> AppResult<Iblock> {
-    repo::get_iblock_by_code(&state.db, code)
+async fn public_iblock(state: &AppState, code: &str) -> AppResult<Collection> {
+    repo::get_collection_by_code(&state.db, code)
         .await?
         .filter(|i| i.api_enabled)
         .ok_or(AppError::NotFound)
 }
 
-async fn get_iblock(
+async fn get_collection(
     State(state): State<AppState>,
     Path(code): Path<String>,
 ) -> AppResult<Json<Value>> {
     let iblock = public_iblock(&state, &code).await?;
-    let properties: Vec<ApiProperty> = repo::list_properties(&state.db, iblock.id)
+    let properties: Vec<ApiProperty> = repo::list_fields(&state.db, iblock.id)
         .await?
         .into_iter()
         .map(|p| ApiProperty {
@@ -121,7 +121,7 @@ async fn get_iblock(
 /// - `page`, `per_page` (≤ 100)
 /// - `sort`: `sort` | `name` | `published_at` | `created_at` | `id`, префикс `-` — по убыванию
 /// - `prop.<код>=<значение>` — фильтр по значению свойства (сравнение как строк)
-async fn list_elements(
+async fn list_items(
     State(state): State<AppState>,
     Path(code): Path<String>,
     Query(params): Query<HashMap<String, String>>,
@@ -198,7 +198,7 @@ async fn list_elements(
     Ok(Json(json!({ "items": items, "pagination": pagination })))
 }
 
-async fn get_element(
+async fn get_item(
     State(state): State<AppState>,
     Path((iblock_code, element_code)): Path<(String, String)>,
 ) -> AppResult<Json<ApiElement>> {

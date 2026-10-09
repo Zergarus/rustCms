@@ -266,7 +266,7 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         goods += price * item.quantity;
         order_items.push((item.id, item.quantity, price, name));
         lines.push(StockLine {
-            element_id: item.element_id,
+            product_id: item.product_id,
             store_id: item.store_id,
             quantity: item.quantity,
         });
@@ -300,9 +300,9 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         }
     };
 
-    let element_ids: Vec<i64> = lines.iter().map(|l| l.element_id).collect();
+    let product_ids: Vec<i64> = lines.iter().map(|l| l.product_id).collect();
     let mut tx = state.db.begin().await?;
-    let info = catalog::load_locked(&mut tx, &element_ids).await?;
+    let info = catalog::load_locked(&mut tx, &product_ids).await?;
     if let Err(message) = stock::check(&lines, &info) {
         tx.rollback().await?;
         let mut e = SubmitError::basket_changed();

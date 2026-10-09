@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% set section = "iblocks" %}
-{% block title %}{% if element_id %}{{ form.name }}{% else %}Новый элемент{% endif %}{% endblock %}
+{% block title %}{% if item_id %}{{ form.name }}{% else %}Новый элемент{% endif %}{% endblock %}
 
 {#- Уже загруженные файлы поля: отмеченный чекбокс — оставить, снятый — убрать -#}
 {% macro file_list(key, ids) %}
@@ -18,10 +18,10 @@
   <a href="/admin/iblocks">Инфоблоки</a> /
   <a href="/admin/iblocks/{{ iblock.id }}/elements">{{ iblock.name }}</a> /
 </div>
-<h1>{% if element_id %}{{ form.name }}{% else %}Новый элемент{% endif %}</h1>
+<h1>{% if item_id %}{{ form.name }}{% else %}Новый элемент{% endif %}</h1>
 
 <form class="card form" method="post" enctype="multipart/form-data"
-      action="{% if element_id %}/admin/elements/{{ element_id }}{% else %}/admin/iblocks/{{ iblock.id }}/elements{% endif %}">
+      action="{% if item_id %}/admin/elements/{{ item_id }}{% else %}/admin/iblocks/{{ iblock.id }}/elements{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}
   {% if not can_write %}<div class="notice">Только просмотр: у вас нет прав на изменение элементов этого инфоблока.</div>{% endif %}
   <fieldset class="plain" {% if not can_write %}disabled{% endif %}>

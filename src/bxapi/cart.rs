@@ -168,9 +168,9 @@ async fn load_stores(state: &AppState) -> Result<Vec<StoreInfo>, BxError> {
 /// Отображение товаров позиций: URL, картинка, артикул, свойства — через сериализацию элементов.
 pub(super) async fn product_views(
     state: &AppState,
-    element_ids: &[i64],
+    product_ids: &[i64],
 ) -> Result<HashMap<i64, ProductView>, BxError> {
-    let rows = load_rows(state, element_ids).await?;
+    let rows = load_rows(state, product_ids).await?;
     let snap = state.registry.snapshot(&state.db).await?;
     let config = &state.project.cart;
     let widths: Vec<u32> = config.image_width.into_iter().collect();
@@ -183,7 +183,7 @@ pub(super) async fn product_views(
         let Some(schema) = snap.get(collection_id).cloned() else {
             continue;
         };
-        let code = schema.iblock.code.clone();
+        let code = schema.collection.code.clone();
         let mut select = Select::default();
         for path in ["detailPageUrl", "image"] {
             select.add(path, &state.project, &code);
@@ -273,7 +273,7 @@ async fn cart_state_for(state: &AppState, buyer: Option<i64>) -> Result<CartStat
         Some(b) => repo::items(&state.db, b).await?,
         None => Vec::new(),
     };
-    let ids: Vec<i64> = items.iter().map(|i| i.element_id).collect();
+    let ids: Vec<i64> = items.iter().map(|i| i.product_id).collect();
     let info = catalog::load(&state.db, &ids).await?;
     let views = product_views(state, &ids).await?;
     let stores = load_stores(state).await?;
@@ -391,8 +391,8 @@ pub async fn set_quantity(
     if quantity == 0.0 {
         repo::remove(&state.db, buyer, item_id).await?;
     } else {
-        let infos = catalog::load(&state.db, &[item.element_id]).await?;
-        let info = ensure_purchasable(infos.get(&item.element_id))?;
+        let infos = catalog::load(&state.db, &[item.product_id]).await?;
+        let info = ensure_purchasable(infos.get(&item.product_id))?;
         check_quantity(info, item.store_id, quantity).map_err(change_failed)?;
         repo::set_quantity(&state.db, buyer, item_id, quantity).await?;
     }
@@ -410,8 +410,8 @@ pub async fn set_store(
     let store_id = number(body.get("storeId"))
         .filter(|id| *id > 0)
         .ok_or_else(|| change_failed("Не указан склад"))?;
-    let infos = catalog::load(&state.db, &[item.element_id]).await?;
-    let info = ensure_purchasable(infos.get(&item.element_id))?;
+    let infos = catalog::load(&state.db, &[item.product_id]).await?;
+    let info = ensure_purchasable(infos.get(&item.product_id))?;
     let stores = load_stores(&state).await?;
     ensure_store(info, &stores, store_id)?;
     // После смены склада позиции одного товара на этом складе сливаются
@@ -419,7 +419,7 @@ pub async fn set_store(
         .await?
         .iter()
         .filter(|i| {
-            i.id != item.id && i.element_id == item.element_id && i.store_id == Some(store_id)
+            i.id != item.id && i.product_id == item.product_id && i.store_id == Some(store_id)
         })
         .map(|i| i.quantity)
         .sum();

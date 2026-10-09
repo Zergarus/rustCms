@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 #[derive(Debug, Clone, PartialEq)]
 pub struct CartItem {
     pub id: i64,
-    pub element_id: i64,
+    pub product_id: i64,
     pub store_id: Option<i64>,
     pub quantity: f64,
     /// Название на момент добавления (если товар потом удалят из выдачи).

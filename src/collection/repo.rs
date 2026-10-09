@@ -3,8 +3,8 @@
 use sqlx::{PgPool, types::Json};
 
 use super::{
-    Element, ElementInput, Iblock, IblockInput, IblockSummary, Property, PropertyEnum,
-    PropertyInput, Section, SectionInput,
+    Collection, CollectionInput, CollectionSummary, Field, FieldInput, FieldOption, Item,
+    ItemInput, Section, SectionInput,
 };
 
 const IBLOCK_COLS: &str = "id, code, name, description, api_enabled, sort, detail_page_url, \
@@ -16,18 +16,18 @@ const ELEMENT_COLS: &str = "id, collection_id, section_id, code, xml_id, name, a
      preview_text, detail_text, preview_picture_id, detail_picture_id, published_at, field_values, \
      created_at, updated_at";
 
-pub async fn list_iblocks(db: &PgPool) -> sqlx::Result<Vec<IblockSummary>> {
+pub async fn list_collections(db: &PgPool) -> sqlx::Result<Vec<CollectionSummary>> {
     sqlx::query_as(
         "SELECT i.id, i.code, i.name, i.description, i.api_enabled, i.sort, i.detail_page_url,
                 i.section_page_url, i.list_page_url, i.is_catalog, i.created_at, i.updated_at,
-                (SELECT count(*) FROM collection_items e WHERE e.collection_id = i.id) AS element_count
+                (SELECT count(*) FROM collection_items e WHERE e.collection_id = i.id) AS item_count
          FROM collections i ORDER BY i.sort, i.id",
     )
     .fetch_all(db)
     .await
 }
 
-pub async fn get_iblock(db: &PgPool, id: i64) -> sqlx::Result<Option<Iblock>> {
+pub async fn get_collection(db: &PgPool, id: i64) -> sqlx::Result<Option<Collection>> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {IBLOCK_COLS} FROM collections WHERE id = $1"
     )))
@@ -36,7 +36,7 @@ pub async fn get_iblock(db: &PgPool, id: i64) -> sqlx::Result<Option<Iblock>> {
     .await
 }
 
-pub async fn get_iblock_by_code(db: &PgPool, code: &str) -> sqlx::Result<Option<Iblock>> {
+pub async fn get_collection_by_code(db: &PgPool, code: &str) -> sqlx::Result<Option<Collection>> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {IBLOCK_COLS} FROM collections WHERE code = $1"
     )))
@@ -45,7 +45,7 @@ pub async fn get_iblock_by_code(db: &PgPool, code: &str) -> sqlx::Result<Option<
     .await
 }
 
-pub async fn create_iblock(db: &PgPool, input: &IblockInput) -> sqlx::Result<Iblock> {
+pub async fn create_collection(db: &PgPool, input: &CollectionInput) -> sqlx::Result<Collection> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "INSERT INTO collections (code, name, description, api_enabled, sort, is_catalog)
          VALUES ($1, $2, $3, $4, $5, $6) RETURNING {IBLOCK_COLS}"
@@ -60,7 +60,11 @@ pub async fn create_iblock(db: &PgPool, input: &IblockInput) -> sqlx::Result<Ibl
     .await
 }
 
-pub async fn update_iblock(db: &PgPool, id: i64, input: &IblockInput) -> sqlx::Result<bool> {
+pub async fn update_collection(
+    db: &PgPool,
+    id: i64,
+    input: &CollectionInput,
+) -> sqlx::Result<bool> {
     let res = sqlx::query(
         "UPDATE collections SET code = $2, name = $3, description = $4, api_enabled = $5,
                             sort = $6, is_catalog = $7, updated_at = now()
@@ -78,7 +82,7 @@ pub async fn update_iblock(db: &PgPool, id: i64, input: &IblockInput) -> sqlx::R
     Ok(res.rows_affected() > 0)
 }
 
-pub async fn delete_iblock(db: &PgPool, id: i64) -> sqlx::Result<()> {
+pub async fn delete_collection(db: &PgPool, id: i64) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM collections WHERE id = $1")
         .bind(id)
         .execute(db)
@@ -90,7 +94,7 @@ pub async fn delete_iblock(db: &PgPool, id: i64) -> sqlx::Result<()> {
 // Свойства
 // ---------------------------------------------------------------------------
 
-pub async fn list_properties(db: &PgPool, collection_id: i64) -> sqlx::Result<Vec<Property>> {
+pub async fn list_fields(db: &PgPool, collection_id: i64) -> sqlx::Result<Vec<Field>> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {PROPERTY_COLS} FROM collection_fields WHERE collection_id = $1 ORDER BY sort, id"
     )))
@@ -99,7 +103,7 @@ pub async fn list_properties(db: &PgPool, collection_id: i64) -> sqlx::Result<Ve
     .await
 }
 
-pub async fn get_property(db: &PgPool, id: i64) -> sqlx::Result<Option<Property>> {
+pub async fn get_field(db: &PgPool, id: i64) -> sqlx::Result<Option<Field>> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {PROPERTY_COLS} FROM collection_fields WHERE id = $1"
     )))
@@ -108,10 +112,10 @@ pub async fn get_property(db: &PgPool, id: i64) -> sqlx::Result<Option<Property>
     .await
 }
 
-pub async fn create_property(
+pub async fn create_field(
     db: &PgPool,
     collection_id: i64,
-    input: &PropertyInput,
+    input: &FieldInput,
 ) -> sqlx::Result<i64> {
     let (id,): (i64,) = sqlx::query_as(
         "INSERT INTO collection_fields
@@ -133,7 +137,7 @@ pub async fn create_property(
 
 /// Меняет только то, что не ломает уже сохранённые значения:
 /// название, сортировку, обязательность и инфоблок привязки.
-pub async fn update_property(db: &PgPool, id: i64, input: &PropertyInput) -> sqlx::Result<()> {
+pub async fn update_field(db: &PgPool, id: i64, input: &FieldInput) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE collection_fields SET name = $2, is_required = $3, sort = $4, link_collection_id = $5
          WHERE id = $1",
@@ -150,7 +154,7 @@ pub async fn update_property(db: &PgPool, id: i64, input: &PropertyInput) -> sql
 
 /// Удаляет свойство и возвращает id инфоблока, к которому оно относилось.
 /// Значения свойства у элементов тоже вычищаются.
-pub async fn delete_property(db: &PgPool, id: i64) -> sqlx::Result<Option<i64>> {
+pub async fn delete_field(db: &PgPool, id: i64) -> sqlx::Result<Option<i64>> {
     let mut tx = db.begin().await?;
     let row: Option<(i64, String)> =
         sqlx::query_as("DELETE FROM collection_fields WHERE id = $1 RETURNING collection_id, code")
@@ -171,7 +175,10 @@ pub async fn delete_property(db: &PgPool, id: i64) -> sqlx::Result<Option<i64>> 
 }
 
 /// Варианты всех свойств-списков инфоблока.
-pub async fn list_iblock_enums(db: &PgPool, collection_id: i64) -> sqlx::Result<Vec<PropertyEnum>> {
+pub async fn list_collection_options(
+    db: &PgPool,
+    collection_id: i64,
+) -> sqlx::Result<Vec<FieldOption>> {
     sqlx::query_as(
         "SELECT e.id, e.field_id, e.value, e.xml_id, e.sort, e.is_default
          FROM collection_field_options e
@@ -184,7 +191,7 @@ pub async fn list_iblock_enums(db: &PgPool, collection_id: i64) -> sqlx::Result<
     .await
 }
 
-pub async fn list_enums(db: &PgPool, property_id: i64) -> sqlx::Result<Vec<PropertyEnum>> {
+pub async fn list_options(db: &PgPool, property_id: i64) -> sqlx::Result<Vec<FieldOption>> {
     sqlx::query_as(
         "SELECT id, field_id, value, xml_id, sort, is_default
          FROM collection_field_options WHERE field_id = $1 ORDER BY sort, id",
@@ -196,7 +203,7 @@ pub async fn list_enums(db: &PgPool, property_id: i64) -> sqlx::Result<Vec<Prope
 
 /// Вариант списка из формы; `id` = None — новый.
 #[derive(Debug)]
-pub struct EnumInput {
+pub struct OptionInput {
     pub id: Option<i64>,
     pub value: String,
     pub xml_id: String,
@@ -206,10 +213,10 @@ pub struct EnumInput {
 
 /// Сохраняет набор вариантов списка: обновляет существующие, добавляет новые,
 /// удаляет перечисленные в `delete` и вычищает их из значений элементов.
-pub async fn save_enums(
+pub async fn save_options(
     db: &PgPool,
-    property: &Property,
-    items: &[EnumInput],
+    property: &Field,
+    items: &[OptionInput],
     delete: &[i64],
 ) -> sqlx::Result<()> {
     let mut tx = db.begin().await?;
@@ -260,7 +267,7 @@ pub async fn save_enums(
 /// (одиночное значение становится null, из массива id вычёркиваются).
 async fn remove_prop_ids(
     tx: &mut sqlx::PgConnection,
-    property: &Property,
+    property: &Field,
     ids: &[i64],
 ) -> sqlx::Result<()> {
     let ids: Vec<serde_json::Value> = ids.iter().map(|id| (*id).into()).collect();
@@ -384,13 +391,13 @@ pub async fn delete_section(db: &PgPool, id: i64) -> sqlx::Result<Option<i64>> {
 
 /// Список элементов для админки. `section_id` — только элементы этого раздела
 /// (без подразделов), `Some(0)` — элементы без раздела.
-pub async fn list_elements(
+pub async fn list_items(
     db: &PgPool,
     collection_id: i64,
     section_id: Option<i64>,
     limit: i64,
     offset: i64,
-) -> sqlx::Result<(Vec<Element>, i64)> {
+) -> sqlx::Result<(Vec<Item>, i64)> {
     const WHERE: &str = "WHERE collection_id = $1 AND ($2::bigint IS NULL
                           OR ($2 = 0 AND section_id IS NULL) OR section_id = $2)";
     let items = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -413,7 +420,7 @@ pub async fn list_elements(
     Ok((items, total))
 }
 
-pub async fn get_element(db: &PgPool, id: i64) -> sqlx::Result<Option<Element>> {
+pub async fn get_item(db: &PgPool, id: i64) -> sqlx::Result<Option<Item>> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ELEMENT_COLS} FROM collection_items WHERE id = $1"
     )))
@@ -424,7 +431,7 @@ pub async fn get_element(db: &PgPool, id: i64) -> sqlx::Result<Option<Element>> 
 
 /// Названия элементов по id (для подписей у привязок). `collection_id` — если задан,
 /// учитываются только элементы этого инфоблока.
-pub async fn element_names(
+pub async fn item_names(
     db: &PgPool,
     ids: &[i64],
     collection_id: Option<i64>,
@@ -442,11 +449,7 @@ pub async fn element_names(
     .await
 }
 
-pub async fn create_element(
-    db: &PgPool,
-    collection_id: i64,
-    input: &ElementInput,
-) -> sqlx::Result<i64> {
+pub async fn create_item(db: &PgPool, collection_id: i64, input: &ItemInput) -> sqlx::Result<i64> {
     let (id,): (i64,) = sqlx::query_as(
         "INSERT INTO collection_items
             (collection_id, section_id, code, xml_id, name, active, sort, preview_text, detail_text,
@@ -471,7 +474,7 @@ pub async fn create_element(
     Ok(id)
 }
 
-pub async fn update_element(db: &PgPool, id: i64, input: &ElementInput) -> sqlx::Result<()> {
+pub async fn update_item(db: &PgPool, id: i64, input: &ItemInput) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE collection_items SET section_id = $2, code = $3, xml_id = $4, name = $5,
                 active = $6, sort = $7, preview_text = $8, detail_text = $9,
@@ -497,7 +500,7 @@ pub async fn update_element(db: &PgPool, id: i64, input: &ElementInput) -> sqlx:
     Ok(())
 }
 
-pub async fn delete_element(db: &PgPool, id: i64) -> sqlx::Result<Option<i64>> {
+pub async fn delete_item(db: &PgPool, id: i64) -> sqlx::Result<Option<i64>> {
     let row: Option<(i64,)> =
         sqlx::query_as("DELETE FROM collection_items WHERE id = $1 RETURNING collection_id")
             .bind(id)

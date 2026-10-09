@@ -24,7 +24,7 @@ use sqlx::{MySqlPool, PgPool, Postgres, QueryBuilder, Row, mysql::MySqlPoolOptio
 
 use crate::{
     bxapi::to_snake,
-    iblock::{is_valid_code, is_valid_slug, slugify},
+    collection::{is_valid_code, is_valid_slug, slugify},
 };
 
 /// Id HL-инфоблока = база + id HL-блока (у Битрикса инфоблоков заметно меньше).
@@ -244,7 +244,7 @@ type LocationRow = (i64, String, Option<i64>, String, String, i32, i32);
 
 /// Товар как в `b_catalog_product`; флаги `None` — «по умолчанию».
 struct ProductRow {
-    element_id: i64,
+    item_id: i64,
     quantity: f64,
     available: bool,
     quantity_trace: Option<bool>,
@@ -830,11 +830,11 @@ async fn read_property_values(my: &MySqlPool, data: &mut Data) -> anyhow::Result
         .enumerate()
         .map(|(i, e)| (e.id, i))
         .collect();
-    let mut push = |element_id: i64, property_id: i64, value: String| {
+    let mut push = |item_id: i64, property_id: i64, value: String| {
         if value.is_empty() {
             return;
         }
-        if let Some(&i) = index.get(&element_id) {
+        if let Some(&i) = index.get(&item_id) {
             data.elements[i]
                 .raw
                 .entry(property_id)
@@ -880,9 +880,9 @@ async fn read_property_values(my: &MySqlPool, data: &mut Data) -> anyhow::Result
             );
             let rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(my).await?;
             for row in rows {
-                let element_id = int_col(&row, 0).unwrap_or_default();
+                let item_id = int_col(&row, 0).unwrap_or_default();
                 for (i, prop_id) in singles.iter().enumerate() {
-                    push(element_id, *prop_id, str_col(&row, i + 1));
+                    push(item_id, *prop_id, str_col(&row, i + 1));
                 }
             }
         }
@@ -1723,7 +1723,7 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
         let element = int_col(&row, 0).unwrap_or_default();
         if elements.contains(&element) {
             c.products.push(ProductRow {
-                element_id: element,
+                item_id: element,
                 quantity: str_col(&row, 1).parse().unwrap_or(0.0),
                 available: str_col(&row, 2) != "N",
                 quantity_trace: bitrix_flag(&str_col(&row, 3)),
@@ -1772,7 +1772,7 @@ type Props = HashMap<i64, Map<String, Value>>;
 
 fn resolve_properties(data: &mut Data) -> Props {
     let file_ids: HashSet<i64> = data.files.iter().map(|f| f.id).collect();
-    let element_ids: HashSet<i64> = data.elements.iter().map(|e| e.id).collect();
+    let item_ids: HashSet<i64> = data.elements.iter().map(|e| e.id).collect();
     let section_ids: HashSet<i64> = data.sections.iter().map(|s| s.id).collect();
     let enum_ids: HashSet<i64> = data.enums.iter().map(|e| e.id).collect();
     // Справочники: (id инфоблока, внешний код) → id элемента
@@ -1806,7 +1806,7 @@ fn resolve_properties(data: &mut Data) -> Props {
                             .link_collection_id
                             .and_then(|ib| by_xml_id.get(&(ib, raw)))
                             .map(|i| Value::from(*i)),
-                        "element" => id().filter(|i| element_ids.contains(i)).map(Value::from),
+                        "element" => id().filter(|i| item_ids.contains(i)).map(Value::from),
                         "date" => raw.get(..10).map(|d| Value::String(d.to_string())),
                         _ => Some(Value::String(raw.to_string())),
                     }
@@ -2581,7 +2581,7 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
             "INSERT INTO catalog_products (item_id, quantity, available, quantity_trace, can_buy_zero) ",
         );
         qb.push_values(chunk, |mut b, p| {
-            b.push_bind(p.element_id)
+            b.push_bind(p.item_id)
                 .push_bind(p.quantity)
                 .push_bind(p.available)
                 .push_bind(p.quantity_trace)

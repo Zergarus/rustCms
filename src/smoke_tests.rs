@@ -280,14 +280,14 @@ async fn migration_0014_keeps_rows(db: PgPool) {
 async fn item_delete_cleans_cart(db: PgPool) {
     let f = crate::test_support::order_fixture(&db).await;
     sqlx::query("DELETE FROM collection_items WHERE id = $1")
-        .bind(f.element_id)
+        .bind(f.product_id)
         .execute(&db)
         .await
         .unwrap();
     let left: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM cart_items WHERE item_id = $1 AND order_id IS NULL",
     )
-    .bind(f.element_id)
+    .bind(f.product_id)
     .fetch_one(&db)
     .await
     .unwrap();
@@ -373,4 +373,35 @@ async fn field_filters_and_order(db: PgPool) {
     assert_eq!(own["pagination"]["total"], 1);
     let own_miss = get_json(&app, "/api/v1/iblocks/news/elements?prop.color=999").await;
     assert_eq!(own_miss["pagination"]["total"], 0);
+}
+
+/// Поле-привязка: в настройках коллекции видна цель привязки, новая привязка сохраняется.
+#[sqlx::test]
+async fn field_link_roundtrip(db: PgPool) {
+    let c = content_fixture(&db).await;
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let col = c.collection_id;
+    page_has(
+        &app,
+        &cookie,
+        &format!("/admin/iblocks/{col}"),
+        &["→ Новости"],
+    )
+    .await;
+    let (status, _) = post_form(
+        &app,
+        &format!("/admin/iblocks/{col}/properties"),
+        &cookie,
+        &format!("code=rel&name=Ещё&kind=element&sort=500&link_collection_id={col}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let link: Option<i64> =
+        sqlx::query_scalar("SELECT link_collection_id FROM collection_fields WHERE code = 'rel'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(link, Some(col));
+    let _ = c.link_field_id;
 }

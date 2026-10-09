@@ -10,18 +10,18 @@ use serde::{Deserialize, Serialize};
 
 use super::{parse_sort, render};
 use crate::{
-    access::{Access, IBLOCKS_MANAGE, Level},
-    error::{AppError, AppResult, is_unique_violation},
-    iblock::{
-        IblockInput, Property, PropertyEnum, PropertyInput, is_valid_code, props,
-        repo::{self, EnumInput},
+    access::{Access, COLLECTIONS_MANAGE, Level},
+    collection::{
+        CollectionInput, Field, FieldInput, FieldOption, fields, is_valid_code,
+        repo::{self, OptionInput},
         slugify,
     },
+    error::{AppError, AppResult, is_unique_violation},
     state::AppState,
 };
 
 #[derive(Default, Deserialize, Serialize)]
-pub struct IblockForm {
+pub struct CollectionForm {
     #[serde(default)]
     code: String,
     #[serde(default)]
@@ -34,8 +34,8 @@ pub struct IblockForm {
     sort: String,
 }
 
-impl IblockForm {
-    fn validate(&self) -> Result<IblockInput, String> {
+impl CollectionForm {
+    fn validate(&self) -> Result<CollectionInput, String> {
         let name = self.name.trim();
         let code = self.code.trim();
         if name.is_empty() {
@@ -44,7 +44,7 @@ impl IblockForm {
         if !is_valid_code(code) {
             return Err("Код: только латиница в нижнем регистре, цифры, «_» и «-»".into());
         }
-        Ok(IblockInput {
+        Ok(CollectionInput {
             code: code.to_string(),
             name: name.to_string(),
             description: self.description.trim().to_string(),
@@ -56,7 +56,7 @@ impl IblockForm {
 }
 
 #[derive(Default, Deserialize, Serialize)]
-pub struct PropertyForm {
+pub struct FieldForm {
     #[serde(default)]
     code: String,
     #[serde(default)]
@@ -71,8 +71,8 @@ pub struct PropertyForm {
     link_collection_id: String,
 }
 
-impl PropertyForm {
-    fn validate(&self) -> Result<PropertyInput, String> {
+impl FieldForm {
+    fn validate(&self) -> Result<FieldInput, String> {
         let name = self.name.trim();
         let code = self.code.trim();
         if name.is_empty() {
@@ -81,7 +81,7 @@ impl PropertyForm {
         if !is_valid_code(code) {
             return Err("Код свойства: только латиница в нижнем регистре, цифры, «_» и «-»".into());
         }
-        let kind = props::kind(&self.kind).ok_or("Неизвестный тип свойства")?;
+        let kind = fields::kind(&self.kind).ok_or("Неизвестный тип свойства")?;
         let multiple = self.multiple.is_some();
         if multiple && !kind.multiple {
             return Err(format!("Тип «{}» не может быть множественным", kind.name));
@@ -91,7 +91,7 @@ impl PropertyForm {
             _ if kind.code != "element" => None,
             raw => Some(raw.parse().map_err(|_| "Неверный инфоблок привязки")?),
         };
-        Ok(PropertyInput {
+        Ok(FieldInput {
             code: code.to_string(),
             name: name.to_string(),
             kind: self.kind.clone(),
@@ -107,12 +107,12 @@ pub async fn list(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
 ) -> AppResult<Html<String>> {
-    let items: Vec<_> = repo::list_iblocks(&state.db)
+    let items: Vec<_> = repo::list_collections(&state.db)
         .await?
         .into_iter()
-        .filter(|s| user.iblock_level(s.iblock.id) >= Level::Read)
+        .filter(|s| user.collection_level(s.collection.id) >= Level::Read)
         .collect();
-    let can_manage = user.can(IBLOCKS_MANAGE);
+    let can_manage = user.can(COLLECTIONS_MANAGE);
     render(&state, "iblocks.html", context! { user, items, can_manage })
 }
 
@@ -120,8 +120,8 @@ pub async fn new_form(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
 ) -> AppResult<Html<String>> {
-    user.require(IBLOCKS_MANAGE)?;
-    let form = IblockForm {
+    user.require(COLLECTIONS_MANAGE)?;
+    let form = CollectionForm {
         api_enabled: Some("on".into()),
         sort: "500".into(),
         ..Default::default()
@@ -132,11 +132,11 @@ pub async fn new_form(
 pub async fn create(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
-    Form(form): Form<IblockForm>,
+    Form(form): Form<CollectionForm>,
 ) -> AppResult<Response> {
-    user.require(IBLOCKS_MANAGE)?;
+    user.require(COLLECTIONS_MANAGE)?;
     let error = match form.validate() {
-        Ok(input) => match repo::create_iblock(&state.db, &input).await {
+        Ok(input) => match repo::create_collection(&state.db, &input).await {
             Ok(iblock) => {
                 return Ok(Redirect::to(&format!("/admin/iblocks/{}", iblock.id)).into_response());
             }
@@ -153,16 +153,16 @@ async fn render_edit(
     state: &AppState,
     user: Access,
     id: i64,
-    form: Option<IblockForm>,
+    form: Option<CollectionForm>,
     error: Option<String>,
-    prop_form: PropertyForm,
+    prop_form: FieldForm,
     prop_error: Option<String>,
 ) -> AppResult<Html<String>> {
-    let iblock = repo::get_iblock(&state.db, id)
+    let iblock = repo::get_collection(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let properties = repo::list_properties(&state.db, id).await?;
-    let form = form.unwrap_or_else(|| IblockForm {
+    let properties = repo::list_fields(&state.db, id).await?;
+    let form = form.unwrap_or_else(|| CollectionForm {
         code: iblock.code.clone(),
         name: iblock.name.clone(),
         description: iblock.description.clone(),
@@ -181,14 +181,14 @@ async fn render_edit(
             properties,
             prop_form,
             prop_error,
-            iblocks => repo::list_iblocks(&state.db).await?,
-            kinds => Value::from_serialize(props::KINDS),
+            iblocks => repo::list_collections(&state.db).await?,
+            kinds => Value::from_serialize(fields::KINDS),
         },
     )
 }
 
-fn empty_prop_form() -> PropertyForm {
-    PropertyForm {
+fn empty_field_form() -> FieldForm {
+    FieldForm {
         kind: "string".into(),
         sort: "500".into(),
         ..Default::default()
@@ -200,19 +200,19 @@ pub async fn edit_form(
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
 ) -> AppResult<Html<String>> {
-    user.require(IBLOCKS_MANAGE)?;
-    render_edit(&state, user, id, None, None, empty_prop_form(), None).await
+    user.require(COLLECTIONS_MANAGE)?;
+    render_edit(&state, user, id, None, None, empty_field_form(), None).await
 }
 
 pub async fn update(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
-    Form(form): Form<IblockForm>,
+    Form(form): Form<CollectionForm>,
 ) -> AppResult<Response> {
-    user.require(IBLOCKS_MANAGE)?;
+    user.require(COLLECTIONS_MANAGE)?;
     let error = match form.validate() {
-        Ok(input) => match repo::update_iblock(&state.db, id, &input).await {
+        Ok(input) => match repo::update_collection(&state.db, id, &input).await {
             Ok(true) => {
                 return Ok(Redirect::to(&format!("/admin/iblocks/{id}")).into_response());
             }
@@ -228,7 +228,7 @@ pub async fn update(
         id,
         Some(form),
         Some(error),
-        empty_prop_form(),
+        empty_field_form(),
         None,
     );
     Ok(page.await?.into_response())
@@ -239,8 +239,8 @@ pub async fn delete(
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
 ) -> AppResult<Redirect> {
-    user.require(IBLOCKS_MANAGE)?;
-    repo::delete_iblock(&state.db, id).await?;
+    user.require(COLLECTIONS_MANAGE)?;
+    repo::delete_collection(&state.db, id).await?;
     Ok(Redirect::to("/admin/iblocks"))
 }
 
@@ -248,11 +248,11 @@ pub async fn add_property(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
-    Form(form): Form<PropertyForm>,
+    Form(form): Form<FieldForm>,
 ) -> AppResult<Response> {
-    user.require(IBLOCKS_MANAGE)?;
+    user.require(COLLECTIONS_MANAGE)?;
     let error = match form.validate() {
-        Ok(input) => match repo::create_property(&state.db, id, &input).await {
+        Ok(input) => match repo::create_field(&state.db, id, &input).await {
             // У списка сразу переходим к вариантам значений
             Ok(prop_id) if input.kind == "list" => {
                 return Ok(Redirect::to(&format!("/admin/properties/{prop_id}")).into_response());
@@ -267,13 +267,13 @@ pub async fn add_property(
     Ok(page.await?.into_response())
 }
 
-pub async fn delete_property(
+pub async fn delete_field(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
 ) -> AppResult<Redirect> {
-    user.require(IBLOCKS_MANAGE)?;
-    let collection_id = repo::delete_property(&state.db, id)
+    user.require(COLLECTIONS_MANAGE)?;
+    let collection_id = repo::delete_field(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
     Ok(Redirect::to(&format!("/admin/iblocks/{collection_id}")))
@@ -283,15 +283,15 @@ pub async fn delete_property(
 async fn render_property(
     state: &AppState,
     user: Access,
-    property: Property,
-    form: Option<PropertyForm>,
+    property: Field,
+    form: Option<FieldForm>,
     error: Option<String>,
     enum_error: Option<String>,
 ) -> AppResult<Html<String>> {
-    let iblock = repo::get_iblock(&state.db, property.collection_id)
+    let iblock = repo::get_collection(&state.db, property.collection_id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let form = form.unwrap_or_else(|| PropertyForm {
+    let form = form.unwrap_or_else(|| FieldForm {
         code: property.code.clone(),
         name: property.name.clone(),
         kind: property.kind.clone(),
@@ -303,15 +303,15 @@ async fn render_property(
             .map(|id| id.to_string())
             .unwrap_or_default(),
     });
-    let enums = repo::list_enums(&state.db, property.id).await?;
-    let kind = props::kind(&property.kind).map(|k| k.name);
+    let enums = repo::list_options(&state.db, property.id).await?;
+    let kind = fields::kind(&property.kind).map(|k| k.name);
     render(
         state,
         "property_form.html",
         context! {
             user, iblock, property, form, error, enums, enum_error, kind,
             new_rows => NEW_ENUM_ROWS,
-            iblocks => repo::list_iblocks(&state.db).await?,
+            iblocks => repo::list_collections(&state.db).await?,
         },
     )
 }
@@ -319,9 +319,9 @@ async fn render_property(
 /// Сколько пустых строк для новых вариантов показывать в форме списка.
 const NEW_ENUM_ROWS: usize = 5;
 
-async fn load_property(state: &AppState, user: &Access, id: i64) -> AppResult<Property> {
-    user.require(IBLOCKS_MANAGE)?;
-    repo::get_property(&state.db, id)
+async fn load_property(state: &AppState, user: &Access, id: i64) -> AppResult<Field> {
+    user.require(COLLECTIONS_MANAGE)?;
+    repo::get_field(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)
 }
@@ -336,11 +336,11 @@ pub async fn property_form(
 }
 
 /// Код и тип свойства не меняются: от них зависят уже сохранённые значения.
-pub async fn update_property(
+pub async fn update_field(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
-    Form(mut form): Form<PropertyForm>,
+    Form(mut form): Form<FieldForm>,
 ) -> AppResult<Response> {
     let property = load_property(&state, &user, id).await?;
     form.code = property.code.clone();
@@ -348,7 +348,7 @@ pub async fn update_property(
     form.multiple = property.multiple.then(|| "on".into());
     let error = match form.validate() {
         Ok(input) => {
-            repo::update_property(&state.db, id, &input).await?;
+            repo::update_field(&state.db, id, &input).await?;
             let url = format!("/admin/iblocks/{}", property.collection_id);
             return Ok(Redirect::to(&url).into_response());
         }
@@ -362,8 +362,8 @@ pub async fn update_property(
 /// Пустые новые строки пропускаются; пустой XML_ID генерируется из значения.
 fn parse_enums(
     fields: &HashMap<String, String>,
-    existing: &[PropertyEnum],
-) -> Result<(Vec<EnumInput>, Vec<i64>), String> {
+    existing: &[FieldOption],
+) -> Result<(Vec<OptionInput>, Vec<i64>), String> {
     let mut rows: Vec<usize> = fields
         .keys()
         .filter_map(|k| k.strip_prefix("enum_value_")?.parse().ok())
@@ -407,10 +407,10 @@ fn parse_enums(
             },
             xml_id => xml_id.to_string(),
         };
-        if items.iter().any(|i: &EnumInput| i.xml_id == xml_id) {
+        if items.iter().any(|i: &OptionInput| i.xml_id == xml_id) {
             errors.push(format!("XML_ID «{xml_id}» повторяется"));
         }
-        items.push(EnumInput {
+        items.push(OptionInput {
             id,
             value: value.to_string(),
             xml_id,
@@ -425,7 +425,7 @@ fn parse_enums(
     }
 }
 
-pub async fn save_enums(
+pub async fn save_options(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
@@ -435,10 +435,10 @@ pub async fn save_enums(
     if property.kind != "list" {
         return Err(AppError::BadRequest("свойство не является списком".into()));
     }
-    let existing = repo::list_enums(&state.db, id).await?;
+    let existing = repo::list_options(&state.db, id).await?;
     let error = match parse_enums(&fields, &existing) {
         Ok((items, delete)) => {
-            match repo::save_enums(&state.db, &property, &items, &delete).await {
+            match repo::save_options(&state.db, &property, &items, &delete).await {
                 Ok(()) => {
                     return Ok(Redirect::to(&format!("/admin/properties/{id}")).into_response());
                 }
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn enums_parsing() {
-        let existing = [PropertyEnum {
+        let existing = [FieldOption {
             id: 7,
             field_id: 1,
             value: "Б/у".into(),
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn property_validation() {
-        let form = |kind: &str, multiple: bool| PropertyForm {
+        let form = |kind: &str, multiple: bool| FieldForm {
             code: "p".into(),
             name: "P".into(),
             kind: kind.into(),

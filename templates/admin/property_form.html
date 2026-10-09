@@ -21,10 +21,10 @@
   </div>
   {% if property.kind == "element" %}
   <label>Инфоблок привязки
-    <select name="link_iblock_id">
+    <select name="link_collection_id">
       <option value="">— любой —</option>
       {% for i in iblocks %}
-      <option value="{{ i.id }}" {% if form.link_iblock_id == i.id|string %}selected{% endif %}>{{ i.name }}</option>
+      <option value="{{ i.id }}" {% if form.link_collection_id == i.id|string %}selected{% endif %}>{{ i.name }}</option>
       {% endfor %}
     </select>
   </label>

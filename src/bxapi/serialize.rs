@@ -23,8 +23,8 @@ use super::{
 };
 use crate::{
     catalog,
+    collection::Field,
     files::{self, FileRecord},
-    iblock::Property,
     state::AppState,
 };
 
@@ -132,7 +132,7 @@ pub fn serialize<'a>(
     depth: usize,
 ) -> BoxFut<'a, Result<Vec<Map<String, Value>>, BxError>> {
     Box::pin(async move {
-        let code = schema.iblock.code.as_str();
+        let code = schema.collection.code.as_str();
         let decorators = match mode {
             Mode::List => env.project.list_decorators(code),
             Mode::Detail => env.project.detail_decorators(code),
@@ -155,7 +155,7 @@ pub fn serialize<'a>(
                 select.add(&to_camel(prop), env.project, code);
             }
         }
-        if schema.iblock.is_catalog && mode != Mode::Related && !select.has("stocks") {
+        if schema.collection.is_catalog && mode != Mode::Related && !select.has("stocks") {
             select.add("stocks", env.project, code);
         }
 
@@ -230,7 +230,7 @@ fn base_value(schema: &Schema, row: &Row, field: &str) -> Option<Value> {
 
 /// URL по шаблону инфоблока, как `CIBlock::ReplaceDetailUrl`.
 pub fn detail_page_url(schema: &Schema, row: &Row) -> String {
-    let template = &schema.iblock.detail_page_url;
+    let template = &schema.collection.detail_page_url;
     if template.is_empty() {
         return String::new();
     }
@@ -253,7 +253,7 @@ pub fn detail_page_url(schema: &Schema, row: &Row) -> String {
         .replace("#ELEMENT_CODE#", &row.code)
         .replace("#CODE#", &row.code)
         .replace("#EXTERNAL_ID#", &row.xml_id)
-        .replace("#IBLOCK_CODE#", &schema.iblock.code);
+        .replace("#IBLOCK_CODE#", &schema.collection.code);
     collapse_slashes(&url)
 }
 
@@ -301,7 +301,7 @@ impl Loaded {
         let wants_images = select.has("image") || select.has("imageExt");
         let image_prop = env
             .project
-            .image_source(&schema.iblock.code)
+            .image_source(&schema.collection.code)
             .map(|s| s.property);
         for row in rows {
             if wants_images {
@@ -329,7 +329,7 @@ impl Loaded {
 
         // Связанные строки: справочники, привязки в характеристиках и `.element.*`
         let mut linked_ids: HashSet<i64> = HashSet::new();
-        let mut related_selects: Vec<(&Property, Select)> = Vec::new();
+        let mut related_selects: Vec<(&Field, Select)> = Vec::new();
         for field in &select.fields {
             let Some(prop) = schema
                 .prop(&to_snake(&field.root))
@@ -403,7 +403,7 @@ impl Loaded {
         }
 
         // Каталог: цены, склады, остатки
-        if schema.iblock.is_catalog && !row_ids.is_empty() {
+        if schema.collection.is_catalog && !row_ids.is_empty() {
             if select.has("catalogPrice") {
                 loaded.prices = catalog::load_prices(&env.state.db, &row_ids).await?;
             }
@@ -452,11 +452,11 @@ impl Loaded {
                 "small": self.image(env, row.preview_picture_id),
                 "large": self.image(env, row.detail_picture_id),
             })),
-            "catalogPrice" if schema.iblock.is_catalog => {
+            "catalogPrice" if schema.collection.is_catalog => {
                 Some(self.catalog_price(env.snap, row.id))
             }
-            "stocks" if schema.iblock.is_catalog => Some(self.stocks_value(env.snap, row.id)),
-            "catalogQuantity" if schema.iblock.is_catalog => Some(
+            "stocks" if schema.collection.is_catalog => Some(self.stocks_value(env.snap, row.id)),
+            "catalogQuantity" if schema.collection.is_catalog => Some(
                 self.quantities
                     .get(&row.id)
                     .map_or(Value::Null, |q| number_value(*q)),
@@ -486,7 +486,7 @@ impl Loaded {
 
     /// `image`: анонс; у проектов с источником из свойства — по его правилу.
     fn main_image(&self, env: &Env, schema: &Schema, row: &Row, mode: Mode) -> Value {
-        let code = schema.iblock.code.as_str();
+        let code = schema.collection.code.as_str();
         let from_prop = env
             .project
             .image_source(code)
@@ -511,7 +511,7 @@ impl Loaded {
     }
 
     /// Значение свойства без пути — как `CODE` в select Битрикса.
-    fn raw_value(&self, env: &Env, prop: &Property, row: &Row) -> Value {
+    fn raw_value(&self, env: &Env, prop: &Field, row: &Row) -> Value {
         let values = row.values(&prop.code);
         let directory = prop.user_type == "directory";
         let items: Vec<Value> = values
@@ -555,7 +555,7 @@ impl Loaded {
     fn path_value(
         &self,
         env: &Env,
-        prop: &Property,
+        prop: &Field,
         row: &Row,
         root: &str,
         rests: &[Vec<String>],
@@ -590,7 +590,7 @@ impl Loaded {
     fn rest_value(
         &self,
         env: &Env,
-        prop: &Property,
+        prop: &Field,
         directory: bool,
         root: &str,
         stored: &Value,
@@ -640,8 +640,8 @@ impl Loaded {
         }
     }
 
-    fn catalog_price(&self, snap: &Snapshot, element_id: i64) -> Value {
-        let Some(prices) = self.prices.get(&element_id).filter(|p| !p.is_empty()) else {
+    fn catalog_price(&self, snap: &Snapshot, item_id: i64) -> Value {
+        let Some(prices) = self.prices.get(&item_id).filter(|p| !p.is_empty()) else {
             return Value::Array(Vec::new()); // Битрикс отдаёт пустой массив
         };
         let main = catalog::main_price(prices).unwrap_or(&prices[0]);
@@ -668,8 +668,8 @@ impl Loaded {
     }
 
     /// Остатки по активным складам, где у товара есть запись; без записей — `[]`.
-    fn stocks_value(&self, snap: &Snapshot, element_id: i64) -> Value {
-        let Some(amounts) = self.stocks.get(&element_id) else {
+    fn stocks_value(&self, snap: &Snapshot, item_id: i64) -> Value {
+        let Some(amounts) = self.stocks.get(&item_id) else {
             return Value::Array(Vec::new());
         };
         let items: Vec<Value> = snap

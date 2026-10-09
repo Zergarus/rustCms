@@ -254,11 +254,11 @@ pub(super) fn order_json(
         .items
         .iter()
         .map(|i| {
-            let product = r.products.get(&i.element_id);
+            let product = r.products.get(&i.product_id);
             let store = i.store_id.and_then(|id| r.stores.get(&id));
             let mut obj = json!({
                 "id": i.id,
-                "productId": i.element_id,
+                "productId": i.product_id,
                 "name": i.name,
                 "quantity": i.quantity,
                 "price": i.price,
@@ -351,16 +351,16 @@ async fn load_refs(state: &AppState, orders: &[UserOrder]) -> Result<OrderRefs, 
     )
     .fetch_all(&state.db)
     .await?;
-    let element_ids: Vec<i64> = orders
+    let product_ids: Vec<i64> = orders
         .iter()
-        .flat_map(|o| o.items.iter().map(|i| i.element_id))
+        .flat_map(|o| o.items.iter().map(|i| i.product_id))
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    let products = if element_ids.is_empty() {
+    let products = if product_ids.is_empty() {
         HashMap::new()
     } else {
-        product_views(state, &element_ids).await?
+        product_views(state, &product_ids).await?
     };
     let file_props: HashSet<i64> = settings
         .properties
@@ -662,7 +662,7 @@ mod tests {
             }],
             items: vec![OrderItem {
                 id: 100,
-                element_id: 33,
+                product_id: 33,
                 store_id: Some(3),
                 quantity: 2.0,
                 price: 100.0,

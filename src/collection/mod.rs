@@ -1,6 +1,6 @@
 //! Инфоблоки — настраиваемые типы контента по мотивам Битрикса.
 
-pub mod props;
+pub mod fields;
 pub mod repo;
 
 use std::collections::{HashMap, HashSet};
@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 use sqlx::{FromRow, types::Json};
 
 #[derive(Debug, Clone, FromRow, Serialize)]
-pub struct Iblock {
+pub struct Collection {
     pub id: i64,
     pub code: String,
     pub name: String,
@@ -29,15 +29,15 @@ pub struct Iblock {
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
-pub struct IblockSummary {
+pub struct CollectionSummary {
     #[sqlx(flatten)]
     #[serde(flatten)]
-    pub iblock: Iblock,
-    pub element_count: i64,
+    pub collection: Collection,
+    pub item_count: i64,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
-pub struct Property {
+pub struct Field {
     pub id: i64,
     pub collection_id: i64,
     pub code: String,
@@ -54,7 +54,7 @@ pub struct Property {
 
 /// Вариант значения свойства-списка.
 #[derive(Debug, Clone, FromRow, Serialize)]
-pub struct PropertyEnum {
+pub struct FieldOption {
     pub id: i64,
     pub field_id: i64,
     pub value: String,
@@ -93,7 +93,7 @@ pub struct SectionInput {
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
-pub struct Element {
+pub struct Item {
     pub id: i64,
     pub collection_id: i64,
     pub section_id: Option<i64>,
@@ -113,7 +113,7 @@ pub struct Element {
 }
 
 #[derive(Debug)]
-pub struct IblockInput {
+pub struct CollectionInput {
     pub code: String,
     pub name: String,
     pub description: String,
@@ -124,7 +124,7 @@ pub struct IblockInput {
 }
 
 #[derive(Debug)]
-pub struct PropertyInput {
+pub struct FieldInput {
     pub code: String,
     pub name: String,
     pub kind: String,
@@ -135,7 +135,7 @@ pub struct PropertyInput {
 }
 
 #[derive(Debug)]
-pub struct ElementInput {
+pub struct ItemInput {
     pub section_id: Option<i64>,
     pub code: String,
     pub xml_id: String,

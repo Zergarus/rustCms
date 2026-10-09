@@ -14,12 +14,12 @@ use super::{parse_sort, read_upload_form, render};
 use crate::{
     access::{Access, Level},
     catalog::{self, PurchaseInput},
-    error::{AppError, AppResult, is_unique_violation},
-    files::{self, FileRecord},
-    iblock::{
-        Element, ElementInput, Iblock, Property, PropertyEnum, Section, is_valid_slug, props, repo,
+    collection::{
+        Collection, Field, FieldOption, Item, ItemInput, Section, fields, is_valid_slug, repo,
         section_tree, slugify,
     },
+    error::{AppError, AppResult, is_unique_violation},
+    files::{self, FileRecord},
     state::AppState,
 };
 
@@ -72,7 +72,7 @@ impl FormValues {
 
     /// Раскладывает загруженные файлы по полям: `upload_<поле>` → `<поле>`.
     /// В одиночное поле новый файл встаёт вместо старого, в множественное — добавляется.
-    fn apply_uploads(&mut self, uploads: Vec<(String, FileRecord)>, properties: &[Property]) {
+    fn apply_uploads(&mut self, uploads: Vec<(String, FileRecord)>, properties: &[Field]) {
         for (field, file) in uploads {
             let Some(key) = field.strip_prefix("upload_") else {
                 continue;
@@ -107,10 +107,10 @@ fn parse_optional_id(raw: &str, what: &str, errors: &mut Vec<String>) -> Option<
 
 fn build_input(
     form: &FormValues,
-    properties: &[Property],
-    enums: &[PropertyEnum],
+    properties: &[Field],
+    enums: &[FieldOption],
     sections: &[Section],
-) -> Result<ElementInput, String> {
+) -> Result<ItemInput, String> {
     let get = |key: &str| form.get(key);
     let mut errors = Vec::new();
 
@@ -146,13 +146,13 @@ fn build_input(
 
     let mut values = Map::new();
     for prop in properties {
-        let prop_enums: Vec<PropertyEnum> = enums
+        let prop_enums: Vec<FieldOption> = enums
             .iter()
             .filter(|e| e.field_id == prop.id)
             .cloned()
             .collect();
         let raws = form.all(&format!("prop_{}", prop.code));
-        match props::parse_value(prop, &raws, &prop_enums) {
+        match fields::parse_value(prop, &raws, &prop_enums) {
             Ok(value) => {
                 values.insert(prop.code.clone(), value);
             }
@@ -163,7 +163,7 @@ fn build_input(
     if !errors.is_empty() {
         return Err(errors.join("; "));
     }
-    Ok(ElementInput {
+    Ok(ItemInput {
         section_id,
         code,
         xml_id: get("xml_id").to_string(),
@@ -182,8 +182,8 @@ fn build_input(
 /// Проверки, которым нужна БД: привязанные элементы и файлы существуют.
 async fn check_references(
     state: &AppState,
-    properties: &[Property],
-    input: &ElementInput,
+    properties: &[Field],
+    input: &ItemInput,
 ) -> AppResult<Result<(), String>> {
     let mut errors = Vec::new();
     let mut file_ids: Vec<i64> = [input.preview_picture_id, input.detail_picture_id]
@@ -194,10 +194,10 @@ async fn check_references(
         let Some(value) = input.field_values.get(&prop.code) else {
             continue;
         };
-        let ids = props::ids(value);
+        let ids = fields::ids(value);
         match prop.kind.as_str() {
             "element" if !ids.is_empty() => {
-                let found = repo::element_names(&state.db, &ids, prop.link_collection_id).await?;
+                let found = repo::item_names(&state.db, &ids, prop.link_collection_id).await?;
                 let missing: Vec<String> = ids
                     .iter()
                     .filter(|id| !found.iter().any(|(f, _)| f == *id))
@@ -226,7 +226,7 @@ async fn check_references(
     })
 }
 
-fn element_to_form(element: &Element, properties: &[Property]) -> FormValues {
+fn element_to_form(element: &Item, properties: &[Field]) -> FormValues {
     let mut form = FormValues::default();
     form.set("name", &element.name);
     form.set("code", &element.code);
@@ -253,7 +253,7 @@ fn element_to_form(element: &Element, properties: &[Property]) -> FormValues {
         if let Some(value) = element.field_values.get(&prop.code) {
             form.0.insert(
                 format!("prop_{}", prop.code),
-                props::to_form_values(prop, value),
+                fields::to_form_values(prop, value),
             );
         }
     }
@@ -261,10 +261,10 @@ fn element_to_form(element: &Element, properties: &[Property]) -> FormValues {
 }
 
 /// Всё, что нужно форме элемента кроме самих значений.
-struct IblockContext {
-    iblock: Iblock,
-    properties: Vec<Property>,
-    enums: Vec<PropertyEnum>,
+struct CollectionContext {
+    collection: Collection,
+    properties: Vec<Field>,
+    enums: Vec<FieldOption>,
     /// Разделы в порядке дерева.
     sections: Vec<Section>,
     /// Для торгового каталога — типы цен и склады вкладки «Торговый каталог».
@@ -336,17 +336,13 @@ fn purchase_input_from_form(
 }
 
 /// Текущие цены, остатки и флаги товара — в поля формы.
-async fn purchase_to_form(
-    state: &AppState,
-    element_id: i64,
-    form: &mut FormValues,
-) -> AppResult<()> {
+async fn purchase_to_form(state: &AppState, item_id: i64, form: &mut FormValues) -> AppResult<()> {
     let flag = |v: Option<bool>| match v {
         Some(true) => "Y",
         Some(false) => "N",
         None => "default",
     };
-    match catalog::raw_flags(&state.db, element_id).await? {
+    match catalog::raw_flags(&state.db, item_id).await? {
         Some((available, trace, zero)) => {
             if available {
                 form.set("available", "on");
@@ -360,9 +356,9 @@ async fn purchase_to_form(
             form.set("can_buy_zero", "default");
         }
     }
-    let prices = catalog::load_prices(&state.db, &[element_id])
+    let prices = catalog::load_prices(&state.db, &[item_id])
         .await?
-        .remove(&element_id)
+        .remove(&item_id)
         .unwrap_or_default();
     let tiered = catalog::tiered_price_types(&prices);
     for p in &prices {
@@ -387,7 +383,7 @@ async fn purchase_to_form(
     }
     let quantity: Option<f64> =
         sqlx::query_scalar("SELECT quantity::float8 FROM catalog_products WHERE item_id = $1")
-            .bind(element_id)
+            .bind(item_id)
             .fetch_optional(&state.db)
             .await?;
     if let Some(q) = quantity {
@@ -396,7 +392,7 @@ async fn purchase_to_form(
     let amounts: Vec<(i64, f64)> = sqlx::query_as(
         "SELECT store_id, amount::float8 FROM catalog_store_amounts WHERE item_id = $1",
     )
-    .bind(element_id)
+    .bind(item_id)
     .fetch_all(&state.db)
     .await?;
     for (store, amount) in amounts {
@@ -405,8 +401,8 @@ async fn purchase_to_form(
     Ok(())
 }
 
-async fn load_iblock(state: &AppState, id: i64) -> AppResult<IblockContext> {
-    let iblock = repo::get_iblock(&state.db, id)
+async fn load_collection(state: &AppState, id: i64) -> AppResult<CollectionContext> {
+    let iblock = repo::get_collection(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
     let catalog = if iblock.is_catalog {
@@ -423,12 +419,12 @@ async fn load_iblock(state: &AppState, id: i64) -> AppResult<IblockContext> {
     } else {
         None
     };
-    Ok(IblockContext {
-        properties: repo::list_properties(&state.db, id).await?,
-        enums: repo::list_iblock_enums(&state.db, id).await?,
+    Ok(CollectionContext {
+        properties: repo::list_fields(&state.db, id).await?,
+        enums: repo::list_collection_options(&state.db, id).await?,
         sections: section_tree(repo::list_sections(&state.db, id).await?),
         catalog,
-        iblock,
+        collection: iblock,
     })
 }
 
@@ -443,13 +439,13 @@ struct FileView {
 async fn render_form(
     state: &AppState,
     user: Access,
-    ctx: IblockContext,
-    element_id: Option<i64>,
+    ctx: CollectionContext,
+    item_id: Option<i64>,
     form: FormValues,
     error: Option<String>,
 ) -> AppResult<Html<String>> {
-    let IblockContext {
-        iblock,
+    let CollectionContext {
+        collection: iblock,
         catalog,
         properties,
         enums,
@@ -472,7 +468,7 @@ async fn render_form(
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter_map(|s| s.parse().ok())
                     .collect();
-                let names = repo::element_names(&state.db, &ids, prop.link_collection_id).await?;
+                let names = repo::item_names(&state.db, &ids, prop.link_collection_id).await?;
                 linked.insert(key, names);
             }
             _ => {}
@@ -492,7 +488,7 @@ async fn render_form(
         })
         .collect();
 
-    let enums: HashMap<String, Vec<PropertyEnum>> = properties
+    let enums: HashMap<String, Vec<FieldOption>> = properties
         .iter()
         .map(|p| {
             let items = enums
@@ -510,12 +506,12 @@ async fn render_form(
         .collect();
     multi.extend(form.0.iter().map(|(k, v)| (k.clone(), v.clone())));
 
-    let can_write = user.iblock_level(iblock.id) >= Level::Write;
+    let can_write = user.collection_level(iblock.id) >= Level::Write;
     render(
         state,
         "element_form.html",
         context! {
-            user, iblock, properties, element_id, error, can_write, sections, enums, files, linked,
+            user, iblock, properties, item_id, error, can_write, sections, enums, files, linked,
             multi, catalog, form => form.first_values(),
         },
     )
@@ -535,8 +531,8 @@ pub async fn list(
     Path(id): Path<i64>,
     Query(q): Query<ListQuery>,
 ) -> AppResult<Html<String>> {
-    user.require_iblock(id, Level::Read)?;
-    let iblock = repo::get_iblock(&state.db, id)
+    user.require_collection(id, Level::Read)?;
+    let iblock = repo::get_collection(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
     let all_sections = repo::list_sections(&state.db, id).await?;
@@ -570,7 +566,7 @@ pub async fn list(
         .collect();
 
     let page = q.page.unwrap_or(1).clamp(1, 1_000_000);
-    let (items, total) = repo::list_elements(
+    let (items, total) = repo::list_items(
         &state.db,
         id,
         Some(current_id.unwrap_or(0)),
@@ -583,7 +579,7 @@ pub async fn list(
         &state,
         "elements.html",
         context! {
-            can_write => user.iblock_level(id) >= Level::Write,
+            can_write => user.collection_level(id) >= Level::Write,
             user, iblock, items, total, page, pages, subsections, chain,
         },
     )
@@ -600,8 +596,8 @@ pub async fn new_form(
     Path(id): Path<i64>,
     Query(q): Query<NewQuery>,
 ) -> AppResult<Html<String>> {
-    user.require_iblock(id, Level::Write)?;
-    let ctx = load_iblock(&state, id).await?;
+    user.require_collection(id, Level::Write)?;
+    let ctx = load_collection(&state, id).await?;
     let mut form = FormValues::default();
     form.set("active", "on");
     form.set("sort", "500");
@@ -626,12 +622,12 @@ pub async fn new_form(
     render_form(&state, user, ctx, None, form, None).await
 }
 
-/// Разбирает отправленную форму и сохраняет элемент (`element_id` = None — создание).
+/// Разбирает отправленную форму и сохраняет элемент (`item_id` = None — создание).
 async fn save(
     state: &AppState,
     user: Access,
-    ctx: IblockContext,
-    element_id: Option<i64>,
+    ctx: CollectionContext,
+    item_id: Option<i64>,
     multipart: Multipart,
 ) -> AppResult<Response> {
     let upload = read_upload_form(state, multipart, "iblock").await?;
@@ -642,7 +638,7 @@ async fn save(
     let purchase = match &ctx.catalog {
         Some(c) => {
             // Цены с диапазонами по количеству вкладка не меняет
-            let tiered = match element_id {
+            let tiered = match item_id {
                 Some(id) => catalog::tiered_price_types(
                     &catalog::load_prices(&state.db, &[id])
                         .await?
@@ -677,18 +673,16 @@ async fn save(
     };
     let error = match result {
         Ok(input) => {
-            let saved = match element_id {
-                Some(id) => repo::update_element(&state.db, id, &input)
-                    .await
-                    .map(|_| id),
-                None => repo::create_element(&state.db, ctx.iblock.id, &input).await,
+            let saved = match item_id {
+                Some(id) => repo::update_item(&state.db, id, &input).await.map(|_| id),
+                None => repo::create_item(&state.db, ctx.collection.id, &input).await,
             };
             match saved {
                 Ok(saved_id) => {
                     if let Some(Ok(p)) = &purchase {
                         catalog::save_purchase(&state.db, saved_id, p).await?;
                     }
-                    let mut url = format!("/admin/iblocks/{}/elements", ctx.iblock.id);
+                    let mut url = format!("/admin/iblocks/{}/elements", ctx.collection.id);
                     if let Some(section) = input.section_id {
                         url.push_str(&format!("?section={section}"));
                     }
@@ -700,7 +694,7 @@ async fn save(
         }
         Err(msg) => msg,
     };
-    let page = render_form(state, user, ctx, element_id, form, Some(error)).await?;
+    let page = render_form(state, user, ctx, item_id, form, Some(error)).await?;
     Ok(page.into_response())
 }
 
@@ -710,8 +704,8 @@ pub async fn create(
     Path(id): Path<i64>,
     multipart: Multipart,
 ) -> AppResult<Response> {
-    user.require_iblock(id, Level::Write)?;
-    let ctx = load_iblock(&state, id).await?;
+    user.require_collection(id, Level::Write)?;
+    let ctx = load_collection(&state, id).await?;
     save(&state, user, ctx, None, multipart).await
 }
 
@@ -720,11 +714,11 @@ pub async fn edit_form(
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
 ) -> AppResult<Html<String>> {
-    let element = repo::get_element(&state.db, id)
+    let element = repo::get_item(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    user.require_iblock(element.collection_id, Level::Read)?;
-    let ctx = load_iblock(&state, element.collection_id).await?;
+    user.require_collection(element.collection_id, Level::Read)?;
+    let ctx = load_collection(&state, element.collection_id).await?;
     let mut form = element_to_form(&element, &ctx.properties);
     if ctx.catalog.is_some() {
         purchase_to_form(&state, id, &mut form).await?;
@@ -738,11 +732,11 @@ pub async fn update(
     Path(id): Path<i64>,
     multipart: Multipart,
 ) -> AppResult<Response> {
-    let element = repo::get_element(&state.db, id)
+    let element = repo::get_item(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    user.require_iblock(element.collection_id, Level::Write)?;
-    let ctx = load_iblock(&state, element.collection_id).await?;
+    user.require_collection(element.collection_id, Level::Write)?;
+    let ctx = load_collection(&state, element.collection_id).await?;
     save(&state, user, ctx, Some(id), multipart).await
 }
 
@@ -751,11 +745,11 @@ pub async fn delete(
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
 ) -> AppResult<Redirect> {
-    let element = repo::get_element(&state.db, id)
+    let element = repo::get_item(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    user.require_iblock(element.collection_id, Level::Write)?;
-    let collection_id = repo::delete_element(&state.db, id)
+    user.require_collection(element.collection_id, Level::Write)?;
+    let collection_id = repo::delete_item(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
     let mut url = format!("/admin/iblocks/{collection_id}/elements");
@@ -811,8 +805,8 @@ mod tests {
         assert!(purchase_input_from_form(&bad, &[], &[]).is_err());
     }
 
-    fn prop(code: &str, kind: &str, required: bool) -> Property {
-        Property {
+    fn prop(code: &str, kind: &str, required: bool) -> Field {
+        Field {
             id: 1,
             collection_id: 1,
             code: code.into(),

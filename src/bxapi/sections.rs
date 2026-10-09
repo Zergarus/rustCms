@@ -15,7 +15,7 @@ use super::{
     registry::{Schema, Snapshot},
     success,
 };
-use crate::{files, iblock::Section, state::AppState};
+use crate::{collection::Section, files, state::AppState};
 
 fn section_field(schema: &Schema, s: &Section, field: &str) -> Option<Value> {
     Some(match field {
@@ -139,7 +139,7 @@ async fn sections_with_elements(
         let mut qb = QueryBuilder::new(
             "SELECT DISTINCT e.section_id FROM collection_items e WHERE e.section_id IS NOT NULL AND e.collection_id = ",
         );
-        qb.push_bind(schema.iblock.id).push(" AND ");
+        qb.push_bind(schema.collection.id).push(" AND ");
         push_filter(&mut qb, &ctx, &filter)?;
         qb
     };
@@ -165,7 +165,7 @@ async fn sections_with_elements(
 
 pub async fn list(state: &AppState, api_code: &str, body: Map<String, Value>) -> BxResult {
     let (snap, schema) = schema_for(state, api_code).await?;
-    let req = ListRequest::parse(&body, &state.project, &schema.iblock.code)?;
+    let req = ListRequest::parse(&body, &state.project, &schema.collection.code)?;
     let allowed = match body.get("hasElements") {
         Some(Value::Object(h)) => Some(sections_with_elements(state, &snap, &schema, h).await?),
         _ => None,
@@ -244,7 +244,7 @@ pub async fn list(state: &AppState, api_code: &str, body: Map<String, Value>) ->
 }
 
 fn section_page_url(schema: &Schema, s: &Section) -> String {
-    let template = &schema.iblock.section_page_url;
+    let template = &schema.collection.section_page_url;
     if template.is_empty() {
         return String::new();
     }

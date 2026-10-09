@@ -16,7 +16,7 @@ use super::{
     serialize::{Env, Mode, ROW_COLS, Row, detail_page_url, serialize},
     success,
 };
-use crate::{iblock::is_valid_code, state::AppState};
+use crate::{collection::is_valid_code, state::AppState};
 
 const MAX_LIMIT: i64 = 200;
 
@@ -32,7 +32,7 @@ pub async fn search(state: &AppState, api_code: &str, body: Map<String, Value>) 
         .filter(|l| *l > 0)
         .map_or(MAX_LIMIT, |l| l.min(MAX_LIMIT));
     let resize = image_resize(body.get("imageResize"));
-    let props = state.project.search_props(&schema.iblock.code);
+    let props = state.project.search_props(&schema.collection.code);
 
     let mut found = find(state, &schema, props, &query, limit).await?;
     let mut correction = None;
@@ -60,9 +60,9 @@ pub async fn search(state: &AppState, api_code: &str, body: Map<String, Value>) 
         .unwrap_or_default();
     let mut select = Select::default();
     for path in &description_paths {
-        select.add(path, &state.project, &schema.iblock.code);
+        select.add(path, &state.project, &schema.collection.code);
     }
-    select.add("image", &state.project, &schema.iblock.code);
+    select.add("image", &state.project, &schema.collection.code);
     let env = Env {
         state,
         snap: &snap,
@@ -163,7 +163,7 @@ async fn find(
         let mut qb = QueryBuilder::new(format!(
             "SELECT {ROW_COLS} FROM collection_items e WHERE e.collection_id = "
         ));
-        qb.push_bind(schema.iblock.id).push(" AND e.active");
+        qb.push_bind(schema.collection.id).push(" AND e.active");
         let mut haystack = String::from("e.name");
         for p in props.iter().filter(|p| is_valid_code(p)) {
             haystack.push_str(&format!(
@@ -201,7 +201,7 @@ async fn find(
 }
 
 fn section_url(schema: &Schema, id: i64) -> String {
-    let template = &schema.iblock.section_page_url;
+    let template = &schema.collection.section_page_url;
     if template.is_empty() {
         return String::new();
     }

@@ -3,7 +3,7 @@
 use sqlx::PgPool;
 
 pub struct Fixture {
-    pub element_id: i64,
+    pub product_id: i64,
     pub buyer_id: i64,
     pub item_id: i64,
     pub person_type_id: i64,
@@ -17,7 +17,7 @@ pub async fn order_fixture(db: &PgPool) -> Fixture {
     .fetch_one(db)
     .await
     .unwrap();
-    let element_id: i64 = sqlx::query_scalar(
+    let product_id: i64 = sqlx::query_scalar(
         "INSERT INTO collection_items (collection_id, code, name) VALUES ($1, 'tovar', 'Товар') RETURNING id",
     )
     .bind(iblock)
@@ -25,7 +25,7 @@ pub async fn order_fixture(db: &PgPool) -> Fixture {
     .await
     .unwrap();
     sqlx::query("INSERT INTO catalog_products (item_id, quantity, quantity_trace, can_buy_zero) VALUES ($1, 10, TRUE, FALSE)")
-        .bind(element_id)
+        .bind(product_id)
         .execute(db)
         .await
         .unwrap();
@@ -34,7 +34,7 @@ pub async fn order_fixture(db: &PgPool) -> Fixture {
         .await
         .unwrap();
     sqlx::query("INSERT INTO catalog_store_amounts (item_id, store_id, amount) VALUES ($1, 1, 5)")
-        .bind(element_id)
+        .bind(product_id)
         .execute(db)
         .await
         .unwrap();
@@ -47,7 +47,7 @@ pub async fn order_fixture(db: &PgPool) -> Fixture {
         "INSERT INTO cart_items (buyer_id, item_id, store_id, quantity, name) VALUES ($1, $2, 1, 1, 'Товар') RETURNING id",
     )
     .bind(buyer_id)
-    .bind(element_id)
+    .bind(product_id)
     .fetch_one(db)
     .await
     .unwrap();
@@ -61,19 +61,19 @@ pub async fn order_fixture(db: &PgPool) -> Fixture {
         .await
         .unwrap();
     Fixture {
-        element_id,
+        product_id,
         buyer_id,
         item_id,
         person_type_id,
     }
 }
 
-pub async fn amounts(db: &PgPool, element_id: i64) -> (f64, f64) {
+pub async fn amounts(db: &PgPool, product_id: i64) -> (f64, f64) {
     sqlx::query_as(
         "SELECT (SELECT quantity::float8 FROM catalog_products WHERE item_id = $1),
                 (SELECT amount::float8 FROM catalog_store_amounts WHERE item_id = $1 AND store_id = 1)",
     )
-    .bind(element_id)
+    .bind(product_id)
     .fetch_one(db)
     .await
     .unwrap()
@@ -88,7 +88,7 @@ pub async fn place_order(db: &PgPool, f: &Fixture, user_id: Option<i64>) -> i64 
         "INSERT INTO cart_items (buyer_id, item_id, store_id, quantity, name) VALUES ($1, $2, NULL, 1, 'Товар') RETURNING id",
     )
     .bind(f.buyer_id)
-    .bind(f.element_id)
+    .bind(f.product_id)
     .fetch_one(db)
     .await
     .unwrap();

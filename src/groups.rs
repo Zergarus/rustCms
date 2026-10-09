@@ -33,7 +33,7 @@ pub struct GroupInput {
     pub sort: i32,
     pub permissions: Vec<String>,
     /// Уровни доступа к инфоблокам; `Level::None` не сохраняется.
-    pub iblock_levels: Vec<(i64, Level)>,
+    pub collection_levels: Vec<(i64, Level)>,
 }
 
 pub async fn list(db: &PgPool) -> sqlx::Result<Vec<GroupSummary>> {
@@ -65,7 +65,7 @@ pub async fn permissions(db: &PgPool, id: i64) -> sqlx::Result<Vec<String>> {
 }
 
 /// Уровни доступа группы по инфоблокам: collection_id → "read" | "write".
-pub async fn iblock_levels(db: &PgPool, id: i64) -> sqlx::Result<HashMap<String, String>> {
+pub async fn collection_levels(db: &PgPool, id: i64) -> sqlx::Result<HashMap<String, String>> {
     let rows: Vec<(i64, String)> =
         sqlx::query_as("SELECT collection_id, level FROM collection_access WHERE group_id = $1")
             .bind(id)
@@ -142,7 +142,7 @@ pub async fn save(db: &PgPool, id: Option<i64>, input: &GroupInput) -> sqlx::Res
         .execute(&mut *tx)
         .await?;
     let (iblock_ids, levels): (Vec<i64>, Vec<&str>) = input
-        .iblock_levels
+        .collection_levels
         .iter()
         .filter_map(|(collection_id, level)| level.as_db().map(|l| (*collection_id, l)))
         .unzip();

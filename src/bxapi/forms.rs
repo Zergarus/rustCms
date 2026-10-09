@@ -15,7 +15,7 @@ use super::{
     project::{FormConfig, IblockWriter, Rule},
     success, to_snake,
 };
-use crate::{iblock::Property, state::AppState, users::is_valid_email};
+use crate::{collection::Field, state::AppState, users::is_valid_email};
 
 /// Строковое значение поля: строки обрезаются, `true`/`false` → `Y`/`N`.
 fn text(value: &Value) -> String {
@@ -72,7 +72,7 @@ fn validate(form: &FormConfig, body: &Map<String, Value>) -> Result<Map<String, 
 }
 
 /// Значение для свойства инфоблока: список — по XML_ID варианта (или id), да/нет — `Y`.
-fn property_value(state_enums: &[(i64, String, String)], prop: &Property, value: &Value) -> Value {
+fn property_value(state_enums: &[(i64, String, String)], prop: &Field, value: &Value) -> Value {
     let one = |v: &Value| -> Option<Value> {
         let raw = text(v);
         if raw.is_empty() {
@@ -157,7 +157,7 @@ async fn write_element(
         "INSERT INTO collection_items (collection_id, code, name, preview_text, detail_text, field_values)
          VALUES ($1, '', $2, $3, $4, $5) RETURNING id",
     )
-    .bind(schema.iblock.id)
+    .bind(schema.collection.id)
     .bind(name)
     .bind(preview)
     .bind(detail)
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn list_values() {
-        let prop = Property {
+        let prop = Field {
             id: 1,
             collection_id: 1,
             code: "consent".into(),

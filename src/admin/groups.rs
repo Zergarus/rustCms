@@ -14,9 +14,9 @@ use serde::Serialize;
 use super::{parse_sort, render};
 use crate::{
     access::{Access, Level, PERMISSIONS, is_known_permission},
+    collection::{is_valid_code, repo as iblock_repo},
     error::{AppError, AppResult, is_unique_violation},
     groups::{self, GroupInput},
-    iblock::{is_valid_code, repo as iblock_repo},
     state::AppState,
 };
 
@@ -37,7 +37,7 @@ struct GroupFormView {
 
 fn parse_form(fields: &FormFields) -> (GroupFormView, Result<GroupInput, String>) {
     let mut view = GroupFormView::default();
-    let mut iblock_levels = Vec::new();
+    let mut collection_levels = Vec::new();
     let mut errors = Vec::new();
 
     for (key, value) in fields {
@@ -60,7 +60,7 @@ fn parse_form(fields: &FormFields) -> (GroupFormView, Result<GroupInput, String>
                     if let Some(db) = level.as_db() {
                         view.levels.insert(id.to_string(), db.to_string());
                     }
-                    iblock_levels.push((id, level));
+                    collection_levels.push((id, level));
                 }
             }
         }
@@ -79,7 +79,7 @@ fn parse_form(fields: &FormFields) -> (GroupFormView, Result<GroupInput, String>
             description: view.description.clone(),
             sort: parse_sort(&view.sort),
             permissions: view.permissions.clone(),
-            iblock_levels,
+            collection_levels,
         })
     } else {
         Err(errors.join("; "))
@@ -94,7 +94,7 @@ async fn render_form(
     form: GroupFormView,
     error: Option<String>,
 ) -> AppResult<Html<String>> {
-    let iblocks = iblock_repo::list_iblocks(&state.db).await?;
+    let iblocks = iblock_repo::list_collections(&state.db).await?;
     let members = match group_id {
         Some(id) => groups::members(&state.db, id).await?,
         None => Vec::new(),
@@ -164,7 +164,7 @@ pub async fn edit_form(
         description: group.description,
         sort: group.sort.to_string(),
         permissions: groups::permissions(&state.db, id).await?,
-        levels: groups::iblock_levels(&state.db, id).await?,
+        levels: groups::collection_levels(&state.db, id).await?,
     };
     render_form(&state, user, Some(id), form, None).await
 }
@@ -238,7 +238,7 @@ mod tests {
         let input = input.unwrap();
         assert_eq!(input.permissions, vec!["admin.access", "users.manage"]);
         assert_eq!(
-            input.iblock_levels,
+            input.collection_levels,
             vec![(1, Level::Write), (2, Level::None)]
         );
         assert_eq!(view.levels.get("1").map(String::as_str), Some("write"));

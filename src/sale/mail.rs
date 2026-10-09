@@ -122,7 +122,7 @@ mod tests {
     fn item(id: i64, name: &str, price: f64) -> OrderItem {
         OrderItem {
             id,
-            element_id: id,
+            product_id: id,
             store_id: None,
             quantity: 1.0,
             price,

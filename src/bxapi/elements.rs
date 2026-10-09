@@ -28,12 +28,12 @@ pub async fn schema_for(
     let snap = state.registry.snapshot(&state.db).await?;
     let schema = snap
         .by_code(&to_snake(api_code))
-        .filter(|s| s.iblock.api_enabled)
+        .filter(|s| s.collection.api_enabled)
         .cloned()
         .ok_or_else(|| {
             BxError::new(
                 "iblock_not_found",
-                format!("Iblock with API_CODE=\"{api_code}\" not found"),
+                format!("Collection with API_CODE=\"{api_code}\" not found"),
             )
         })?;
     Ok((snap, schema))
@@ -52,7 +52,7 @@ fn property_type(kind: &str) -> &'static str {
 }
 
 fn iblock_json(snap: &Snapshot, schema: &Schema) -> Value {
-    let mut props: Vec<&crate::iblock::Property> = schema.props.iter().collect();
+    let mut props: Vec<&crate::collection::Field> = schema.props.iter().collect();
     props.sort_by(|a, b| {
         a.sort
             .cmp(&b.sort)
@@ -89,9 +89,9 @@ fn iblock_json(snap: &Snapshot, schema: &Schema) -> Value {
         })
         .collect();
     json!({
-        "id": schema.iblock.id,
-        "apiCode": to_camel(&schema.iblock.code),
-        "name": schema.iblock.name,
+        "id": schema.collection.id,
+        "apiCode": to_camel(&schema.collection.code),
+        "name": schema.collection.name,
         "properties": properties,
     })
 }
@@ -101,9 +101,9 @@ pub async fn iblock_list(axum::extract::State(state): axum::extract::State<AppSt
     let mut schemas: Vec<&Arc<Schema>> = snap
         .by_id
         .values()
-        .filter(|s| s.iblock.api_enabled)
+        .filter(|s| s.collection.api_enabled)
         .collect();
-    schemas.sort_by_key(|s| collate_key(&s.iblock.name));
+    schemas.sort_by_key(|s| collate_key(&s.collection.name));
     let items: Vec<Value> = schemas.into_iter().map(|s| iblock_json(&snap, s)).collect();
     Ok(success(json!({ "items": items })))
 }
@@ -126,7 +126,7 @@ pub fn build_list_query(
     let mut qb = QueryBuilder::new(format!(
         "SELECT {ROW_COLS} FROM collection_items e WHERE e.collection_id = "
     ));
-    qb.push_bind(schema.iblock.id).push(" AND ");
+    qb.push_bind(schema.collection.id).push(" AND ");
     push_filter(&mut qb, &ctx, &req.filter)?;
     push_order(&mut qb, &ctx, &req.order)?;
     if let Some(limit) = req.limit {
@@ -138,7 +138,7 @@ pub fn build_list_query(
 
 pub async fn list(state: &AppState, api_code: &str, body: Map<String, Value>) -> BxResult {
     let (snap, schema) = schema_for(state, api_code).await?;
-    let req = ListRequest::parse(&body, &state.project, &schema.iblock.code)?;
+    let req = ListRequest::parse(&body, &state.project, &schema.collection.code)?;
     let mut qb = build_list_query(&snap, &schema, state, &req)?;
     let rows: Vec<Row> = qb.build_query_as().fetch_all(&state.db).await?;
     let env = Env {
@@ -159,13 +159,13 @@ pub async fn detail(
     body: Map<String, Value>,
 ) -> BxResult {
     let (snap, schema) = schema_for(state, api_code).await?;
-    let select = Select::parse(body.get("select"), &state.project, &schema.iblock.code);
+    let select = Select::parse(body.get("select"), &state.project, &schema.collection.code);
     let resize = image_resize(body.get("imageResize"));
     let sql = format!("SELECT {ROW_COLS} FROM collection_items e WHERE e.collection_id = $1 AND ");
     let row: Option<Row> = match key {
         Key::Id(id) => {
             sqlx::query_as(sqlx::AssertSqlSafe(format!("{sql} e.id = $2")))
-                .bind(schema.iblock.id)
+                .bind(schema.collection.id)
                 .bind(id)
                 .fetch_optional(&state.db)
                 .await?
@@ -175,7 +175,7 @@ pub async fn detail(
             sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "{sql} e.code = $2 AND e.code <> ''"
             )))
-            .bind(schema.iblock.id)
+            .bind(schema.collection.id)
             .bind(slug)
             .fetch_optional(&state.db)
             .await?

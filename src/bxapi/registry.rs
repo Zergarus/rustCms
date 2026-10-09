@@ -12,20 +12,20 @@ use std::{
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 
-use crate::iblock::{Iblock, Property, PropertyEnum, Section, repo};
+use crate::collection::{Collection, Field, FieldOption, Section, repo};
 
 const TTL: Duration = Duration::from_secs(5);
 
 pub struct Schema {
-    pub iblock: Iblock,
-    pub props: Vec<Property>,
+    pub collection: Collection,
+    pub props: Vec<Field>,
     pub sections: HashMap<i64, Section>,
     /// Разделы, активные вместе со всеми предками (GLOBAL_ACTIVE в Битриксе).
     pub globally_active: HashSet<i64>,
 }
 
 impl Schema {
-    pub fn prop(&self, snake_code: &str) -> Option<&Property> {
+    pub fn prop(&self, snake_code: &str) -> Option<&Field> {
         self.props.iter().find(|p| p.code == snake_code)
     }
 
@@ -86,7 +86,7 @@ pub struct Store {
 pub struct Snapshot {
     pub by_id: HashMap<i64, Arc<Schema>>,
     by_code: HashMap<String, i64>,
-    pub enums: HashMap<i64, PropertyEnum>,
+    pub enums: HashMap<i64, FieldOption>,
     pub currencies: HashMap<String, Currency>,
     /// Склады в порядке сортировки.
     pub stores: Vec<Store>,
@@ -104,13 +104,13 @@ impl Snapshot {
         self.by_id.get(&collection_id)
     }
 
-    pub fn enum_value(&self, id: i64) -> Option<&PropertyEnum> {
+    pub fn enum_value(&self, id: i64) -> Option<&FieldOption> {
         self.enums.get(&id)
     }
 
     /// Варианты свойства-списка в порядке сортировки.
-    pub fn property_enums(&self, property_id: i64) -> Vec<&PropertyEnum> {
-        let mut items: Vec<&PropertyEnum> = self
+    pub fn property_enums(&self, property_id: i64) -> Vec<&FieldOption> {
+        let mut items: Vec<&FieldOption> = self
             .enums
             .values()
             .filter(|e| e.field_id == property_id)
@@ -146,9 +146,9 @@ impl Registry {
 }
 
 async fn load(db: &PgPool) -> sqlx::Result<Snapshot> {
-    let iblocks = repo::list_iblocks(db).await?;
-    let mut props: HashMap<i64, Vec<Property>> = HashMap::new();
-    for p in sqlx::query_as::<_, Property>(
+    let iblocks = repo::list_collections(db).await?;
+    let mut props: HashMap<i64, Vec<Field>> = HashMap::new();
+    for p in sqlx::query_as::<_, Field>(
         "SELECT id, collection_id, code, name, kind, is_required, sort, multiple, link_collection_id,
                 user_type
          FROM collection_fields ORDER BY sort, id",
@@ -169,7 +169,7 @@ async fn load(db: &PgPool) -> sqlx::Result<Snapshot> {
     {
         sections.entry(s.collection_id).or_default().insert(s.id, s);
     }
-    let enums: HashMap<i64, PropertyEnum> = sqlx::query_as::<_, PropertyEnum>(
+    let enums: HashMap<i64, FieldOption> = sqlx::query_as::<_, FieldOption>(
         "SELECT id, field_id, value, xml_id, sort, is_default FROM collection_field_options",
     )
     .fetch_all(db)
@@ -181,7 +181,7 @@ async fn load(db: &PgPool) -> sqlx::Result<Snapshot> {
     let mut by_id = HashMap::new();
     let mut by_code = HashMap::new();
     for summary in iblocks {
-        let iblock = summary.iblock;
+        let iblock = summary.collection;
         let sections = sections.remove(&iblock.id).unwrap_or_default();
         let globally_active = globally_active(&sections);
         by_code.insert(iblock.code.clone(), iblock.id);
@@ -191,7 +191,7 @@ async fn load(db: &PgPool) -> sqlx::Result<Snapshot> {
                 props: props.remove(&iblock.id).unwrap_or_default(),
                 sections,
                 globally_active,
-                iblock,
+                collection: iblock,
             }),
         );
     }

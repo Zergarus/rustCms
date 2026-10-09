@@ -13,12 +13,12 @@ use serde::Deserialize;
 use super::{parse_sort, read_upload_form, render};
 use crate::{
     access::{Access, Level},
-    error::{AppError, AppResult},
-    files,
-    iblock::{
-        Iblock, Section, SectionInput, is_valid_slug, repo, section_subtree_ids, section_tree,
+    collection::{
+        Collection, Section, SectionInput, is_valid_slug, repo, section_subtree_ids, section_tree,
         slugify,
     },
+    error::{AppError, AppResult},
+    files,
     state::AppState,
 };
 
@@ -110,8 +110,8 @@ fn section_to_form(section: &Section) -> FormValues {
     form
 }
 
-async fn load(state: &AppState, collection_id: i64) -> AppResult<(Iblock, Vec<Section>)> {
-    let iblock = repo::get_iblock(&state.db, collection_id)
+async fn load(state: &AppState, collection_id: i64) -> AppResult<(Collection, Vec<Section>)> {
+    let iblock = repo::get_collection(&state.db, collection_id)
         .await?
         .ok_or(AppError::NotFound)?;
     let sections = section_tree(repo::list_sections(&state.db, collection_id).await?);
@@ -121,7 +121,7 @@ async fn load(state: &AppState, collection_id: i64) -> AppResult<(Iblock, Vec<Se
 async fn render_form(
     state: &AppState,
     user: Access,
-    iblock: Iblock,
+    iblock: Collection,
     sections: Vec<Section>,
     section_id: Option<i64>,
     form: FormValues,
@@ -156,7 +156,7 @@ pub async fn new_form(
     Path(id): Path<i64>,
     Query(q): Query<NewQuery>,
 ) -> AppResult<Html<String>> {
-    user.require_iblock(id, Level::Write)?;
+    user.require_collection(id, Level::Write)?;
     let (iblock, sections) = load(&state, id).await?;
     let mut form = FormValues::from([
         ("active".into(), "on".into()),
@@ -171,7 +171,7 @@ pub async fn new_form(
 async fn save(
     state: &AppState,
     user: Access,
-    iblock: Iblock,
+    iblock: Collection,
     sections: Vec<Section>,
     section_id: Option<i64>,
     multipart: Multipart,
@@ -218,7 +218,7 @@ pub async fn create(
     Path(id): Path<i64>,
     multipart: Multipart,
 ) -> AppResult<Response> {
-    user.require_iblock(id, Level::Write)?;
+    user.require_collection(id, Level::Write)?;
     let (iblock, sections) = load(&state, id).await?;
     save(&state, user, iblock, sections, None, multipart).await
 }
@@ -231,7 +231,7 @@ pub async fn edit_form(
     let section = repo::get_section(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    user.require_iblock(section.collection_id, Level::Write)?;
+    user.require_collection(section.collection_id, Level::Write)?;
     let (iblock, sections) = load(&state, section.collection_id).await?;
     let form = section_to_form(&section);
     render_form(&state, user, iblock, sections, Some(id), form, None).await
@@ -246,7 +246,7 @@ pub async fn update(
     let section = repo::get_section(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    user.require_iblock(section.collection_id, Level::Write)?;
+    user.require_collection(section.collection_id, Level::Write)?;
     let (iblock, sections) = load(&state, section.collection_id).await?;
     save(&state, user, iblock, sections, Some(id), multipart).await
 }
@@ -259,7 +259,7 @@ pub async fn delete(
     let section = repo::get_section(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    user.require_iblock(section.collection_id, Level::Write)?;
+    user.require_collection(section.collection_id, Level::Write)?;
     repo::delete_section(&state.db, id).await?;
     let mut url = format!("/admin/iblocks/{}/elements", section.collection_id);
     if let Some(parent) = section.parent_id {

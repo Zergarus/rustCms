@@ -65,7 +65,7 @@ pub fn build_snapshot(
     let mut currency: Option<String> = None;
 
     for item in sorted {
-        let product = info.get(&item.element_id);
+        let product = info.get(&item.product_id);
         let price = product.and_then(|p| main_price(&p.prices));
         let available =
             product.is_some_and(|p| p.active && p.is_catalog && p.available) && price.is_some();
@@ -92,8 +92,8 @@ pub fn build_snapshot(
             store_list.push(Value::Object(obj));
         }
 
-        let view = views.get(&item.element_id).cloned().unwrap_or_default();
-        let hash = item_hash(item.id, item.element_id, item.quantity, unit, item.store_id);
+        let view = views.get(&item.product_id).cloned().unwrap_or_default();
+        let hash = item_hash(item.id, item.product_id, item.quantity, unit, item.store_id);
         hashes.push_str(&hash);
         let sum = unit * item.quantity;
         total += sum;
@@ -103,7 +103,7 @@ pub fn build_snapshot(
         }
         out_items.push(json!({
             "id": item.id,
-            "productId": item.element_id,
+            "productId": item.product_id,
             "name": if view.name.is_empty() { item.name.clone() } else { view.name },
             "slug": view.slug,
             "article": view.article,
@@ -186,7 +186,7 @@ mod tests {
     fn item(id: i64, element: i64, store: Option<i64>, qty: f64) -> CartItem {
         CartItem {
             id,
-            element_id: element,
+            product_id: element,
             store_id: store,
             quantity: qty,
             name: format!("Товар {element}"),

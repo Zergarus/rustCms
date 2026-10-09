@@ -1,9 +1,9 @@
 //! Админ-панель: серверный рендер (MiniJinja) + HTMX.
 
 mod auth_pages;
-mod elements;
+mod collections;
 mod groups;
-mod iblocks;
+mod items;
 mod sections;
 mod shop;
 mod users;
@@ -35,20 +35,20 @@ pub fn router(state: AppState) -> Router<AppState> {
     let protected = Router::new()
         .route("/", get(dashboard))
         .route("/logout", post(auth_pages::logout))
-        .route("/iblocks", get(iblocks::list).post(iblocks::create))
-        .route("/iblocks/new", get(iblocks::new_form))
+        .route("/iblocks", get(collections::list).post(collections::create))
+        .route("/iblocks/new", get(collections::new_form))
         .route(
             "/iblocks/{id}",
-            get(iblocks::edit_form).post(iblocks::update),
+            get(collections::edit_form).post(collections::update),
         )
-        .route("/iblocks/{id}/delete", post(iblocks::delete))
-        .route("/iblocks/{id}/properties", post(iblocks::add_property))
+        .route("/iblocks/{id}/delete", post(collections::delete))
+        .route("/iblocks/{id}/properties", post(collections::add_property))
         .route(
             "/properties/{id}",
-            get(iblocks::property_form).post(iblocks::update_property),
+            get(collections::property_form).post(collections::update_field),
         )
-        .route("/properties/{id}/enums", post(iblocks::save_enums))
-        .route("/properties/{id}/delete", post(iblocks::delete_property))
+        .route("/properties/{id}/enums", post(collections::save_options))
+        .route("/properties/{id}/delete", post(collections::delete_field))
         .route("/iblocks/{id}/sections", post(sections::create))
         .route("/iblocks/{id}/sections/new", get(sections::new_form))
         .route(
@@ -58,14 +58,11 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/sections/{id}/delete", post(sections::delete))
         .route(
             "/iblocks/{id}/elements",
-            get(elements::list).post(elements::create),
+            get(items::list).post(items::create),
         )
-        .route("/iblocks/{id}/elements/new", get(elements::new_form))
-        .route(
-            "/elements/{id}",
-            get(elements::edit_form).post(elements::update),
-        )
-        .route("/elements/{id}/delete", post(elements::delete))
+        .route("/iblocks/{id}/elements/new", get(items::new_form))
+        .route("/elements/{id}", get(items::edit_form).post(items::update))
+        .route("/elements/{id}/delete", post(items::delete))
         .route(
             "/shop/stores",
             get(shop::stores::list).post(shop::stores::create),

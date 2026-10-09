@@ -77,17 +77,14 @@ struct PriceRow {
 }
 
 /// Цены товаров: элемент → цены в порядке сортировки типа.
-pub async fn load_prices(
-    db: &PgPool,
-    element_ids: &[i64],
-) -> sqlx::Result<HashMap<i64, Vec<Price>>> {
+pub async fn load_prices(db: &PgPool, item_ids: &[i64]) -> sqlx::Result<HashMap<i64, Vec<Price>>> {
     let mut conn = db.acquire().await?;
-    load_prices_on(&mut conn, element_ids).await
+    load_prices_on(&mut conn, item_ids).await
 }
 
 async fn load_prices_on(
     db: &mut PgConnection,
-    element_ids: &[i64],
+    item_ids: &[i64],
 ) -> sqlx::Result<HashMap<i64, Vec<Price>>> {
     let rows: Vec<PriceRow> = sqlx::query_as(
         "SELECT p.item_id, p.price_type_id AS type_id, t.name AS type_name, t.is_base,
@@ -96,7 +93,7 @@ async fn load_prices_on(
          WHERE p.item_id = ANY($1)
          ORDER BY p.item_id, t.sort, p.price_type_id, p.quantity_from NULLS FIRST",
     )
-    .bind(element_ids)
+    .bind(item_ids)
     .fetch_all(db)
     .await?;
     let mut out: HashMap<i64, Vec<Price>> = HashMap::new();
@@ -137,9 +134,9 @@ async fn default_flag(db: &mut PgConnection, name: &str, fallback: bool) -> sqlx
 
 /// Данные покупки для товаров пачкой. Товара без строки в `catalog_products` —
 /// флаги по умолчанию и общий остаток 0.
-pub async fn load(db: &PgPool, element_ids: &[i64]) -> sqlx::Result<HashMap<i64, PurchaseInfo>> {
+pub async fn load(db: &PgPool, item_ids: &[i64]) -> sqlx::Result<HashMap<i64, PurchaseInfo>> {
     let mut conn = db.acquire().await?;
-    load_on(&mut conn, element_ids).await
+    load_on(&mut conn, item_ids).await
 }
 
 /// То же, что [`load`], но в транзакции и с блокировкой строк товаров и остатков
@@ -147,37 +144,37 @@ pub async fn load(db: &PgPool, element_ids: &[i64]) -> sqlx::Result<HashMap<i64,
 /// `catalog_products` она создаётся, чтобы было что блокировать.
 pub async fn load_locked(
     tx: &mut PgConnection,
-    element_ids: &[i64],
+    item_ids: &[i64],
 ) -> sqlx::Result<HashMap<i64, PurchaseInfo>> {
     sqlx::query(
         "INSERT INTO catalog_products (item_id)
          SELECT id FROM collection_items WHERE id = ANY($1) ON CONFLICT DO NOTHING",
     )
-    .bind(element_ids)
+    .bind(item_ids)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
         "SELECT item_id FROM catalog_products WHERE item_id = ANY($1)
          ORDER BY item_id FOR UPDATE",
     )
-    .bind(element_ids)
+    .bind(item_ids)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
         "SELECT item_id FROM catalog_store_amounts WHERE item_id = ANY($1)
          ORDER BY item_id, store_id FOR UPDATE",
     )
-    .bind(element_ids)
+    .bind(item_ids)
     .execute(&mut *tx)
     .await?;
-    load_on(tx, element_ids).await
+    load_on(tx, item_ids).await
 }
 
 async fn load_on(
     db: &mut PgConnection,
-    element_ids: &[i64],
+    item_ids: &[i64],
 ) -> sqlx::Result<HashMap<i64, PurchaseInfo>> {
-    if element_ids.is_empty() {
+    if item_ids.is_empty() {
         return Ok(HashMap::new());
     }
     let default_trace = default_flag(db, "default_quantity_trace", true).await?;
@@ -190,15 +187,15 @@ async fn load_on(
          LEFT JOIN catalog_products p ON p.item_id = e.id
          WHERE e.id = ANY($1)",
     )
-    .bind(element_ids)
+    .bind(item_ids)
     .fetch_all(&mut *db)
     .await?;
-    let mut prices = load_prices_on(&mut *db, element_ids).await?;
+    let mut prices = load_prices_on(&mut *db, item_ids).await?;
     let mut amounts: HashMap<i64, HashMap<i64, f64>> = HashMap::new();
     for (element, store, amount) in sqlx::query_as::<_, (i64, i64, f64)>(
         "SELECT item_id, store_id, amount::float8 FROM catalog_store_amounts WHERE item_id = ANY($1)",
     )
-    .bind(element_ids)
+    .bind(item_ids)
     .fetch_all(db)
     .await?
     {
@@ -253,22 +250,18 @@ pub struct PurchaseInput {
 /// Флаги товара как сохранены: (доступен, учёт количества, покупка при нуле); `None` — нет записи.
 pub async fn raw_flags(
     db: &PgPool,
-    element_id: i64,
+    item_id: i64,
 ) -> sqlx::Result<Option<(bool, Option<bool>, Option<bool>)>> {
     sqlx::query_as(
         "SELECT available, quantity_trace, can_buy_zero FROM catalog_products WHERE item_id = $1",
     )
-    .bind(element_id)
+    .bind(item_id)
     .fetch_optional(db)
     .await
 }
 
 /// Сохраняет цены, остатки и флаги товара; общий остаток не задан — сумма по складам.
-pub async fn save_purchase(
-    db: &PgPool,
-    element_id: i64,
-    input: &PurchaseInput,
-) -> sqlx::Result<()> {
+pub async fn save_purchase(db: &PgPool, item_id: i64, input: &PurchaseInput) -> sqlx::Result<()> {
     let mut tx = db.begin().await?;
     let default_currency: String = sqlx::query_scalar(
         "SELECT COALESCE((SELECT code FROM currencies ORDER BY code = 'RUB' DESC, code LIMIT 1), 'RUB')",
@@ -280,7 +273,7 @@ pub async fn save_purchase(
         let old: Option<String> = sqlx::query_scalar(
             "DELETE FROM catalog_prices WHERE item_id = $1 AND price_type_id = $2 RETURNING currency",
         )
-        .bind(element_id)
+        .bind(item_id)
         .bind(type_id)
         .fetch_all(&mut *tx)
         .await?
@@ -290,7 +283,7 @@ pub async fn save_purchase(
             sqlx::query(
                 "INSERT INTO catalog_prices (item_id, price_type_id, price, currency) VALUES ($1, $2, $3, $4)",
             )
-            .bind(element_id)
+            .bind(item_id)
             .bind(type_id)
             .bind(price)
             .bind(old.unwrap_or_else(|| default_currency.clone()))
@@ -303,7 +296,7 @@ pub async fn save_purchase(
             "INSERT INTO catalog_store_amounts (item_id, store_id, amount) VALUES ($1, $2, $3)
              ON CONFLICT (item_id, store_id) DO UPDATE SET amount = EXCLUDED.amount",
         )
-        .bind(element_id)
+        .bind(item_id)
         .bind(store_id)
         .bind(amount)
         .execute(&mut *tx)
@@ -315,7 +308,7 @@ pub async fn save_purchase(
          ON CONFLICT (item_id) DO UPDATE SET quantity = EXCLUDED.quantity, available = EXCLUDED.available,
              quantity_trace = EXCLUDED.quantity_trace, can_buy_zero = EXCLUDED.can_buy_zero",
     )
-    .bind(element_id)
+    .bind(item_id)
     .bind(input.available)
     .bind(input.quantity_trace)
     .bind(input.can_buy_zero)

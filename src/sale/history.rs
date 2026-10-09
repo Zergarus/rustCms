@@ -118,7 +118,7 @@ async fn fill(db: &PgPool, mut orders: Vec<UserOrder>) -> sqlx::Result<Vec<UserO
     let index: HashMap<i64, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
 
     let items: Vec<ItemRow> = sqlx::query_as(
-        "SELECT order_id, id, item_id AS element_id, store_id, quantity::float8 AS quantity,
+        "SELECT order_id, id, item_id AS product_id, store_id, quantity::float8 AS quantity,
                 COALESCE(price, 0)::float8 AS price, name, custom_price
          FROM cart_items WHERE order_id = ANY($1) ORDER BY id",
     )

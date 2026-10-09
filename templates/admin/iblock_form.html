@@ -56,7 +56,7 @@
           <td><code>{{ p.code }}</code></td>
           <td>
             {% for k in kinds %}{% if k.code == p.kind %}{{ k.name }}{% endif %}{% endfor %}
-            {% if p.link_iblock_id %}{% for i in iblocks %}{% if i.id == p.link_iblock_id %}<span class="muted">→ {{ i.name }}</span>{% endif %}{% endfor %}{% endif %}
+            {% if p.link_collection_id %}{% for i in iblocks %}{% if i.id == p.link_collection_id %}<span class="muted">→ {{ i.name }}</span>{% endif %}{% endfor %}{% endif %}
           </td>
           <td>{% if p.multiple %}да{% endif %}</td>
           <td>{% if p.is_required %}да{% endif %}</td>
@@ -89,10 +89,10 @@
       </label>
       <label>Сорт.<input name="sort" type="number" value="{{ prop_form.sort }}"></label>
       <label>Привязка к инфоблоку
-        <select name="link_iblock_id">
+        <select name="link_collection_id">
           <option value="">— любой —</option>
           {% for i in iblocks %}
-          <option value="{{ i.id }}" {% if prop_form.link_iblock_id == i.id|string %}selected{% endif %}>{{ i.name }}</option>
+          <option value="{{ i.id }}" {% if prop_form.link_collection_id == i.id|string %}selected{% endif %}>{{ i.name }}</option>
           {% endfor %}
         </select>
         <small>Только для типа «Привязка к элементу»</small>

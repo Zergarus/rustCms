@@ -28,7 +28,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditLine {
     pub item_id: Option<i64>,
-    pub element_id: i64,
+    pub product_id: i64,
     pub store_id: Option<i64>,
     pub quantity: f64,
     pub price: f64,
@@ -79,7 +79,7 @@ pub fn parse_composition(
         };
         lines.push(EditLine {
             item_id: Some(item),
-            element_id: cur.element_id,
+            product_id: cur.product_id,
             store_id: id(get(format!("item_{item}_store"))),
             quantity,
             custom_price: cur.custom_price || (price - cur.price).abs() > 0.005,
@@ -96,7 +96,7 @@ pub fn parse_composition(
         };
         lines.push(EditLine {
             item_id: None,
-            element_id: element,
+            product_id: element,
             store_id: id(form.get("add_store")),
             quantity,
             price: 0.0,
@@ -148,7 +148,7 @@ pub fn lines_to_check(before: &[StockLine], after: &[StockLine]) -> Vec<StockLin
     let sum = |lines: &[StockLine]| {
         let mut out: std::collections::BTreeMap<(i64, Option<i64>), f64> = Default::default();
         for l in lines {
-            *out.entry((l.element_id, l.store_id)).or_insert(0.0) += l.quantity;
+            *out.entry((l.product_id, l.store_id)).or_insert(0.0) += l.quantity;
         }
         out
     };
@@ -156,8 +156,8 @@ pub fn lines_to_check(before: &[StockLine], after: &[StockLine]) -> Vec<StockLin
     let mut out: Vec<StockLine> = sum(after)
         .into_iter()
         .filter(|(key, q)| *q > was.get(key).copied().unwrap_or(0.0) + 1e-9)
-        .map(|((element_id, store_id), quantity)| StockLine {
-            element_id,
+        .map(|((product_id, store_id), quantity)| StockLine {
+            product_id,
             store_id,
             quantity,
         })
@@ -166,7 +166,7 @@ pub fn lines_to_check(before: &[StockLine], after: &[StockLine]) -> Vec<StockLin
     out.sort_by_key(|l| {
         after
             .iter()
-            .position(|a| a.element_id == l.element_id && a.store_id == l.store_id)
+            .position(|a| a.product_id == l.product_id && a.store_id == l.store_id)
     });
     out
 }
@@ -225,8 +225,8 @@ pub async fn save_composition(
     let mut lines = c.lines.clone();
     let all: Vec<i64> = before
         .iter()
-        .map(|l| l.element_id)
-        .chain(lines.iter().map(|l| l.element_id))
+        .map(|l| l.product_id)
+        .chain(lines.iter().map(|l| l.product_id))
         .collect();
     let mut info = catalog::load_locked(&mut tx, &all).await?;
     let traced: HashSet<i64> = info
@@ -236,19 +236,19 @@ pub async fn save_composition(
         .collect();
     // Новые позиции: название и текущая основная цена
     for line in lines.iter_mut().filter(|l| l.item_id.is_none()) {
-        let Some(product) = info.get(&line.element_id) else {
-            return Ok(Err(format!("Товар {} не найден", line.element_id)));
+        let Some(product) = info.get(&line.product_id) else {
+            return Ok(Err(format!("Товар {} не найден", line.product_id)));
         };
         line.price = main_price(&product.prices).map_or(0.0, |p| p.price);
         line.name = sqlx::query_scalar("SELECT name FROM collection_items WHERE id = $1")
-            .bind(line.element_id)
+            .bind(line.product_id)
             .fetch_one(&mut *tx)
             .await?;
     }
     let after: Vec<StockLine> = lines
         .iter()
         .map(|l| StockLine {
-            element_id: l.element_id,
+            product_id: l.product_id,
             store_id: l.store_id,
             quantity: l.quantity,
         })
@@ -257,7 +257,7 @@ pub async fn save_composition(
     if !keeps_stock {
         // Проверка против остатка с учётом того, что уже списано по заказу
         for l in &before {
-            if let Some(p) = info.get_mut(&l.element_id) {
+            if let Some(p) = info.get_mut(&l.product_id) {
                 p.total += l.quantity;
                 if let Some(store) = l.store_id {
                     *p.amounts.entry(store).or_insert(0.0) += l.quantity;
@@ -299,7 +299,7 @@ pub async fn save_composition(
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)",
                 )
                 .bind(buyer)
-                .bind(l.element_id)
+                .bind(l.product_id)
                 .bind(l.store_id)
                 .bind(l.quantity)
                 .bind(&l.name)
@@ -353,7 +353,7 @@ pub fn current_lines(items: &[crate::sale::repo::OrderItem]) -> Vec<EditLine> {
         .iter()
         .map(|i| EditLine {
             item_id: Some(i.id),
-            element_id: i.element_id,
+            product_id: i.product_id,
             store_id: i.store_id,
             quantity: i.quantity,
             price: i.price,
@@ -394,7 +394,7 @@ mod tests {
     fn edit(id: i64, quantity: f64, price: f64) -> EditLine {
         EditLine {
             item_id: Some(id),
-            element_id: id,
+            product_id: id,
             store_id: None,
             quantity,
             price,
@@ -413,11 +413,11 @@ mod tests {
     fn current() -> Vec<EditLine> {
         vec![
             EditLine {
-                element_id: 1,
+                product_id: 1,
                 ..edit(7, 1.0, 100.0)
             },
             EditLine {
-                element_id: 2,
+                product_id: 2,
                 ..edit(8, 1.0, 50.0)
             },
         ]
@@ -469,7 +469,7 @@ mod tests {
         assert_eq!(
             (
                 c.lines[1].item_id,
-                c.lines[1].element_id,
+                c.lines[1].product_id,
                 c.lines[1].quantity
             ),
             (None, 59958, 2.0)
@@ -499,7 +499,7 @@ mod tests {
     #[test]
     fn only_increases_are_checked() {
         let l = |e: i64, s: Option<i64>, q: f64| StockLine {
-            element_id: e,
+            product_id: e,
             store_id: s,
             quantity: q,
         };
@@ -517,12 +517,12 @@ mod tests {
     fn edit_canceled_keeps_stock() {
         let traced = HashSet::from([1]);
         let before = [StockLine {
-            element_id: 1,
+            product_id: 1,
             store_id: Some(5),
             quantity: 2.0,
         }];
         let after = [StockLine {
-            element_id: 1,
+            product_id: 1,
             store_id: Some(5),
             quantity: 3.0,
         }];

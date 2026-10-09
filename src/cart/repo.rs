@@ -30,7 +30,7 @@ pub fn token_hash(token: &str) -> String {
 #[derive(FromRow)]
 struct ItemRow {
     id: i64,
-    element_id: i64,
+    product_id: i64,
     store_id: Option<i64>,
     quantity: f64,
     name: String,
@@ -40,7 +40,7 @@ impl From<ItemRow> for CartItem {
     fn from(r: ItemRow) -> Self {
         CartItem {
             id: r.id,
-            element_id: r.element_id,
+            product_id: r.product_id,
             store_id: r.store_id,
             quantity: r.quantity,
             name: r.name,
@@ -48,7 +48,7 @@ impl From<ItemRow> for CartItem {
     }
 }
 
-const ITEM_COLS: &str = "id, item_id AS element_id, store_id, quantity::float8 AS quantity, name";
+const ITEM_COLS: &str = "id, item_id AS product_id, store_id, quantity::float8 AS quantity, name";
 
 pub async fn find_buyer(db: &PgPool, owner: &Owner) -> sqlx::Result<Option<i64>> {
     match owner {
@@ -124,7 +124,7 @@ pub async fn item(db: &PgPool, buyer_id: i64, item_id: i64) -> sqlx::Result<Opti
 pub async fn add(
     db: &PgPool,
     buyer_id: i64,
-    element_id: i64,
+    product_id: i64,
     store_id: Option<i64>,
     quantity: f64,
     name: &str,
@@ -137,7 +137,7 @@ pub async fn add(
          RETURNING id",
     )
     .bind(buyer_id)
-    .bind(element_id)
+    .bind(product_id)
     .bind(store_id)
     .bind(quantity)
     .bind(name)
@@ -248,11 +248,11 @@ pub enum AddTarget {
 /// складом, иначе к позиции без склада (склад деактивирован — тоже «без склада»).
 pub fn add_target(
     items: &[CartItem],
-    element_id: i64,
+    product_id: i64,
     store_id: Option<i64>,
     active_stores: &HashSet<i64>,
 ) -> AddTarget {
-    let mut rows = items.iter().filter(|i| i.element_id == element_id);
+    let mut rows = items.iter().filter(|i| i.product_id == product_id);
     let found = match store_id {
         None => rows.next().map(|i| (i.id, None)),
         Some(store) => {
@@ -302,7 +302,7 @@ pub fn merge_plan(guest: &[CartItem], user: &[CartItem]) -> Vec<MergeOp> {
         .map(|g| {
             match user
                 .iter()
-                .find(|u| u.element_id == g.element_id && u.store_id == g.store_id)
+                .find(|u| u.product_id == g.product_id && u.store_id == g.store_id)
             {
                 Some(u) => MergeOp::AddTo {
                     user_item: u.id,
@@ -378,7 +378,7 @@ mod tests {
     fn item(id: i64, element: i64, store: Option<i64>, qty: f64) -> CartItem {
         CartItem {
             id,
-            element_id: element,
+            product_id: element,
             store_id: store,
             quantity: qty,
             name: String::new(),
@@ -495,7 +495,7 @@ mod tests {
         // открытая позиция корзины того же покупателя — должна удалиться
         sqlx::query("INSERT INTO cart_items (buyer_id, item_id, quantity) VALUES ($1, $2, 1)")
             .bind(f.buyer_id)
-            .bind(f.element_id)
+            .bind(f.product_id)
             .execute(&db)
             .await
             .unwrap();

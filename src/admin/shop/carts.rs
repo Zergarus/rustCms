@@ -104,13 +104,13 @@ pub async fn list(
     .fetch_all(&state.db)
     .await?;
     let mut items_by_buyer = HashMap::new();
-    let mut element_ids = Vec::new();
+    let mut product_ids = Vec::new();
     for b in &buyers {
         let items = repo::items(&state.db, b.id).await?;
-        element_ids.extend(items.iter().map(|i| i.element_id));
+        product_ids.extend(items.iter().map(|i| i.product_id));
         items_by_buyer.insert(b.id, items);
     }
-    let info = catalog::load(&state.db, &element_ids).await?;
+    let info = catalog::load(&state.db, &product_ids).await?;
     let stores = stores(&state).await?;
     let config = snapshot_config();
     let rows: Vec<CartRow> = buyers
@@ -151,8 +151,8 @@ pub async fn view(
     .await?
     .ok_or(AppError::NotFound)?;
     let items = repo::items(&state.db, id).await?;
-    let element_ids: Vec<i64> = items.iter().map(|i| i.element_id).collect();
-    let info = catalog::load(&state.db, &element_ids).await?;
+    let product_ids: Vec<i64> = items.iter().map(|i| i.product_id).collect();
+    let info = catalog::load(&state.db, &product_ids).await?;
     let stores = stores(&state).await?;
     let snap = build_snapshot(&items, &info, &HashMap::new(), &stores, &snapshot_config());
     let label = buyer_label(buyer.login.as_deref(), buyer.name.as_deref());

@@ -10,7 +10,7 @@ use crate::catalog::{PurchaseInfo, check_quantity};
 /// Количество товара в позиции заказа (склад — если выбран).
 #[derive(Debug, Clone, PartialEq)]
 pub struct StockLine {
-    pub element_id: i64,
+    pub product_id: i64,
     pub store_id: Option<i64>,
     pub quantity: f64,
 }
@@ -18,15 +18,15 @@ pub struct StockLine {
 /// Изменение остатка: отрицательное — списание, положительное — возврат.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StockChange {
-    pub element_id: i64,
+    pub product_id: i64,
     pub store_id: Option<i64>,
     pub delta: f64,
 }
 
 fn totals(lines: &[StockLine], traced: &HashSet<i64>) -> BTreeMap<(i64, Option<i64>), f64> {
     let mut out = BTreeMap::new();
-    for l in lines.iter().filter(|l| traced.contains(&l.element_id)) {
-        *out.entry((l.element_id, l.store_id)).or_insert(0.0) += l.quantity;
+    for l in lines.iter().filter(|l| traced.contains(&l.product_id)) {
+        *out.entry((l.product_id, l.store_id)).or_insert(0.0) += l.quantity;
     }
     out
 }
@@ -42,7 +42,7 @@ pub fn plan(before: &[StockLine], after: &[StockLine], traced: &HashSet<i64>) ->
             let delta =
                 was.get(&key).copied().unwrap_or(0.0) - now.get(&key).copied().unwrap_or(0.0);
             (delta.abs() > 1e-9).then_some(StockChange {
-                element_id: key.0,
+                product_id: key.0,
                 store_id: key.1,
                 delta,
             })
@@ -52,7 +52,7 @@ pub fn plan(before: &[StockLine], after: &[StockLine], traced: &HashSet<i64>) ->
 
 /// Хватает ли остатков на позиции (одинаковый товар на одном складе суммируется).
 pub fn check(lines: &[StockLine], info: &HashMap<i64, PurchaseInfo>) -> Result<(), String> {
-    let all: HashSet<i64> = lines.iter().map(|l| l.element_id).collect();
+    let all: HashSet<i64> = lines.iter().map(|l| l.product_id).collect();
     for ((element, store), quantity) in totals(lines, &all) {
         let product = info
             .get(&element)
@@ -66,13 +66,13 @@ pub fn check(lines: &[StockLine], info: &HashMap<i64, PurchaseInfo>) -> Result<(
 pub async fn apply(tx: &mut PgConnection, changes: &[StockChange]) -> sqlx::Result<()> {
     let mut per_product: BTreeMap<i64, f64> = BTreeMap::new();
     for c in changes {
-        *per_product.entry(c.element_id).or_insert(0.0) += c.delta;
+        *per_product.entry(c.product_id).or_insert(0.0) += c.delta;
         if let Some(store) = c.store_id {
             sqlx::query(
                 "UPDATE catalog_store_amounts SET amount = amount + $3
                  WHERE item_id = $1 AND store_id = $2",
             )
-            .bind(c.element_id)
+            .bind(c.product_id)
             .bind(store)
             .bind(c.delta)
             .execute(&mut *tx)
@@ -96,7 +96,7 @@ mod tests {
 
     fn line(e: i64, s: Option<i64>, q: f64) -> StockLine {
         StockLine {
-            element_id: e,
+            product_id: e,
             store_id: s,
             quantity: q,
         }
@@ -130,12 +130,12 @@ mod tests {
             plan(&[], &lines, &traced),
             vec![
                 StockChange {
-                    element_id: 1,
+                    product_id: 1,
                     store_id: Some(5),
                     delta: -3.0
                 },
                 StockChange {
-                    element_id: 2,
+                    product_id: 2,
                     store_id: None,
                     delta: -1.0
                 },
@@ -153,12 +153,12 @@ mod tests {
             changes,
             vec![
                 StockChange {
-                    element_id: 1,
+                    product_id: 1,
                     store_id: Some(5),
                     delta: 2.0
                 },
                 StockChange {
-                    element_id: 1,
+                    product_id: 1,
                     store_id: Some(6),
                     delta: -3.0
                 },

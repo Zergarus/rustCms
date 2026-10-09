@@ -7,60 +7,60 @@ use chrono::NaiveDate;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{Property, PropertyEnum};
+use super::{Field, FieldOption};
 
 #[derive(Debug, Clone, Copy, Serialize)]
-pub struct PropertyKind {
+pub struct FieldKind {
     pub code: &'static str,
     pub name: &'static str,
     /// Можно ли сделать свойство множественным.
     pub multiple: bool,
 }
 
-pub const KINDS: &[PropertyKind] = &[
-    PropertyKind {
+pub const KINDS: &[FieldKind] = &[
+    FieldKind {
         code: "string",
         name: "Строка",
         multiple: true,
     },
-    PropertyKind {
+    FieldKind {
         code: "text",
         name: "Текст",
         multiple: false,
     },
-    PropertyKind {
+    FieldKind {
         code: "number",
         name: "Число",
         multiple: true,
     },
-    PropertyKind {
+    FieldKind {
         code: "boolean",
         name: "Да/Нет",
         multiple: false,
     },
-    PropertyKind {
+    FieldKind {
         code: "date",
         name: "Дата",
         multiple: true,
     },
-    PropertyKind {
+    FieldKind {
         code: "list",
         name: "Список",
         multiple: true,
     },
-    PropertyKind {
+    FieldKind {
         code: "element",
         name: "Привязка к элементу",
         multiple: true,
     },
-    PropertyKind {
+    FieldKind {
         code: "file",
         name: "Файл",
         multiple: true,
     },
 ];
 
-pub fn kind(code: &str) -> Option<&'static PropertyKind> {
+pub fn kind(code: &str) -> Option<&'static FieldKind> {
     KINDS.iter().find(|k| k.code == code)
 }
 
@@ -68,11 +68,7 @@ pub fn kind(code: &str) -> Option<&'static PropertyKind> {
 /// пришедшие под ключом свойства (пусто — поле не пришло, так браузер передаёт
 /// снятый чекбокс). Множественные строки, числа и даты вводятся по одному на строку,
 /// id привязок — через запятую или пробел. `enums` — варианты свойства-списка.
-pub fn parse_value(
-    prop: &Property,
-    raws: &[&str],
-    enums: &[PropertyEnum],
-) -> Result<Value, String> {
+pub fn parse_value(prop: &Field, raws: &[&str], enums: &[FieldOption]) -> Result<Value, String> {
     if prop.kind == "boolean" {
         return Ok(Value::Bool(raws.iter().any(|s| !s.trim().is_empty())));
     }
@@ -113,7 +109,7 @@ pub fn parse_value(
     Ok(value)
 }
 
-fn parse_item(prop: &Property, s: &str, enums: &[PropertyEnum]) -> Result<Value, String> {
+fn parse_item(prop: &Field, s: &str, enums: &[FieldOption]) -> Result<Value, String> {
     Ok(match prop.kind.as_str() {
         "string" | "text" => Value::String(s.to_string()),
         "number" => {
@@ -146,7 +142,7 @@ fn parse_item(prop: &Property, s: &str, enums: &[PropertyEnum]) -> Result<Value,
     })
 }
 
-fn parse_id(prop: &Property, s: &str) -> Result<i64, String> {
+fn parse_id(prop: &Field, s: &str) -> Result<i64, String> {
     s.parse::<i64>()
         .ok()
         .filter(|id| *id > 0)
@@ -171,7 +167,7 @@ pub fn ids(value: &Value) -> Vec<i64> {
 
 /// Значения свойства для подстановки обратно в поля формы: по одному на
 /// каждый выбранный вариант / файл, либо одна строка для текстовых полей.
-pub fn to_form_values(prop: &Property, value: &Value) -> Vec<String> {
+pub fn to_form_values(prop: &Field, value: &Value) -> Vec<String> {
     let scalar = |v: &Value| match v {
         Value::Null | Value::Bool(false) => None,
         Value::Bool(true) => Some("on".to_string()),
@@ -194,8 +190,8 @@ pub fn to_form_values(prop: &Property, value: &Value) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn prop(kind: &str, required: bool) -> Property {
-        Property {
+    fn prop(kind: &str, required: bool) -> Field {
+        Field {
             id: 1,
             collection_id: 1,
             code: "p".into(),
@@ -209,15 +205,15 @@ mod tests {
         }
     }
 
-    fn multi(kind: &str) -> Property {
-        Property {
+    fn multi(kind: &str) -> Field {
+        Field {
             multiple: true,
             ..prop(kind, false)
         }
     }
 
-    fn enum_value(id: i64) -> PropertyEnum {
-        PropertyEnum {
+    fn enum_value(id: i64) -> FieldOption {
+        FieldOption {
             id,
             field_id: 1,
             value: format!("v{id}"),

@@ -94,7 +94,7 @@ async fn iblock_chain(
              WHERE collection_id = $1 AND ((code <> '' AND code = $2) OR id = $3)
              ORDER BY (code = $2) DESC LIMIT 1",
         )
-        .bind(schema.iblock.id)
+        .bind(schema.collection.id)
         .bind(*seg)
         .bind(id)
         .fetch_optional(&state.db)
@@ -140,12 +140,12 @@ pub async fn breadcrumbs(State(state): State<AppState>, body: Bytes) -> BxResult
         && let Some(first) = segments.first()
         && let Some(schema) = snap
             .by_code(&to_snake(first))
-            .filter(|s| s.iblock.api_enabled)
+            .filter(|s| s.collection.api_enabled)
     {
         crumbs = iblock_chain(
             &state,
             schema,
-            &schema.iblock.name,
+            &schema.collection.name,
             &segments[..1],
             &segments[1..],
         )
@@ -196,7 +196,7 @@ pub async fn legacy_redirect(State(state): State<AppState>, body: Bytes) -> BxRe
             column(rule.match_field)
         );
         let value: Option<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
-            .bind(schema.iblock.id)
+            .bind(schema.collection.id)
             .bind(id.to_string())
             .fetch_optional(&state.db)
             .await?;

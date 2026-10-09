@@ -83,7 +83,7 @@ pub struct PropertyForm {
 }
 
 #[derive(Debug)]
-pub struct PropertyInput {
+pub struct FieldInput {
     pub code: String,
     pub name: String,
     pub kind: String,
@@ -101,7 +101,7 @@ pub struct PropertyInput {
 }
 
 impl PropertyForm {
-    pub fn validate(&self) -> Result<PropertyInput, String> {
+    pub fn validate(&self) -> Result<FieldInput, String> {
         let code = self.code.trim();
         if code.is_empty() || !code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err("Код — латинские буквы, цифры и _".into());
@@ -127,7 +127,7 @@ impl PropertyForm {
         } else {
             Vec::new()
         };
-        Ok(PropertyInput {
+        Ok(FieldInput {
             code: code.to_string(),
             name: name.to_string(),
             kind: kind.to_string(),
