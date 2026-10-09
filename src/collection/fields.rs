@@ -202,6 +202,8 @@ mod tests {
             multiple: false,
             link_collection_id: None,
             user_type: String::new(),
+            in_basket: false,
+            offer_tree: false,
         }
     }
 

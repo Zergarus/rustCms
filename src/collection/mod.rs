@@ -2,6 +2,7 @@
 
 pub mod fields;
 pub mod repo;
+pub mod sku;
 
 use std::collections::{HashMap, HashSet};
 
@@ -24,6 +25,10 @@ pub struct Collection {
     pub list_page_url: String,
     /// Торговый каталог: у записей есть цены и остатки.
     pub is_catalog: bool,
+    /// Для коллекции предложений: коллекция товаров, чьи предложения она хранит.
+    pub product_collection_id: Option<i64>,
+    /// Системное поле связи предложения с товаром (`CML2_LINK`).
+    pub sku_field_id: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -50,6 +55,10 @@ pub struct Field {
     pub link_collection_id: Option<i64>,
     /// `directory` — привязка по внешнему коду записи (бывший справочник HL-блока).
     pub user_type: String,
+    /// Показывать значение в позиции корзины.
+    pub in_basket: bool,
+    /// Поле выбора предложения.
+    pub offer_tree: bool,
 }
 
 /// Вариант значения поля-списка.
@@ -108,6 +117,8 @@ pub struct Item {
     pub detail_picture_id: Option<i64>,
     pub published_at: Option<DateTime<Utc>>,
     pub field_values: Json<Map<String, Value>>,
+    /// Для предложения: родительский товар (не путать с `product_id` позиции корзины).
+    pub product_id: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -330,6 +330,7 @@ fn purchase_input_from_form(
         amounts,
         quantity,
         available: form.0.contains_key("available"),
+        weight: 0.0,
         quantity_trace: flag("quantity_trace"),
         can_buy_zero: flag("can_buy_zero"),
     })
@@ -817,6 +818,8 @@ mod tests {
             multiple: false,
             link_collection_id: None,
             user_type: String::new(),
+            in_basket: false,
+            offer_tree: false,
         }
     }
 

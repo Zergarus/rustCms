@@ -487,6 +487,9 @@ mod tests {
             active,
             is_catalog,
             available: true,
+            product_type: crate::catalog::TYPE_SIMPLE,
+            parent_id: None,
+            parent_active: true,
             quantity_trace: true,
             can_buy_zero: false,
             prices: vec![Price {

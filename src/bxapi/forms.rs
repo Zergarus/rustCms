@@ -261,6 +261,8 @@ mod tests {
             multiple: false,
             link_collection_id: None,
             user_type: String::new(),
+            in_basket: false,
+            offer_tree: false,
         };
         let enums = vec![(759, "Y".to_string(), "Да".to_string())];
         assert_eq!(property_value(&enums, &prop, &json!(true)), json!(759));

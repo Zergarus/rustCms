@@ -4,6 +4,15 @@ use std::collections::{HashMap, HashSet};
 
 use sqlx::{FromRow, PgConnection, PgPool};
 
+/// Коды типов товара (как `CATALOG_TYPE` в Битриксе).
+pub const TYPE_SIMPLE: i16 = 1;
+#[allow(dead_code)] // используется в следующих задачах SKU
+pub const TYPE_SKU: i16 = 3;
+#[allow(dead_code)]
+pub const TYPE_OFFER: i16 = 4;
+#[allow(dead_code)]
+pub const TYPE_EMPTY_SKU: i16 = 6;
+
 /// Цена товара одного типа.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Price {
@@ -18,11 +27,18 @@ pub struct Price {
 
 /// Всё, что нужно, чтобы решить, можно ли купить товар и почём.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // `product_type`, `parent_*` читаются в следующих задачах SKU
 pub struct PurchaseInfo {
     pub active: bool,
     /// Коллекция товара — торговый каталог.
     pub is_catalog: bool,
     pub available: bool,
+    /// Тип товара: `TYPE_SIMPLE`, `TYPE_SKU`, `TYPE_OFFER`, `TYPE_EMPTY_SKU`.
+    pub product_type: i16,
+    /// Для предложения: родительский товар (`collection_items.product_id`).
+    pub parent_id: Option<i64>,
+    /// Родитель активен; без родителя — `true`.
+    pub parent_active: bool,
     pub quantity_trace: bool,
     pub can_buy_zero: bool,
     /// Цены по типам, в порядке сортировки типа.
@@ -117,6 +133,9 @@ struct ProductRow {
     active: bool,
     is_catalog: bool,
     available: Option<bool>,
+    product_type: Option<i16>,
+    parent_id: Option<i64>,
+    parent_active: Option<bool>,
     quantity_trace: Option<bool>,
     can_buy_zero: Option<bool>,
     total: Option<f64>,
@@ -181,9 +200,11 @@ async fn load_on(
     let default_zero = default_flag(db, "default_can_buy_zero", false).await?;
     let products: Vec<ProductRow> = sqlx::query_as(
         "SELECT e.id AS item_id, e.active, i.is_catalog,
-                p.available, p.quantity_trace, p.can_buy_zero, p.quantity::float8 AS total
+                p.available, p.type AS product_type, e.product_id AS parent_id, par.active AS parent_active,
+                p.quantity_trace, p.can_buy_zero, p.quantity::float8 AS total
          FROM collection_items e
          JOIN collections i ON i.id = e.collection_id
+         LEFT JOIN collection_items par ON par.id = e.product_id
          LEFT JOIN catalog_products p ON p.item_id = e.id
          WHERE e.id = ANY($1)",
     )
@@ -208,6 +229,9 @@ async fn load_on(
                 active: p.active,
                 is_catalog: p.is_catalog,
                 available: p.available.unwrap_or(true),
+                product_type: p.product_type.unwrap_or(TYPE_SIMPLE),
+                parent_id: p.parent_id,
+                parent_active: p.parent_active.unwrap_or(true),
                 quantity_trace: p.quantity_trace.unwrap_or(default_trace),
                 can_buy_zero: p.can_buy_zero.unwrap_or(default_zero),
                 prices: prices.remove(&p.item_id).unwrap_or_default(),
@@ -243,6 +267,8 @@ pub struct PurchaseInput {
     /// Общий остаток (`QUANTITY`); `None` — сумма остатков по складам.
     pub quantity: Option<f64>,
     pub available: bool,
+    /// Вес, граммы.
+    pub weight: f64,
     pub quantity_trace: Option<bool>,
     pub can_buy_zero: Option<bool>,
 }
@@ -303,16 +329,17 @@ pub async fn save_purchase(db: &PgPool, item_id: i64, input: &PurchaseInput) -> 
         .await?;
     }
     sqlx::query(
-        "INSERT INTO catalog_products (item_id, quantity, available, quantity_trace, can_buy_zero)
-         VALUES ($1, COALESCE($5, (SELECT COALESCE(sum(amount), 0) FROM catalog_store_amounts WHERE item_id = $1)), $2, $3, $4)
+        "INSERT INTO catalog_products (item_id, quantity, available, quantity_trace, can_buy_zero, weight)
+         VALUES ($1, COALESCE($5, (SELECT COALESCE(sum(amount), 0) FROM catalog_store_amounts WHERE item_id = $1)), $2, $3, $4, $6)
          ON CONFLICT (item_id) DO UPDATE SET quantity = EXCLUDED.quantity, available = EXCLUDED.available,
-             quantity_trace = EXCLUDED.quantity_trace, can_buy_zero = EXCLUDED.can_buy_zero",
+             quantity_trace = EXCLUDED.quantity_trace, can_buy_zero = EXCLUDED.can_buy_zero, weight = EXCLUDED.weight",
     )
     .bind(item_id)
     .bind(input.available)
     .bind(input.quantity_trace)
     .bind(input.can_buy_zero)
     .bind(input.quantity)
+    .bind(input.weight)
     .execute(&mut *tx)
     .await?;
     tx.commit().await
@@ -341,6 +368,9 @@ mod tests {
             active: true,
             is_catalog: true,
             available: true,
+            product_type: TYPE_SIMPLE,
+            parent_id: None,
+            parent_active: true,
             quantity_trace: trace,
             can_buy_zero: buy_zero,
             prices: vec![price(1, true, 100.0)],
