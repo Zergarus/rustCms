@@ -8,6 +8,7 @@
   {% if collection %}<a class="btn" href="/admin/collections/{{ collection.id }}/items">Записи →</a>{% endif %}
 </div>
 
+{% if offers_error and not (collection.is_catalog or collection.product_collection_id) %}<div class="alert">{{ offers_error }}</div>{% endif %}
 <form class="card form" method="post" action="{% if collection %}/admin/collections/{{ collection.id }}{% else %}/admin/collections{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}
   <div class="grid-2">
@@ -42,6 +43,7 @@
 </form>
 
 {% if collection %}
+{% if collection.is_catalog or collection.product_collection_id %}
 <section class="card" id="offers">
   <h2>Торговые предложения</h2>
   {% if collection.product_collection_id %}
@@ -70,6 +72,7 @@
   </form>
   {% endif %}
 </section>
+{% endif %}
 
 <section class="card">
   <h2>Поля</h2>

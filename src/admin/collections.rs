@@ -383,6 +383,11 @@ async fn apply_offers(
             "Это коллекция предложений: подключать к ней предложения нельзя".into(),
         ));
     }
+    if !collection.is_catalog {
+        return Ok(Err(
+            "Предложения есть только у коллекции торгового каталога".into(),
+        ));
+    }
     let current = repo::offers_collection(db, collection.id).await?;
     let target = match form.mode.as_str() {
         "none" => None,
@@ -399,6 +404,20 @@ async fn apply_offers(
             let Some(offers) = repo::get_collection(db, target).await? else {
                 return Ok(Err("Коллекция предложений не найдена".into()));
             };
+            if !offers.is_catalog {
+                return Ok(Err(
+                    "Коллекция предложений должна быть торговым каталогом".into()
+                ));
+            }
+            if offers
+                .product_collection_id
+                .is_some_and(|p| p != collection.id)
+            {
+                return Ok(Err(format!(
+                    "Коллекция «{}» уже подключена как предложения другой коллекции товаров",
+                    offers.name
+                )));
+            }
             if repo::offers_collection(db, offers.id).await?.is_some() {
                 return Ok(Err(
                     "У выбранной коллекции есть свои предложения — она не может быть предложениями"

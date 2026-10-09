@@ -929,7 +929,7 @@ async fn relink_refused_with_foreign_offers(db: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(html.contains("другого товара"), "{html}");
+    assert!(html.contains("другой коллекции товаров"), "{html}");
     let linked: Option<i64> =
         sqlx::query_scalar("SELECT product_collection_id FROM collections WHERE id = $1")
             .bind(offers)
@@ -944,6 +944,11 @@ async fn existing_collection_becomes_offers(db: PgPool) {
     let cookie = admin_cookie(&db).await;
     let app = app(&db);
     let c = content_fixture(&db).await;
+    sqlx::query("UPDATE collections SET is_catalog = TRUE WHERE id = $1")
+        .bind(c.collection_id)
+        .execute(&db)
+        .await
+        .unwrap();
     let spare: i64 = sqlx::query_scalar(
         "INSERT INTO collections (code, name, is_catalog) VALUES ('spare', 'Запас', TRUE) RETURNING id",
     )
@@ -1123,4 +1128,140 @@ async fn admin_save_keeps_weight_and_offer_stock(db: PgPool) {
     .unwrap();
     assert_eq!(after, before);
     assert_eq!(weight(c.item_id).await, 1200.0);
+}
+
+#[sqlx::test]
+async fn offers_block_only_for_catalog(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let c = content_fixture(&db).await;
+    let path = format!("/admin/collections/{}", c.collection_id);
+    let (_, html) = get(&app, &path, &cookie).await;
+    assert!(!html.contains("Торговые предложения"), "{html}");
+    let (status, html) = post_form(&app, &format!("{path}/offers"), &cookie, "mode=create").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("торгового каталога"), "{html}");
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM collections WHERE code = 'news_offers'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    sqlx::query("UPDATE collections SET is_catalog = TRUE WHERE id = $1")
+        .bind(c.collection_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    page_has(&app, &cookie, &path, &["Торговые предложения"]).await;
+}
+
+#[sqlx::test]
+async fn offer_needs_write_on_both_collections(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    let (user_id, user_cookie) = crate::test_support::user_cookie(&db, "editor", false).await;
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(c.group_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO group_permissions (group_id, permission) VALUES ($1, 'admin.access')")
+        .bind(c.group_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO collection_access (collection_id, group_id, level) VALUES ($1, $2, 'write')",
+    )
+    .bind(offers)
+    .bind(c.group_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    // право записи есть на предложения и на товары (fixture) — создание проходит
+    let (status, loc) = create_offer(&app, &user_cookie, offers, c.item_id, "Вариант 1").await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(loc, format!("/admin/items/{}#offers", c.item_id));
+    // права на товары нет — 403 на форму, создание и удаление
+    sqlx::query("DELETE FROM collection_access WHERE collection_id = $1")
+        .bind(c.collection_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let new_path = format!(
+        "/admin/collections/{offers}/items/new?product={}",
+        c.item_id
+    );
+    assert_eq!(
+        get(&app, &new_path, &user_cookie).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, loc) = create_offer(&app, &user_cookie, offers, c.item_id, "Вариант 2").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{loc}");
+    let offer: i64 = sqlx::query_scalar("SELECT id FROM collection_items WHERE name = 'Вариант 1'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    let (status, _) = post_form(
+        &app,
+        &format!("/admin/items/{offer}/delete"),
+        &user_cookie,
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn existing_mode_refuses_linked_or_non_catalog(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    let other: i64 = sqlx::query_scalar(
+        "INSERT INTO collections (code, name, is_catalog) VALUES ('shoes', 'Обувь', TRUE) RETURNING id",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    // уже предложения другой коллекции товаров (пустые)
+    let (status, html) = post_form(
+        &app,
+        &format!("/admin/collections/{other}/offers"),
+        &cookie,
+        &format!("mode=existing&offers_id={offers}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("уже подключена"), "{html}");
+    let linked: Option<i64> =
+        sqlx::query_scalar("SELECT product_collection_id FROM collections WHERE id = $1")
+            .bind(offers)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(linked, Some(c.collection_id));
+    // не каталог
+    let plain: i64 = sqlx::query_scalar(
+        "INSERT INTO collections (code, name) VALUES ('plain', 'Простая') RETURNING id",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let (status, html) = post_form(
+        &app,
+        &format!("/admin/collections/{other}/offers"),
+        &cookie,
+        &format!("mode=existing&offers_id={plain}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("торговым каталогом"), "{html}");
+    let linked: Option<i64> =
+        sqlx::query_scalar("SELECT product_collection_id FROM collections WHERE id = $1")
+            .bind(plain)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(linked, None);
 }

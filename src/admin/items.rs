@@ -438,7 +438,11 @@ async fn load_collection(state: &AppState, id: i64) -> AppResult<CollectionConte
         None => None,
     };
     Ok(CollectionContext {
-        offers: repo::offers_collection(&state.db, id).await?,
+        offers: if collection.is_catalog {
+            repo::offers_collection(&state.db, id).await?
+        } else {
+            None
+        },
         product_collection,
         properties: repo::list_fields(&state.db, id).await?,
         enums: repo::list_collection_options(&state.db, id).await?,
@@ -558,6 +562,14 @@ async fn render_form(
             form => form.first_values(),
         },
     )
+}
+
+/// Работа с предложениями требует записи и в коллекции товаров.
+fn require_parent_write(user: &Access, collection: &Collection) -> AppResult<()> {
+    match collection.product_collection_id {
+        Some(parent) => user.require_collection(parent, Level::Write),
+        None => Ok(()),
+    }
 }
 
 /// Тип товара из `catalog_products`; `None` — записи каталога нет.
@@ -743,6 +755,7 @@ pub async fn new_form(
 ) -> AppResult<Html<String>> {
     user.require_collection(id, Level::Write)?;
     let ctx = load_collection(&state, id).await?;
+    require_parent_write(&user, &ctx.collection)?;
     let mut form = FormValues::default();
     form.set("active", "on");
     form.set("sort", "500");
@@ -923,6 +936,7 @@ pub async fn create(
 ) -> AppResult<Response> {
     user.require_collection(id, Level::Write)?;
     let ctx = load_collection(&state, id).await?;
+    require_parent_write(&user, &ctx.collection)?;
     save(&state, user, ctx, None, multipart).await
 }
 
@@ -954,6 +968,7 @@ pub async fn update(
         .ok_or(AppError::NotFound)?;
     user.require_collection(element.collection_id, Level::Write)?;
     let ctx = load_collection(&state, element.collection_id).await?;
+    require_parent_write(&user, &ctx.collection)?;
     save(&state, user, ctx, Some(id), multipart).await
 }
 
@@ -966,6 +981,9 @@ pub async fn delete(
         .await?
         .ok_or(AppError::NotFound)?;
     user.require_collection(element.collection_id, Level::Write)?;
+    if let Some(collection) = repo::get_collection(&state.db, element.collection_id).await? {
+        require_parent_write(&user, &collection)?;
+    }
     let collection_id = repo::delete_item(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
