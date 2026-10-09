@@ -28,6 +28,7 @@ use crate::{
         snapshot::build_snapshot,
     },
     catalog::{self, PurchaseInfo, check_quantity},
+    collection::sku,
     state::AppState,
 };
 
@@ -69,9 +70,16 @@ pub(super) fn parse_quantity(v: Option<&Value>, allow_zero: bool) -> Result<f64,
     Ok(n as f64)
 }
 
-/// Товар можно положить в корзину: есть, активен, из торгового каталога.
+/// Товар можно положить в корзину: есть, активен, из торгового каталога, не товар с
+/// предложениями (продаются предложения), а у предложения — активный родитель.
 pub(super) fn ensure_purchasable(info: Option<&PurchaseInfo>) -> Result<&PurchaseInfo, BxError> {
-    info.filter(|i| i.active && i.is_catalog).ok_or_else(|| {
+    let sellable = |i: &&PurchaseInfo| {
+        i.active
+            && i.is_catalog
+            && !matches!(i.product_type, catalog::TYPE_SKU | catalog::TYPE_EMPTY_SKU)
+            && i.parent_active
+    };
+    info.filter(sellable).ok_or_else(|| {
         BxError::with_status(
             StatusCode::NOT_FOUND,
             "product_not_found",
@@ -165,8 +173,62 @@ async fn load_stores(state: &AppState) -> Result<Vec<StoreInfo>, BxError> {
         .collect())
 }
 
-/// Отображение товаров позиций: URL, картинка, артикул, свойства — через сериализацию элементов.
+/// Пустое предложение берёт у товара: адрес, картинку, артикул и значения свойств
+/// (`null` или `""` — пусто). Название остаётся своим.
+fn offer_fallback(view: &mut ProductView, parent: &ProductView) {
+    let empty = |v: &Value| v.is_null() || v.as_str() == Some("");
+    if view.slug.is_empty() {
+        view.slug = parent.slug.clone();
+    }
+    if empty(&view.image) {
+        view.image = parent.image.clone();
+    }
+    if empty(&view.article) {
+        view.article = parent.article.clone();
+    }
+    for (key, value) in view.properties.iter_mut() {
+        if empty(value)
+            && let Some(own) = parent.properties.get(key)
+        {
+            *value = own.clone();
+        }
+    }
+}
+
+/// Отображение покупаемых записей: URL, картинка, артикул, свойства. У предложения
+/// (`product_ids` — id предложений) пустое добирается у его товара.
 pub(super) async fn product_views(
+    state: &AppState,
+    product_ids: &[i64],
+) -> Result<HashMap<i64, ProductView>, BxError> {
+    let mut views = record_views(state, product_ids).await?;
+    // предложение → его товар (`collection_items.product_id`)
+    let parents: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT id, product_id FROM collection_items WHERE id = ANY($1) AND product_id IS NOT NULL",
+    )
+    .bind(product_ids)
+    .fetch_all(&state.db)
+    .await?;
+    if parents.is_empty() {
+        return Ok(views);
+    }
+    let parent_ids: Vec<i64> = parents
+        .iter()
+        .map(|(_, p)| *p)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let parent_views = record_views(state, &parent_ids).await?;
+    for (offer, parent) in parents {
+        if let (Some(view), Some(parent)) = (views.get_mut(&offer), parent_views.get(&parent)) {
+            offer_fallback(view, parent);
+        }
+    }
+    Ok(views)
+}
+
+/// Отображение записей как они есть, без подстановок от товара.
+async fn record_views(
     state: &AppState,
     product_ids: &[i64],
 ) -> Result<HashMap<i64, ProductView>, BxError> {
@@ -358,7 +420,11 @@ pub async fn add_item(State(state): State<AppState>, jar: CookieJar, body: Bytes
                     .bind(product_id)
                     .fetch_one(&state.db)
                     .await?;
-            repo::add(&state.db, buyer, product_id, store_id, quantity, &name).await?;
+            let props = sku::basket_props(&state.db, product_id).await?;
+            repo::add(
+                &state.db, buyer, product_id, store_id, quantity, &name, &props,
+            )
+            .await?;
         }
     }
     Ok((jar, success(snapshot(&state, Some(buyer)).await?)).into_response())
@@ -521,5 +587,56 @@ mod tests {
             "product_not_found"
         );
         assert!(ensure_purchasable(Some(&info(true, true))).is_ok());
+    }
+
+    #[test]
+    fn purchasable_rejects_sku_parents() {
+        let err = |r: Result<&PurchaseInfo, BxError>| {
+            r.unwrap_err().code.as_str().unwrap_or_default().to_string()
+        };
+        for kind in [crate::catalog::TYPE_SKU, crate::catalog::TYPE_EMPTY_SKU] {
+            let mut i = info(true, true);
+            i.product_type = kind;
+            assert_eq!(err(ensure_purchasable(Some(&i))), "product_not_found");
+        }
+        let mut offer = info(true, true);
+        offer.product_type = crate::catalog::TYPE_OFFER;
+        offer.parent_id = Some(1);
+        offer.parent_active = false;
+        assert_eq!(err(ensure_purchasable(Some(&offer))), "product_not_found");
+        offer.parent_active = true;
+        assert!(ensure_purchasable(Some(&offer)).is_ok());
+    }
+
+    #[test]
+    fn offer_view_falls_back_to_product() {
+        let view = |slug: &str, image: Value, article: Value, color: Value| ProductView {
+            name: "Предложение".into(),
+            slug: slug.into(),
+            article,
+            image,
+            properties: Map::from_iter([("color".to_string(), color)]),
+        };
+        let parent = view(
+            "/catalog/tovar/",
+            json!("/p.jpg"),
+            json!("A-1"),
+            json!("red"),
+        );
+        let mut offer = view("", Value::Null, json!(""), Value::Null);
+        offer_fallback(&mut offer, &parent);
+        assert_eq!(offer.name, "Предложение");
+        assert_eq!(offer.slug, "/catalog/tovar/");
+        assert_eq!(offer.image, json!("/p.jpg"));
+        assert_eq!(offer.article, json!("A-1"));
+        assert_eq!(offer.properties["color"], json!("red"));
+
+        // собственные значения предложения не затираются
+        let mut own = view("/o/", json!("/o.jpg"), json!("O-1"), json!("blue"));
+        offer_fallback(&mut own, &parent);
+        assert_eq!(own.slug, "/o/");
+        assert_eq!(own.image, json!("/o.jpg"));
+        assert_eq!(own.article, json!("O-1"));
+        assert_eq!(own.properties["color"], json!("blue"));
     }
 }

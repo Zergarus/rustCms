@@ -63,7 +63,7 @@
     <tbody>
       {% for i in order.items %}
       <tr>
-        <td><a href="/admin/items/{{ i.product_id }}">{{ i.name }}</a>{% if i.custom_price %} <span class="muted">(своя цена)</span>{% endif %}</td>
+        <td><a href="/admin/items/{{ i.product_id }}">{{ i.name }}</a>{% if i.custom_price %} <span class="muted">(своя цена)</span>{% endif %}{% for p in i.props %}{% if p.code != "PRODUCT.XML_ID" and p.code != "CATALOG.XML_ID" %}<br><span class="muted">{{ p.name }}: {{ p.value }}</span>{% endif %}{% endfor %}</td>
         <td><select name="item_{{ i.id }}_store"><option value="">—</option>{% for st in store_list %}<option value="{{ st[0] }}" {% if i.store_id == st[0] %}selected{% endif %}>{{ st[1] }}</option>{% endfor %}</select></td>
         <td><input name="item_{{ i.id }}_quantity" value="{{ i.quantity }}" inputmode="decimal" size="5"></td>
         <td><input name="item_{{ i.id }}_price" value="{{ i.price }}" inputmode="decimal" size="8"></td>

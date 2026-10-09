@@ -53,9 +53,21 @@ pub fn order_fields(o: &OrderView, sale_email: &str) -> HashMap<String, String> 
         .items
         .iter()
         .map(|i| {
+            // Свойства позиции (объём, цвет…) — в скобках после названия
+            let props: Vec<String> = i
+                .props
+                .iter()
+                .filter(|p| !p.is_xml_id())
+                .map(|p| format!("{}: {}", p.name, p.value))
+                .collect();
+            let title = if props.is_empty() {
+                i.name.clone()
+            } else {
+                format!("{} ({})", i.name, props.join("; "))
+            };
             format!(
                 "{} - {} шт.: {}",
-                i.name,
+                title,
                 quantity(i.quantity),
                 money(i.price, &o.currency)
             )
@@ -128,6 +140,7 @@ mod tests {
             price,
             name: name.into(),
             custom_price: false,
+            props: Vec::new(),
         }
     }
 
@@ -201,6 +214,29 @@ mod tests {
         assert_eq!(
             f["ORDER_LIST"],
             "Фильтр АКПП - 1 шт.: 594.22 руб.\nКомплект шариков - 1 шт.: 500 руб."
+        );
+    }
+
+    #[test]
+    fn order_list_shows_item_props() {
+        use crate::collection::sku::ItemProp;
+        let prop = |code: &str, name: &str, value: &str| ItemProp {
+            code: code.into(),
+            name: name.into(),
+            value: value.into(),
+        };
+        let mut v = view();
+        v.items[0].name = "Масло ATF (4 л)".into();
+        v.items[0].props = vec![
+            prop("volume", "Объём", "4 л"),
+            prop("brand", "Бренд", "Mobil"),
+            prop("PRODUCT.XML_ID", "Product XML_ID", "PX1"),
+            prop("CATALOG.XML_ID", "Catalog XML_ID", "catalog"),
+        ];
+        let f = order_fields(&v, "");
+        assert_eq!(
+            f["ORDER_LIST"],
+            "Масло ATF (4 л) (Объём: 4 л; Бренд: Mobil) - 1 шт.: 594.22 руб.\nКомплект шариков - 1 шт.: 500 руб."
         );
     }
 

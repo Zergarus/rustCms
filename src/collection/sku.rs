@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 
@@ -222,6 +223,134 @@ pub async fn existing_keys(
                 .collect()
         })
         .collect())
+}
+
+/// Свойство позиции корзины и заказа (`cart_items.props`), как свойства корзины Битрикса.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemProp {
+    pub code: String,
+    pub name: String,
+    pub value: String,
+}
+
+impl ItemProp {
+    /// Служебный идентификатор (`PRODUCT.XML_ID`, `CATALOG.XML_ID`): в админке и письме
+    /// не показывается.
+    pub fn is_xml_id(&self) -> bool {
+        self.code == "PRODUCT.XML_ID" || self.code == "CATALOG.XML_ID"
+    }
+}
+
+/// Отображаемое значение поля: вариант списка — текст, привязка — название записи,
+/// да/нет — «Да», файл не выводится. Множественные значения — через «, »; пустые пропускаются.
+async fn display_value(db: &PgPool, field: &Field, value: &Value) -> sqlx::Result<String> {
+    let scalars: Vec<&Value> = match value {
+        Value::Array(items) => items.iter().collect(),
+        other => vec![other],
+    };
+    let texts: Vec<String> = match field.kind.as_str() {
+        "list" => {
+            let options = repo::list_options(db, field.id).await?;
+            let ids = fields::ids(value);
+            ids.iter()
+                .filter_map(|id| options.iter().find(|o| o.id == *id))
+                .map(|o| o.value.clone())
+                .collect()
+        }
+        "element" => {
+            let ids = fields::ids(value);
+            let names = repo::item_names(db, &ids, None).await?;
+            ids.iter()
+                .filter_map(|id| names.iter().find(|(n, _)| n == id))
+                .map(|(_, name)| name.clone())
+                .collect()
+        }
+        "file" => Vec::new(),
+        "boolean" => scalars
+            .iter()
+            .filter(|v| v.as_bool() == Some(true))
+            .map(|_| "Да".to_string())
+            .collect(),
+        _ => scalars
+            .iter()
+            .filter_map(|v| match v {
+                Value::Null => None,
+                Value::String(s) => Some(s.trim().to_string()),
+                other => Some(other.to_string()),
+            })
+            .collect(),
+    };
+    Ok(texts
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(", "))
+}
+
+/// Свойства, отмеченные «в корзину» (`in_basket`), у записи `item` (значения `values`).
+async fn field_props(
+    db: &PgPool,
+    collection_id: i64,
+    values: &Map<String, Value>,
+    out: &mut Vec<ItemProp>,
+) -> sqlx::Result<()> {
+    for field in repo::list_fields(db, collection_id)
+        .await?
+        .into_iter()
+        .filter(|f| f.in_basket)
+    {
+        let Some(value) = values.get(&field.code) else {
+            continue;
+        };
+        let text = display_value(db, &field, value).await?;
+        if !text.is_empty() {
+            out.push(ItemProp {
+                code: field.code,
+                name: field.name,
+                value: text,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Свойства позиции корзины для покупаемой записи `item_id` (у предложения — id
+/// предложения): поля `in_basket` предложения, затем его товара (`collection_items.product_id`;
+/// у простого товара — только свои), затем `PRODUCT.XML_ID` (`xml_id` товара) и
+/// `CATALOG.XML_ID` (код коллекции товара); пустые значения пропускаются.
+pub async fn basket_props(db: &PgPool, item_id: i64) -> sqlx::Result<Vec<ItemProp>> {
+    let Some(own) = repo::get_item(db, item_id).await? else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    let product_id = match own.product_id {
+        Some(parent) => {
+            field_props(db, own.collection_id, &own.field_values.0, &mut out).await?;
+            parent
+        }
+        None => item_id,
+    };
+    let Some(product) = repo::get_item(db, product_id).await? else {
+        return Ok(out);
+    };
+    let collection_code: String = sqlx::query_scalar("SELECT code FROM collections WHERE id = $1")
+        .bind(product.collection_id)
+        .fetch_one(db)
+        .await?;
+    field_props(db, product.collection_id, &product.field_values.0, &mut out).await?;
+    for (code, name, value) in [
+        ("PRODUCT.XML_ID", "Product XML_ID", product.xml_id),
+        ("CATALOG.XML_ID", "Catalog XML_ID", collection_code),
+    ] {
+        if !value.is_empty() {
+            out.push(ItemProp {
+                code: code.into(),
+                name: name.into(),
+                value,
+            });
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -619,5 +748,86 @@ mod tests {
         let c = repo::get_collection(&db, offers).await.unwrap().unwrap();
         assert_eq!((c.product_collection_id, c.sku_field_id), (None, None));
         assert!(repo::list_fields(&db, offers).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test]
+    async fn basket_props_display_values(db: PgPool) {
+        let (products, offers) = collections(&db).await;
+        let product = item(&db, products, "tovar", None).await;
+        let offer = item(&db, offers, "offer", Some(product)).await;
+        let field = |collection: i64,
+                     code: &'static str,
+                     name: &'static str,
+                     kind: &'static str| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "INSERT INTO collection_fields (collection_id, code, name, kind, multiple, in_basket)
+                     VALUES ($1, $2, $3, $4, TRUE, TRUE) RETURNING id",
+                )
+                .bind(collection)
+                .bind(code)
+                .bind(name)
+                .bind(kind)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            }
+        };
+        let colors = field(offers, "color", "Цвет", "list").await;
+        let mut option_ids = Vec::new();
+        for v in ["Красный", "Синий"] {
+            option_ids.push(
+                sqlx::query_scalar::<_, i64>(
+                    "INSERT INTO collection_field_options (field_id, value, xml_id) VALUES ($1, $2, $2) RETURNING id",
+                )
+                .bind(colors)
+                .bind(v)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            );
+        }
+        field(offers, "empty", "Пусто", "string").await;
+        field(products, "maker", "Производитель", "element").await;
+        field(products, "tags", "Теги", "string").await;
+        sqlx::query("UPDATE collection_items SET field_values = $2 WHERE id = $1")
+            .bind(offer)
+            .bind(json!({"color": option_ids, "empty": ["", " "]}))
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE collection_items SET field_values = $2, xml_id = 'P1' WHERE id = $1")
+            .bind(product)
+            .bind(json!({"maker": [offer], "tags": ["a", "b"]}))
+            .execute(&db)
+            .await
+            .unwrap();
+        let got: Vec<(String, String)> = super::basket_props(&db, offer)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.code, p.value))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("color", "Красный, Синий"),
+                ("maker", "offer"),
+                ("tags", "a, b"),
+                ("PRODUCT.XML_ID", "P1"),
+                ("CATALOG.XML_ID", "catalog"),
+            ]
+            .map(|(c, v)| (c.to_string(), v.to_string()))
+        );
+        // простой товар: свои поля и идентификаторы
+        let own: Vec<String> = super::basket_props(&db, product)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.code)
+            .collect();
+        assert_eq!(own, ["maker", "tags", "PRODUCT.XML_ID", "CATALOG.XML_ID"]);
+        assert!(super::basket_props(&db, 999_999).await.unwrap().is_empty());
     }
 }

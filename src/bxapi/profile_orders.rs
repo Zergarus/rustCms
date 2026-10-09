@@ -144,6 +144,8 @@ pub(super) struct OrderRefs {
     pub stores: HashMap<i64, ProfileStore>,
     /// id товара → URL и картинка (правила корзины).
     pub products: HashMap<i64, ProductView>,
+    /// id покупаемой записи (у предложения — предложения) → вес в граммах.
+    pub weights: HashMap<i64, f64>,
     pub files: HashMap<i64, FileRecord>,
 }
 
@@ -256,6 +258,15 @@ pub(super) fn order_json(
         .map(|i| {
             let product = r.products.get(&i.product_id);
             let store = i.store_id.and_then(|id| r.stores.get(&id));
+            // Свойства позиции (включая `*.XML_ID`, как в Битриксе), затем склад
+            let mut props: Vec<Value> = i
+                .props
+                .iter()
+                .map(|p| json!({"code": p.code, "name": p.name, "value": p.value}))
+                .collect();
+            if let Some(id) = i.store_id {
+                props.push(json!({"code": "STORE_ID", "name": "Склад", "value": id.to_string()}));
+            }
             let mut obj = json!({
                 "id": i.id,
                 "productId": i.product_id,
@@ -264,11 +275,9 @@ pub(super) fn order_json(
                 "price": i.price,
                 "basePrice": i.price,
                 "currency": o.currency,
-                "weight": 0,
+                "weight": r.weights.get(&i.product_id).copied().unwrap_or(0.0),
                 "detailPageUrl": product.map(|p| p.slug.as_str()).unwrap_or(""),
-                "properties": i.store_id.map_or(json!([]), |id| {
-                    json!([{"code": "STORE_ID", "name": "Склад", "value": id.to_string()}])
-                }),
+                "properties": props,
             });
             if let Some(st) = store {
                 obj["store"] = json!({
@@ -362,6 +371,12 @@ async fn load_refs(state: &AppState, orders: &[UserOrder]) -> Result<OrderRefs, 
     } else {
         product_views(state, &product_ids).await?
     };
+    let weights: Vec<(i64, f64)> = sqlx::query_as(
+        "SELECT item_id, weight::float8 FROM catalog_products WHERE item_id = ANY($1)",
+    )
+    .bind(&product_ids)
+    .fetch_all(&state.db)
+    .await?;
     let file_props: HashSet<i64> = settings
         .properties
         .iter()
@@ -389,6 +404,7 @@ async fn load_refs(state: &AppState, orders: &[UserOrder]) -> Result<OrderRefs, 
         properties: settings.properties,
         stores: stores.into_iter().map(|s| (s.id, s)).collect(),
         products,
+        weights: weights.into_iter().collect(),
         files,
     })
 }
@@ -621,6 +637,7 @@ mod tests {
                     properties: Default::default(),
                 },
             )]),
+            weights: HashMap::new(),
             files: files(),
         }
     }
@@ -668,6 +685,7 @@ mod tests {
                 price: 100.0,
                 name: "Товар".into(),
                 custom_price: false,
+                props: Vec::new(),
             }],
             properties: vec![
                 (1, "FIO".into(), "ФИО".into(), "Иван".into()),
@@ -708,7 +726,7 @@ mod tests {
         let item = &v["items"][0];
         assert_eq!(item["productId"], 33);
         assert_eq!(item["basePrice"], 100.0);
-        assert_eq!(item["weight"], 0);
+        assert_eq!(item["weight"], 0.0);
         assert_eq!(item["detailPageUrl"], "/catalog/tovar/");
         assert_eq!(
             item["properties"],
@@ -729,5 +747,74 @@ mod tests {
         assert_eq!(props["invoice"]["value"], "");
         assert_eq!(props["other"]["value"], "");
         assert_eq!(props["old"]["value"], "x");
+    }
+
+    #[test]
+    fn order_json_item_props_and_weight() {
+        use crate::collection::sku::ItemProp;
+        let prop = |code: &str, name: &str, value: &str| ItemProp {
+            code: code.into(),
+            name: name.into(),
+            value: value.into(),
+        };
+        let mut o = order();
+        o.items[0].props = vec![
+            prop("volume", "Объём", "4 л"),
+            prop("PRODUCT.XML_ID", "Product XML_ID", "PX1"),
+        ];
+        let mut r = refs();
+        r.weights.insert(33, 250.0);
+        let v = order_json(&o, &r, &ProfileConfig::default(), &CartConfig::default());
+        let item = &v["items"][0];
+        assert_eq!(item["weight"], 250.0);
+        assert_eq!(
+            item["properties"],
+            json!([
+                {"code": "volume", "name": "Объём", "value": "4 л"},
+                {"code": "PRODUCT.XML_ID", "name": "Product XML_ID", "value": "PX1"},
+                {"code": "STORE_ID", "name": "Склад", "value": "3"},
+            ])
+        );
+    }
+
+    #[sqlx::test]
+    async fn profile_order_reads_props_and_weight(db: sqlx::PgPool) {
+        use crate::test_support::{order_fixture, place_order, test_state};
+        let f = order_fixture(&db).await;
+        let user: i64 = sqlx::query_scalar(
+            "INSERT INTO users (login, password_hash) VALUES ('u', '') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let id = place_order(&db, &f, Some(user)).await;
+        sqlx::query("UPDATE catalog_products SET weight = 250 WHERE item_id = $1")
+            .bind(f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE cart_items SET props = '[{\"code\":\"volume\",\"name\":\"Объём\",\"value\":\"4 л\"}]'
+             WHERE order_id = $1",
+        )
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let state = test_state(db.clone());
+        let orders = history::list(&db, user, 10, 0).await.unwrap();
+        let refs = load_refs(&state, &orders).await.unwrap();
+        let v = order_json(
+            &orders[0],
+            &refs,
+            &state.project.profile,
+            &state.project.cart,
+        );
+        let item = &v["items"][0];
+        assert_eq!(item["weight"], 250.0);
+        assert_eq!(
+            item["properties"],
+            json!([{"code": "volume", "name": "Объём", "value": "4 л"}])
+        );
     }
 }

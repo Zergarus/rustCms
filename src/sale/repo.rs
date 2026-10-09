@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use sqlx::{PgConnection, PgPool};
 
 use super::stock::{self, StockChange, StockLine, apply};
-use crate::catalog;
+use crate::{catalog, collection::sku::ItemProp};
 
 /// Значение свойства заказа (флаги — из справочника свойств, если он ещё есть).
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -32,6 +32,9 @@ pub struct OrderItem {
     pub price: f64,
     pub name: String,
     pub custom_price: bool,
+    /// Свойства позиции (у предложения — объём, цвет и т.п.), снимок на момент добавления.
+    #[sqlx(json)]
+    pub props: Vec<ItemProp>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -261,7 +264,7 @@ pub async fn load(db: &PgPool, id: i64) -> sqlx::Result<Option<OrderView>> {
     .await?;
     order.items = sqlx::query_as(
         "SELECT id, item_id AS product_id, store_id, quantity::float8 AS quantity,
-                COALESCE(price, 0)::float8 AS price, name, custom_price
+                COALESCE(price, 0)::float8 AS price, name, custom_price, props
          FROM cart_items WHERE order_id = $1 ORDER BY id",
     )
     .bind(id)

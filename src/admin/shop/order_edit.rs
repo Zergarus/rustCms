@@ -293,10 +293,11 @@ pub async fn save_composition(
                 .await?;
             }
             None => {
+                let props = crate::collection::sku::basket_props(db, l.product_id).await?;
                 sqlx::query(
                     "INSERT INTO cart_items (buyer_id, item_id, store_id, quantity, name, price,
-                                             currency, order_id, custom_price)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)",
+                                             currency, order_id, custom_price, props)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, $9)",
                 )
                 .bind(buyer)
                 .bind(l.product_id)
@@ -306,6 +307,7 @@ pub async fn save_composition(
                 .bind(l.price)
                 .bind(&currency)
                 .bind(order_id)
+                .bind(sqlx::types::Json(&props))
                 .execute(&mut *tx)
                 .await?;
             }

@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool};
 
 use super::CartItem;
+use crate::collection::sku::ItemProp;
 
 /// Владелец корзины: вошедший пользователь или гость по токену из cookie.
 #[derive(Debug, Clone)]
@@ -120,7 +121,8 @@ pub async fn item(db: &PgPool, buyer_id: i64, item_id: i64) -> sqlx::Result<Opti
     Ok(row.map(CartItem::from))
 }
 
-/// Добавляет товар; тот же товар на том же складе — увеличивает количество.
+/// Добавляет товар (у предложения `product_id` — id предложения); тот же товар на том же
+/// складе — увеличивает количество. `props` пишутся только при вставке позиции.
 pub async fn add(
     db: &PgPool,
     buyer_id: i64,
@@ -128,10 +130,11 @@ pub async fn add(
     store_id: Option<i64>,
     quantity: f64,
     name: &str,
+    props: &[ItemProp],
 ) -> sqlx::Result<i64> {
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO cart_items (buyer_id, item_id, store_id, quantity, name)
-         VALUES ($1, $2, $3, $4, $5)
+        "INSERT INTO cart_items (buyer_id, item_id, store_id, quantity, name, props)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (buyer_id, item_id, store_id) WHERE order_id IS NULL
          DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity, updated_at = now()
          RETURNING id",
@@ -141,6 +144,7 @@ pub async fn add(
     .bind(store_id)
     .bind(quantity)
     .bind(name)
+    .bind(sqlx::types::Json(props))
     .fetch_one(db)
     .await?;
     touch(db, buyer_id).await?;
