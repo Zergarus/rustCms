@@ -29,14 +29,14 @@ use crate::{
 };
 
 /// Колонки строки элемента; алиас таблицы — `e`.
-pub const ROW_COLS: &str = "e.id, e.iblock_id, e.section_id, e.code, e.xml_id, e.name, e.active, \
+pub const ROW_COLS: &str = "e.id, e.collection_id, e.section_id, e.code, e.xml_id, e.name, e.active, \
      e.sort, e.preview_text, e.detail_text, e.preview_picture_id, e.detail_picture_id, \
-     e.published_at, e.created_at, e.updated_at, e.created_by, e.properties";
+     e.published_at, e.created_at, e.updated_at, e.created_by, e.field_values AS properties";
 
 #[derive(Debug, Clone, FromRow)]
 pub struct Row {
     pub id: i64,
-    pub iblock_id: i64,
+    pub collection_id: i64,
     pub section_id: Option<i64>,
     pub code: String,
     pub xml_id: String,
@@ -108,7 +108,7 @@ pub async fn load_rows(state: &AppState, ids: &[i64]) -> Result<Vec<Row>, BxErro
         return Ok(Vec::new());
     }
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {ROW_COLS} FROM iblock_elements e WHERE e.id = ANY($1)"
+        "SELECT {ROW_COLS} FROM collection_items e WHERE e.id = ANY($1)"
     )))
     .bind(ids)
     .fetch_all(&state.db)
@@ -209,7 +209,7 @@ fn base_value(schema: &Schema, row: &Row, field: &str) -> Option<Value> {
         "previewText" => Value::from(row.preview_text.clone()),
         "detailText" => Value::from(row.detail_text.clone()),
         "iblockSectionId" => Value::from(row.section_id.unwrap_or(0)),
-        "iblockId" => Value::from(row.iblock_id),
+        "iblockId" => Value::from(row.collection_id),
         "createdBy" => row.created_by.map_or(Value::Null, Value::from),
         "sectionName" => Value::from(
             row.section_id
@@ -381,14 +381,14 @@ impl Loaded {
                 for id in ids {
                     if let Some(row) = loaded.linked.get(&id) {
                         by_iblock
-                            .entry(row.iblock_id)
+                            .entry(row.collection_id)
                             .or_default()
                             .push(row.clone());
                     }
                 }
                 let mut out = HashMap::new();
-                for (iblock_id, group) in by_iblock {
-                    let Some(linked_schema) = env.snap.get(iblock_id).cloned() else {
+                for (collection_id, group) in by_iblock {
+                    let Some(linked_schema) = env.snap.get(collection_id).cloned() else {
                         continue;
                     };
                     let items =
@@ -409,8 +409,8 @@ impl Loaded {
             }
             if select.has("stocks") {
                 let amounts: Vec<(i64, i64, f64)> = sqlx::query_as(
-                    "SELECT element_id, store_id, amount::float8 FROM catalog_store_amounts
-                     WHERE element_id = ANY($1)",
+                    "SELECT item_id, store_id, amount::float8 FROM catalog_store_amounts
+                     WHERE item_id = ANY($1)",
                 )
                 .bind(&row_ids)
                 .fetch_all(&env.state.db)
@@ -421,7 +421,7 @@ impl Loaded {
             }
             if select.has("catalogQuantity") {
                 let qty: Vec<(i64, f64)> = sqlx::query_as(
-                    "SELECT element_id, quantity::float8 FROM catalog_products WHERE element_id = ANY($1)",
+                    "SELECT item_id, quantity::float8 FROM catalog_products WHERE item_id = ANY($1)",
                 )
                 .bind(&row_ids)
                 .fetch_all(&env.state.db)

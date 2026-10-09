@@ -31,7 +31,7 @@ struct GroupFormView {
     description: String,
     sort: String,
     permissions: Vec<String>,
-    /// iblock_id (строкой) → "read" | "write"
+    /// collection_id (строкой) → "read" | "write"
     levels: HashMap<String, String>,
 }
 

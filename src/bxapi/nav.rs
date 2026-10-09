@@ -90,8 +90,8 @@ async fn iblock_chain(
         }
         let id: i64 = seg.parse().unwrap_or(0);
         let name: Option<(String,)> = sqlx::query_as(
-            "SELECT name FROM iblock_elements
-             WHERE iblock_id = $1 AND ((code <> '' AND code = $2) OR id = $3)
+            "SELECT name FROM collection_items
+             WHERE collection_id = $1 AND ((code <> '' AND code = $2) OR id = $3)
              ORDER BY (code = $2) DESC LIMIT 1",
         )
         .bind(schema.iblock.id)
@@ -191,7 +191,7 @@ pub async fn legacy_redirect(State(state): State<AppState>, body: Bytes) -> BxRe
             _ => "id::text",
         };
         let sql = format!(
-            "SELECT {}::text FROM iblock_elements WHERE iblock_id = $1 AND active AND {} = $2",
+            "SELECT {}::text FROM collection_items WHERE collection_id = $1 AND active AND {} = $2",
             column(rule.value_field),
             column(rule.match_field)
         );

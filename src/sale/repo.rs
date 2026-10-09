@@ -260,7 +260,7 @@ pub async fn load(db: &PgPool, id: i64) -> sqlx::Result<Option<OrderView>> {
     .fetch_all(db)
     .await?;
     order.items = sqlx::query_as(
-        "SELECT id, element_id, store_id, quantity::float8 AS quantity,
+        "SELECT id, item_id AS element_id, store_id, quantity::float8 AS quantity,
                 COALESCE(price, 0)::float8 AS price, name, custom_price
          FROM cart_items WHERE order_id = $1 ORDER BY id",
     )
@@ -382,7 +382,7 @@ pub async fn set_paid(db: &PgPool, order_id: i64, paid: bool) -> sqlx::Result<bo
 /// Позиции заказа для расчёта остатков.
 pub async fn stock_lines(tx: &mut PgConnection, order_id: i64) -> sqlx::Result<Vec<StockLine>> {
     let rows: Vec<(i64, Option<i64>, f64)> = sqlx::query_as(
-        "SELECT element_id, store_id, quantity::float8 FROM cart_items WHERE order_id = $1 ORDER BY id",
+        "SELECT item_id, store_id, quantity::float8 FROM cart_items WHERE order_id = $1 ORDER BY id",
     )
     .bind(order_id)
     .fetch_all(&mut *tx)

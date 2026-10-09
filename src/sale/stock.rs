@@ -70,7 +70,7 @@ pub async fn apply(tx: &mut PgConnection, changes: &[StockChange]) -> sqlx::Resu
         if let Some(store) = c.store_id {
             sqlx::query(
                 "UPDATE catalog_store_amounts SET amount = amount + $3
-                 WHERE element_id = $1 AND store_id = $2",
+                 WHERE item_id = $1 AND store_id = $2",
             )
             .bind(c.element_id)
             .bind(store)
@@ -80,7 +80,7 @@ pub async fn apply(tx: &mut PgConnection, changes: &[StockChange]) -> sqlx::Resu
         }
     }
     for (element, delta) in per_product {
-        sqlx::query("UPDATE catalog_products SET quantity = quantity + $2 WHERE element_id = $1")
+        sqlx::query("UPDATE catalog_products SET quantity = quantity + $2 WHERE item_id = $1")
             .bind(element)
             .bind(delta)
             .execute(&mut *tx)

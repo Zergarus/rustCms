@@ -197,14 +197,14 @@ mod tests {
     fn prop(kind: &str, required: bool) -> Property {
         Property {
             id: 1,
-            iblock_id: 1,
+            collection_id: 1,
             code: "p".into(),
             name: "P".into(),
             kind: kind.into(),
             is_required: required,
             sort: 500,
             multiple: false,
-            link_iblock_id: None,
+            link_collection_id: None,
             user_type: String::new(),
         }
     }
@@ -219,7 +219,7 @@ mod tests {
     fn enum_value(id: i64) -> PropertyEnum {
         PropertyEnum {
             id,
-            property_id: 1,
+            field_id: 1,
             value: format!("v{id}"),
             xml_id: format!("x{id}"),
             sort: 500,

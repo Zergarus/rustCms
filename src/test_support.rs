@@ -12,19 +12,19 @@ pub struct Fixture {
 /// Товар с остатком 10 (склад 1 — 5), гость-покупатель с позицией 1 шт., тип плательщика, статус N.
 pub async fn order_fixture(db: &PgPool) -> Fixture {
     let iblock: i64 = sqlx::query_scalar(
-        "INSERT INTO iblocks (code, name, is_catalog) VALUES ('catalog', 'Каталог', TRUE) RETURNING id",
+        "INSERT INTO collections (code, name, is_catalog) VALUES ('catalog', 'Каталог', TRUE) RETURNING id",
     )
     .fetch_one(db)
     .await
     .unwrap();
     let element_id: i64 = sqlx::query_scalar(
-        "INSERT INTO iblock_elements (iblock_id, code, name) VALUES ($1, 'tovar', 'Товар') RETURNING id",
+        "INSERT INTO collection_items (collection_id, code, name) VALUES ($1, 'tovar', 'Товар') RETURNING id",
     )
     .bind(iblock)
     .fetch_one(db)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO catalog_products (element_id, quantity, quantity_trace, can_buy_zero) VALUES ($1, 10, TRUE, FALSE)")
+    sqlx::query("INSERT INTO catalog_products (item_id, quantity, quantity_trace, can_buy_zero) VALUES ($1, 10, TRUE, FALSE)")
         .bind(element_id)
         .execute(db)
         .await
@@ -33,20 +33,18 @@ pub async fn order_fixture(db: &PgPool) -> Fixture {
         .execute(db)
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO catalog_store_amounts (element_id, store_id, amount) VALUES ($1, 1, 5)",
-    )
-    .bind(element_id)
-    .execute(db)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO catalog_store_amounts (item_id, store_id, amount) VALUES ($1, 1, 5)")
+        .bind(element_id)
+        .execute(db)
+        .await
+        .unwrap();
     let buyer_id: i64 =
         sqlx::query_scalar("INSERT INTO buyers (token_hash) VALUES ('guest') RETURNING id")
             .fetch_one(db)
             .await
             .unwrap();
     let item_id: i64 = sqlx::query_scalar(
-        "INSERT INTO cart_items (buyer_id, element_id, store_id, quantity, name) VALUES ($1, $2, 1, 1, 'Товар') RETURNING id",
+        "INSERT INTO cart_items (buyer_id, item_id, store_id, quantity, name) VALUES ($1, $2, 1, 1, 'Товар') RETURNING id",
     )
     .bind(buyer_id)
     .bind(element_id)
@@ -72,8 +70,8 @@ pub async fn order_fixture(db: &PgPool) -> Fixture {
 
 pub async fn amounts(db: &PgPool, element_id: i64) -> (f64, f64) {
     sqlx::query_as(
-        "SELECT (SELECT quantity::float8 FROM catalog_products WHERE element_id = $1),
-                (SELECT amount::float8 FROM catalog_store_amounts WHERE element_id = $1 AND store_id = 1)",
+        "SELECT (SELECT quantity::float8 FROM catalog_products WHERE item_id = $1),
+                (SELECT amount::float8 FROM catalog_store_amounts WHERE item_id = $1 AND store_id = 1)",
     )
     .bind(element_id)
     .fetch_one(db)
@@ -87,7 +85,7 @@ pub async fn amounts(db: &PgPool, element_id: i64) -> (f64, f64) {
 pub async fn place_order(db: &PgPool, f: &Fixture, user_id: Option<i64>) -> i64 {
     use crate::sale::repo::{NewOrder, create};
     let item_id: i64 = sqlx::query_scalar(
-        "INSERT INTO cart_items (buyer_id, element_id, store_id, quantity, name) VALUES ($1, $2, NULL, 1, 'Товар') RETURNING id",
+        "INSERT INTO cart_items (buyer_id, item_id, store_id, quantity, name) VALUES ($1, $2, NULL, 1, 'Товар') RETURNING id",
     )
     .bind(f.buyer_id)
     .bind(f.element_id)
@@ -171,26 +169,26 @@ pub struct Content {
 pub async fn content_fixture(db: &PgPool) -> Content {
     let one = |sql: &'static str| sqlx::query_scalar::<_, i64>(sql);
     let collection_id =
-        one("INSERT INTO iblocks (code, name) VALUES ('news', 'Новости') RETURNING id")
+        one("INSERT INTO collections (code, name) VALUES ('news', 'Новости') RETURNING id")
             .fetch_one(db)
             .await
             .unwrap();
     let section_id = one(
-        "INSERT INTO iblock_sections (iblock_id, code, name) VALUES ($1, 'razdel-a', 'Раздел А') RETURNING id",
+        "INSERT INTO collection_sections (collection_id, code, name) VALUES ($1, 'razdel-a', 'Раздел А') RETURNING id",
     )
     .bind(collection_id)
     .fetch_one(db)
     .await
     .unwrap();
     let field_id = one(
-        "INSERT INTO iblock_properties (iblock_id, code, name, kind) VALUES ($1, 'color', 'Цвет', 'list') RETURNING id",
+        "INSERT INTO collection_fields (collection_id, code, name, kind) VALUES ($1, 'color', 'Цвет', 'list') RETURNING id",
     )
     .bind(collection_id)
     .fetch_one(db)
     .await
     .unwrap();
     let link_field_id = one(
-        "INSERT INTO iblock_properties (iblock_id, code, name, kind, link_iblock_id)
+        "INSERT INTO collection_fields (collection_id, code, name, kind, link_collection_id)
          VALUES ($1, 'link', 'Связь', 'element', $1) RETURNING id",
     )
     .bind(collection_id)
@@ -198,14 +196,14 @@ pub async fn content_fixture(db: &PgPool) -> Content {
     .await
     .unwrap();
     let option_id = one(
-        "INSERT INTO iblock_property_enums (property_id, value, xml_id) VALUES ($1, 'Красный', 'red') RETURNING id",
+        "INSERT INTO collection_field_options (field_id, value, xml_id) VALUES ($1, 'Красный', 'red') RETURNING id",
     )
     .bind(field_id)
     .fetch_one(db)
     .await
     .unwrap();
     let item_id = one(
-        "INSERT INTO iblock_elements (iblock_id, section_id, code, name, published_at, created_at, updated_at, properties)
+        "INSERT INTO collection_items (collection_id, section_id, code, name, published_at, created_at, updated_at, field_values)
          VALUES ($1, $2, 'pervaya', 'Первая новость', '2026-01-02T03:04:05Z', '2026-01-02T03:04:05Z',
                  '2026-01-02T03:04:05Z', jsonb_build_object('color', $3))
          RETURNING id",
@@ -216,7 +214,7 @@ pub async fn content_fixture(db: &PgPool) -> Content {
     .fetch_one(db)
     .await
     .unwrap();
-    sqlx::query("UPDATE iblock_elements SET properties = properties || jsonb_build_object('link', id) WHERE id = $1")
+    sqlx::query("UPDATE collection_items SET field_values = field_values || jsonb_build_object('link', id) WHERE id = $1")
         .bind(item_id)
         .execute(db)
         .await
@@ -227,7 +225,7 @@ pub async fn content_fixture(db: &PgPool) -> Content {
             .await
             .unwrap();
     sqlx::query(
-        "INSERT INTO iblock_group_access (iblock_id, group_id, level) VALUES ($1, $2, 'write')",
+        "INSERT INTO collection_access (collection_id, group_id, level) VALUES ($1, $2, 'write')",
     )
     .bind(collection_id)
     .bind(group_id)

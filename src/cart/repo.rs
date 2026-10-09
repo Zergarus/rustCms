@@ -48,7 +48,7 @@ impl From<ItemRow> for CartItem {
     }
 }
 
-const ITEM_COLS: &str = "id, element_id, store_id, quantity::float8 AS quantity, name";
+const ITEM_COLS: &str = "id, item_id AS element_id, store_id, quantity::float8 AS quantity, name";
 
 pub async fn find_buyer(db: &PgPool, owner: &Owner) -> sqlx::Result<Option<i64>> {
     match owner {
@@ -130,9 +130,9 @@ pub async fn add(
     name: &str,
 ) -> sqlx::Result<i64> {
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO cart_items (buyer_id, element_id, store_id, quantity, name)
+        "INSERT INTO cart_items (buyer_id, item_id, store_id, quantity, name)
          VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (buyer_id, element_id, store_id) WHERE order_id IS NULL
+         ON CONFLICT (buyer_id, item_id, store_id) WHERE order_id IS NULL
          DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity, updated_at = now()
          RETURNING id",
     )
@@ -177,7 +177,7 @@ pub async fn set_store(
     let twin: Option<i64> = sqlx::query_scalar(
         "SELECT t.id FROM cart_items t JOIN cart_items s ON s.id = $2
          WHERE t.buyer_id = $1 AND t.order_id IS NULL AND t.id <> s.id
-           AND t.element_id = s.element_id AND t.store_id = $3",
+           AND t.item_id = s.item_id AND t.store_id = $3",
     )
     .bind(buyer_id)
     .bind(item_id)
@@ -493,7 +493,7 @@ mod tests {
             .await
             .unwrap();
         // открытая позиция корзины того же покупателя — должна удалиться
-        sqlx::query("INSERT INTO cart_items (buyer_id, element_id, quantity) VALUES ($1, $2, 1)")
+        sqlx::query("INSERT INTO cart_items (buyer_id, item_id, quantity) VALUES ($1, $2, 1)")
             .bind(f.buyer_id)
             .bind(f.element_id)
             .execute(&db)

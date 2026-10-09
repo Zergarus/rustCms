@@ -100,8 +100,8 @@ impl Snapshot {
             .and_then(|id| self.by_id.get(id))
     }
 
-    pub fn get(&self, iblock_id: i64) -> Option<&Arc<Schema>> {
-        self.by_id.get(&iblock_id)
+    pub fn get(&self, collection_id: i64) -> Option<&Arc<Schema>> {
+        self.by_id.get(&collection_id)
     }
 
     pub fn enum_value(&self, id: i64) -> Option<&PropertyEnum> {
@@ -113,7 +113,7 @@ impl Snapshot {
         let mut items: Vec<&PropertyEnum> = self
             .enums
             .values()
-            .filter(|e| e.property_id == property_id)
+            .filter(|e| e.field_id == property_id)
             .collect();
         items.sort_by_key(|e| (e.sort, e.id));
         items
@@ -149,28 +149,28 @@ async fn load(db: &PgPool) -> sqlx::Result<Snapshot> {
     let iblocks = repo::list_iblocks(db).await?;
     let mut props: HashMap<i64, Vec<Property>> = HashMap::new();
     for p in sqlx::query_as::<_, Property>(
-        "SELECT id, iblock_id, code, name, kind, is_required, sort, multiple, link_iblock_id,
+        "SELECT id, collection_id, code, name, kind, is_required, sort, multiple, link_collection_id,
                 user_type
-         FROM iblock_properties ORDER BY sort, id",
+         FROM collection_fields ORDER BY sort, id",
     )
     .fetch_all(db)
     .await?
     {
-        props.entry(p.iblock_id).or_default().push(p);
+        props.entry(p.collection_id).or_default().push(p);
     }
     let mut sections: HashMap<i64, HashMap<i64, Section>> = HashMap::new();
     for s in sqlx::query_as::<_, Section>(
-        "SELECT id, iblock_id, parent_id, code, xml_id, name, active, sort, depth_level,
+        "SELECT id, collection_id, parent_id, code, xml_id, name, active, sort, depth_level,
                 description, picture_id, created_at, updated_at
-         FROM iblock_sections",
+         FROM collection_sections",
     )
     .fetch_all(db)
     .await?
     {
-        sections.entry(s.iblock_id).or_default().insert(s.id, s);
+        sections.entry(s.collection_id).or_default().insert(s.id, s);
     }
     let enums: HashMap<i64, PropertyEnum> = sqlx::query_as::<_, PropertyEnum>(
-        "SELECT id, property_id, value, xml_id, sort, is_default FROM iblock_property_enums",
+        "SELECT id, field_id, value, xml_id, sort, is_default FROM collection_field_options",
     )
     .fetch_all(db)
     .await?

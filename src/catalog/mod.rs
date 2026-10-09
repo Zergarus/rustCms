@@ -66,7 +66,7 @@ pub fn check_quantity(
 
 #[derive(FromRow)]
 struct PriceRow {
-    element_id: i64,
+    item_id: i64,
     type_id: i64,
     type_name: String,
     is_base: bool,
@@ -90,18 +90,18 @@ async fn load_prices_on(
     element_ids: &[i64],
 ) -> sqlx::Result<HashMap<i64, Vec<Price>>> {
     let rows: Vec<PriceRow> = sqlx::query_as(
-        "SELECT p.element_id, p.price_type_id AS type_id, t.name AS type_name, t.is_base,
+        "SELECT p.item_id, p.price_type_id AS type_id, t.name AS type_name, t.is_base,
                 p.price::float8 AS price, p.currency, p.quantity_from, p.quantity_to
          FROM catalog_prices p JOIN catalog_price_types t ON t.id = p.price_type_id
-         WHERE p.element_id = ANY($1)
-         ORDER BY p.element_id, t.sort, p.price_type_id, p.quantity_from NULLS FIRST",
+         WHERE p.item_id = ANY($1)
+         ORDER BY p.item_id, t.sort, p.price_type_id, p.quantity_from NULLS FIRST",
     )
     .bind(element_ids)
     .fetch_all(db)
     .await?;
     let mut out: HashMap<i64, Vec<Price>> = HashMap::new();
     for r in rows {
-        out.entry(r.element_id).or_default().push(Price {
+        out.entry(r.item_id).or_default().push(Price {
             type_id: r.type_id,
             type_name: r.type_name,
             is_base: r.is_base,
@@ -116,7 +116,7 @@ async fn load_prices_on(
 
 #[derive(FromRow)]
 struct ProductRow {
-    element_id: i64,
+    item_id: i64,
     active: bool,
     is_catalog: bool,
     available: Option<bool>,
@@ -150,22 +150,22 @@ pub async fn load_locked(
     element_ids: &[i64],
 ) -> sqlx::Result<HashMap<i64, PurchaseInfo>> {
     sqlx::query(
-        "INSERT INTO catalog_products (element_id)
-         SELECT id FROM iblock_elements WHERE id = ANY($1) ON CONFLICT DO NOTHING",
+        "INSERT INTO catalog_products (item_id)
+         SELECT id FROM collection_items WHERE id = ANY($1) ON CONFLICT DO NOTHING",
     )
     .bind(element_ids)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "SELECT element_id FROM catalog_products WHERE element_id = ANY($1)
-         ORDER BY element_id FOR UPDATE",
+        "SELECT item_id FROM catalog_products WHERE item_id = ANY($1)
+         ORDER BY item_id FOR UPDATE",
     )
     .bind(element_ids)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "SELECT element_id FROM catalog_store_amounts WHERE element_id = ANY($1)
-         ORDER BY element_id, store_id FOR UPDATE",
+        "SELECT item_id FROM catalog_store_amounts WHERE item_id = ANY($1)
+         ORDER BY item_id, store_id FOR UPDATE",
     )
     .bind(element_ids)
     .execute(&mut *tx)
@@ -183,11 +183,11 @@ async fn load_on(
     let default_trace = default_flag(db, "default_quantity_trace", true).await?;
     let default_zero = default_flag(db, "default_can_buy_zero", false).await?;
     let products: Vec<ProductRow> = sqlx::query_as(
-        "SELECT e.id AS element_id, e.active, i.is_catalog,
+        "SELECT e.id AS item_id, e.active, i.is_catalog,
                 p.available, p.quantity_trace, p.can_buy_zero, p.quantity::float8 AS total
-         FROM iblock_elements e
-         JOIN iblocks i ON i.id = e.iblock_id
-         LEFT JOIN catalog_products p ON p.element_id = e.id
+         FROM collection_items e
+         JOIN collections i ON i.id = e.collection_id
+         LEFT JOIN catalog_products p ON p.item_id = e.id
          WHERE e.id = ANY($1)",
     )
     .bind(element_ids)
@@ -196,7 +196,7 @@ async fn load_on(
     let mut prices = load_prices_on(&mut *db, element_ids).await?;
     let mut amounts: HashMap<i64, HashMap<i64, f64>> = HashMap::new();
     for (element, store, amount) in sqlx::query_as::<_, (i64, i64, f64)>(
-        "SELECT element_id, store_id, amount::float8 FROM catalog_store_amounts WHERE element_id = ANY($1)",
+        "SELECT item_id, store_id, amount::float8 FROM catalog_store_amounts WHERE item_id = ANY($1)",
     )
     .bind(element_ids)
     .fetch_all(db)
@@ -213,11 +213,11 @@ async fn load_on(
                 available: p.available.unwrap_or(true),
                 quantity_trace: p.quantity_trace.unwrap_or(default_trace),
                 can_buy_zero: p.can_buy_zero.unwrap_or(default_zero),
-                prices: prices.remove(&p.element_id).unwrap_or_default(),
-                amounts: amounts.remove(&p.element_id).unwrap_or_default(),
+                prices: prices.remove(&p.item_id).unwrap_or_default(),
+                amounts: amounts.remove(&p.item_id).unwrap_or_default(),
                 total: p.total.unwrap_or(0.0),
             };
-            (p.element_id, info)
+            (p.item_id, info)
         })
         .collect())
 }
@@ -255,10 +255,12 @@ pub async fn raw_flags(
     db: &PgPool,
     element_id: i64,
 ) -> sqlx::Result<Option<(bool, Option<bool>, Option<bool>)>> {
-    sqlx::query_as("SELECT available, quantity_trace, can_buy_zero FROM catalog_products WHERE element_id = $1")
-        .bind(element_id)
-        .fetch_optional(db)
-        .await
+    sqlx::query_as(
+        "SELECT available, quantity_trace, can_buy_zero FROM catalog_products WHERE item_id = $1",
+    )
+    .bind(element_id)
+    .fetch_optional(db)
+    .await
 }
 
 /// Сохраняет цены, остатки и флаги товара; общий остаток не задан — сумма по складам.
@@ -276,7 +278,7 @@ pub async fn save_purchase(
     for (type_id, value) in &input.prices {
         // Валюта прежней цены сохраняется
         let old: Option<String> = sqlx::query_scalar(
-            "DELETE FROM catalog_prices WHERE element_id = $1 AND price_type_id = $2 RETURNING currency",
+            "DELETE FROM catalog_prices WHERE item_id = $1 AND price_type_id = $2 RETURNING currency",
         )
         .bind(element_id)
         .bind(type_id)
@@ -286,7 +288,7 @@ pub async fn save_purchase(
         .next();
         if let Some(price) = value {
             sqlx::query(
-                "INSERT INTO catalog_prices (element_id, price_type_id, price, currency) VALUES ($1, $2, $3, $4)",
+                "INSERT INTO catalog_prices (item_id, price_type_id, price, currency) VALUES ($1, $2, $3, $4)",
             )
             .bind(element_id)
             .bind(type_id)
@@ -298,8 +300,8 @@ pub async fn save_purchase(
     }
     for (store_id, amount) in &input.amounts {
         sqlx::query(
-            "INSERT INTO catalog_store_amounts (element_id, store_id, amount) VALUES ($1, $2, $3)
-             ON CONFLICT (element_id, store_id) DO UPDATE SET amount = EXCLUDED.amount",
+            "INSERT INTO catalog_store_amounts (item_id, store_id, amount) VALUES ($1, $2, $3)
+             ON CONFLICT (item_id, store_id) DO UPDATE SET amount = EXCLUDED.amount",
         )
         .bind(element_id)
         .bind(store_id)
@@ -308,9 +310,9 @@ pub async fn save_purchase(
         .await?;
     }
     sqlx::query(
-        "INSERT INTO catalog_products (element_id, quantity, available, quantity_trace, can_buy_zero)
-         VALUES ($1, COALESCE($5, (SELECT COALESCE(sum(amount), 0) FROM catalog_store_amounts WHERE element_id = $1)), $2, $3, $4)
-         ON CONFLICT (element_id) DO UPDATE SET quantity = EXCLUDED.quantity, available = EXCLUDED.available,
+        "INSERT INTO catalog_products (item_id, quantity, available, quantity_trace, can_buy_zero)
+         VALUES ($1, COALESCE($5, (SELECT COALESCE(sum(amount), 0) FROM catalog_store_amounts WHERE item_id = $1)), $2, $3, $4)
+         ON CONFLICT (item_id) DO UPDATE SET quantity = EXCLUDED.quantity, available = EXCLUDED.available,
              quantity_trace = EXCLUDED.quantity_trace, can_buy_zero = EXCLUDED.can_buy_zero",
     )
     .bind(element_id)

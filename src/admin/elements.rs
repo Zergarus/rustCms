@@ -148,7 +148,7 @@ fn build_input(
     for prop in properties {
         let prop_enums: Vec<PropertyEnum> = enums
             .iter()
-            .filter(|e| e.property_id == prop.id)
+            .filter(|e| e.field_id == prop.id)
             .cloned()
             .collect();
         let raws = form.all(&format!("prop_{}", prop.code));
@@ -175,7 +175,7 @@ fn build_input(
         preview_picture_id,
         detail_picture_id,
         published_at,
-        properties: values,
+        field_values: values,
     })
 }
 
@@ -191,13 +191,13 @@ async fn check_references(
         .flatten()
         .collect();
     for prop in properties {
-        let Some(value) = input.properties.get(&prop.code) else {
+        let Some(value) = input.field_values.get(&prop.code) else {
             continue;
         };
         let ids = props::ids(value);
         match prop.kind.as_str() {
             "element" if !ids.is_empty() => {
-                let found = repo::element_names(&state.db, &ids, prop.link_iblock_id).await?;
+                let found = repo::element_names(&state.db, &ids, prop.link_collection_id).await?;
                 let missing: Vec<String> = ids
                     .iter()
                     .filter(|id| !found.iter().any(|(f, _)| f == *id))
@@ -250,7 +250,7 @@ fn element_to_form(element: &Element, properties: &[Property]) -> FormValues {
         form.set("published_at", dt.format(DATETIME_FORMAT).to_string());
     }
     for prop in properties {
-        if let Some(value) = element.properties.get(&prop.code) {
+        if let Some(value) = element.field_values.get(&prop.code) {
             form.0.insert(
                 format!("prop_{}", prop.code),
                 props::to_form_values(prop, value),
@@ -386,7 +386,7 @@ async fn purchase_to_form(
         }
     }
     let quantity: Option<f64> =
-        sqlx::query_scalar("SELECT quantity::float8 FROM catalog_products WHERE element_id = $1")
+        sqlx::query_scalar("SELECT quantity::float8 FROM catalog_products WHERE item_id = $1")
             .bind(element_id)
             .fetch_optional(&state.db)
             .await?;
@@ -394,7 +394,7 @@ async fn purchase_to_form(
         form.set("quantity", q.to_string());
     }
     let amounts: Vec<(i64, f64)> = sqlx::query_as(
-        "SELECT store_id, amount::float8 FROM catalog_store_amounts WHERE element_id = $1",
+        "SELECT store_id, amount::float8 FROM catalog_store_amounts WHERE item_id = $1",
     )
     .bind(element_id)
     .fetch_all(&state.db)
@@ -472,7 +472,7 @@ async fn render_form(
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter_map(|s| s.parse().ok())
                     .collect();
-                let names = repo::element_names(&state.db, &ids, prop.link_iblock_id).await?;
+                let names = repo::element_names(&state.db, &ids, prop.link_collection_id).await?;
                 linked.insert(key, names);
             }
             _ => {}
@@ -497,7 +497,7 @@ async fn render_form(
         .map(|p| {
             let items = enums
                 .iter()
-                .filter(|e| e.property_id == p.id)
+                .filter(|e| e.field_id == p.id)
                 .cloned()
                 .collect();
             (p.code.clone(), items)
@@ -618,7 +618,7 @@ pub async fn new_form(
         let defaults: Vec<String> = ctx
             .enums
             .iter()
-            .filter(|e| e.property_id == prop.id && e.is_default)
+            .filter(|e| e.field_id == prop.id && e.is_default)
             .map(|e| e.id.to_string())
             .collect();
         form.0.insert(format!("prop_{}", prop.code), defaults);
@@ -723,8 +723,8 @@ pub async fn edit_form(
     let element = repo::get_element(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    user.require_iblock(element.iblock_id, Level::Read)?;
-    let ctx = load_iblock(&state, element.iblock_id).await?;
+    user.require_iblock(element.collection_id, Level::Read)?;
+    let ctx = load_iblock(&state, element.collection_id).await?;
     let mut form = element_to_form(&element, &ctx.properties);
     if ctx.catalog.is_some() {
         purchase_to_form(&state, id, &mut form).await?;
@@ -741,8 +741,8 @@ pub async fn update(
     let element = repo::get_element(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    user.require_iblock(element.iblock_id, Level::Write)?;
-    let ctx = load_iblock(&state, element.iblock_id).await?;
+    user.require_iblock(element.collection_id, Level::Write)?;
+    let ctx = load_iblock(&state, element.collection_id).await?;
     save(&state, user, ctx, Some(id), multipart).await
 }
 
@@ -754,11 +754,11 @@ pub async fn delete(
     let element = repo::get_element(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    user.require_iblock(element.iblock_id, Level::Write)?;
-    let iblock_id = repo::delete_element(&state.db, id)
+    user.require_iblock(element.collection_id, Level::Write)?;
+    let collection_id = repo::delete_element(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let mut url = format!("/admin/iblocks/{iblock_id}/elements");
+    let mut url = format!("/admin/iblocks/{collection_id}/elements");
     if let Some(section) = element.section_id {
         url.push_str(&format!("?section={section}"));
     }
@@ -814,14 +814,14 @@ mod tests {
     fn prop(code: &str, kind: &str, required: bool) -> Property {
         Property {
             id: 1,
-            iblock_id: 1,
+            collection_id: 1,
             code: code.into(),
             name: code.into(),
             kind: kind.into(),
             is_required: required,
             sort: 500,
             multiple: false,
-            link_iblock_id: None,
+            link_collection_id: None,
             user_type: String::new(),
         }
     }
@@ -847,8 +847,8 @@ mod tests {
         .unwrap();
         assert_eq!(input.code, "pervaya-novost");
         assert!(input.active);
-        assert_eq!(input.properties["price"], serde_json::json!(99.5));
-        assert_eq!(input.properties["hot"], serde_json::json!(false));
+        assert_eq!(input.field_values["price"], serde_json::json!(99.5));
+        assert_eq!(input.field_values["hot"], serde_json::json!(false));
         assert!(input.published_at.is_some());
         assert_eq!(input.section_id, None);
     }

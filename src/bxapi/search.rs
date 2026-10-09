@@ -161,12 +161,14 @@ async fn find(
 
     let mut qb: QueryBuilder<Postgres> = {
         let mut qb = QueryBuilder::new(format!(
-            "SELECT {ROW_COLS} FROM iblock_elements e WHERE e.iblock_id = "
+            "SELECT {ROW_COLS} FROM collection_items e WHERE e.collection_id = "
         ));
         qb.push_bind(schema.iblock.id).push(" AND e.active");
         let mut haystack = String::from("e.name");
         for p in props.iter().filter(|p| is_valid_code(p)) {
-            haystack.push_str(&format!(" || ' ' || COALESCE(e.properties ->> '{p}', '')"));
+            haystack.push_str(&format!(
+                " || ' ' || COALESCE(e.field_values ->> '{p}', '')"
+            ));
         }
         for pattern in &patterns {
             qb.push(format!(" AND ({haystack}) ILIKE "))

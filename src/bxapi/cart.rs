@@ -176,11 +176,11 @@ pub(super) async fn product_views(
     let widths: Vec<u32> = config.image_width.into_iter().collect();
     let mut by_iblock: HashMap<i64, Vec<_>> = HashMap::new();
     for row in rows {
-        by_iblock.entry(row.iblock_id).or_default().push(row);
+        by_iblock.entry(row.collection_id).or_default().push(row);
     }
     let mut out = HashMap::new();
-    for (iblock_id, rows) in by_iblock {
-        let Some(schema) = snap.get(iblock_id).cloned() else {
+    for (collection_id, rows) in by_iblock {
+        let Some(schema) = snap.get(collection_id).cloned() else {
             continue;
         };
         let code = schema.iblock.code.clone();
@@ -353,10 +353,11 @@ pub async fn add_item(State(state): State<AppState>, jar: CookieJar, body: Bytes
         }
         AddTarget::New => {
             check_quantity(info, store_id, quantity).map_err(change_failed)?;
-            let name: String = sqlx::query_scalar("SELECT name FROM iblock_elements WHERE id = $1")
-                .bind(product_id)
-                .fetch_one(&state.db)
-                .await?;
+            let name: String =
+                sqlx::query_scalar("SELECT name FROM collection_items WHERE id = $1")
+                    .bind(product_id)
+                    .fetch_one(&state.db)
+                    .await?;
             repo::add(&state.db, buyer, product_id, store_id, quantity, &name).await?;
         }
     }

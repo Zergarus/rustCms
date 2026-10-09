@@ -68,7 +68,7 @@ pub struct PropertyForm {
     sort: String,
     multiple: Option<String>,
     #[serde(default)]
-    link_iblock_id: String,
+    link_collection_id: String,
 }
 
 impl PropertyForm {
@@ -86,7 +86,7 @@ impl PropertyForm {
         if multiple && !kind.multiple {
             return Err(format!("Тип «{}» не может быть множественным", kind.name));
         }
-        let link_iblock_id = match self.link_iblock_id.trim() {
+        let link_collection_id = match self.link_collection_id.trim() {
             "" => None,
             _ if kind.code != "element" => None,
             raw => Some(raw.parse().map_err(|_| "Неверный инфоблок привязки")?),
@@ -98,7 +98,7 @@ impl PropertyForm {
             is_required: self.is_required.is_some(),
             sort: parse_sort(&self.sort),
             multiple,
-            link_iblock_id,
+            link_collection_id,
         })
     }
 }
@@ -273,10 +273,10 @@ pub async fn delete_property(
     Path(id): Path<i64>,
 ) -> AppResult<Redirect> {
     user.require(IBLOCKS_MANAGE)?;
-    let iblock_id = repo::delete_property(&state.db, id)
+    let collection_id = repo::delete_property(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    Ok(Redirect::to(&format!("/admin/iblocks/{iblock_id}")))
+    Ok(Redirect::to(&format!("/admin/iblocks/{collection_id}")))
 }
 
 /// Страница свойства: основные настройки и (для списка) варианты значений.
@@ -288,7 +288,7 @@ async fn render_property(
     error: Option<String>,
     enum_error: Option<String>,
 ) -> AppResult<Html<String>> {
-    let iblock = repo::get_iblock(&state.db, property.iblock_id)
+    let iblock = repo::get_iblock(&state.db, property.collection_id)
         .await?
         .ok_or(AppError::NotFound)?;
     let form = form.unwrap_or_else(|| PropertyForm {
@@ -298,8 +298,8 @@ async fn render_property(
         is_required: property.is_required.then(|| "on".into()),
         sort: property.sort.to_string(),
         multiple: property.multiple.then(|| "on".into()),
-        link_iblock_id: property
-            .link_iblock_id
+        link_collection_id: property
+            .link_collection_id
             .map(|id| id.to_string())
             .unwrap_or_default(),
     });
@@ -349,7 +349,7 @@ pub async fn update_property(
     let error = match form.validate() {
         Ok(input) => {
             repo::update_property(&state.db, id, &input).await?;
-            let url = format!("/admin/iblocks/{}", property.iblock_id);
+            let url = format!("/admin/iblocks/{}", property.collection_id);
             return Ok(Redirect::to(&url).into_response());
         }
         Err(msg) => msg,
@@ -462,7 +462,7 @@ mod tests {
     fn enums_parsing() {
         let existing = [PropertyEnum {
             id: 7,
-            property_id: 1,
+            field_id: 1,
             value: "Б/у".into(),
             xml_id: "used".into(),
             sort: 100,
@@ -503,16 +503,16 @@ mod tests {
             name: "P".into(),
             kind: kind.into(),
             multiple: multiple.then(|| "on".into()),
-            link_iblock_id: "3".into(),
+            link_collection_id: "3".into(),
             ..Default::default()
         };
         assert!(form("boolean", true).validate().is_err());
         assert_eq!(
-            form("element", true).validate().unwrap().link_iblock_id,
+            form("element", true).validate().unwrap().link_collection_id,
             Some(3)
         );
         assert_eq!(
-            form("string", false).validate().unwrap().link_iblock_id,
+            form("string", false).validate().unwrap().link_collection_id,
             None
         );
     }

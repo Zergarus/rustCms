@@ -39,7 +39,7 @@ pub struct IblockSummary {
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct Property {
     pub id: i64,
-    pub iblock_id: i64,
+    pub collection_id: i64,
     pub code: String,
     pub name: String,
     pub kind: String,
@@ -47,7 +47,7 @@ pub struct Property {
     pub sort: i32,
     pub multiple: bool,
     /// Для привязки к элементу: инфоблок, из которого выбираются элементы.
-    pub link_iblock_id: Option<i64>,
+    pub link_collection_id: Option<i64>,
     /// `directory` — привязка по внешнему коду элемента (бывший справочник HL-блока).
     pub user_type: String,
 }
@@ -56,7 +56,7 @@ pub struct Property {
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct PropertyEnum {
     pub id: i64,
-    pub property_id: i64,
+    pub field_id: i64,
     pub value: String,
     pub xml_id: String,
     pub sort: i32,
@@ -66,7 +66,7 @@ pub struct PropertyEnum {
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct Section {
     pub id: i64,
-    pub iblock_id: i64,
+    pub collection_id: i64,
     pub parent_id: Option<i64>,
     pub code: String,
     pub xml_id: String,
@@ -95,7 +95,7 @@ pub struct SectionInput {
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct Element {
     pub id: i64,
-    pub iblock_id: i64,
+    pub collection_id: i64,
     pub section_id: Option<i64>,
     pub code: String,
     pub xml_id: String,
@@ -107,7 +107,7 @@ pub struct Element {
     pub preview_picture_id: Option<i64>,
     pub detail_picture_id: Option<i64>,
     pub published_at: Option<DateTime<Utc>>,
-    pub properties: Json<Map<String, Value>>,
+    pub field_values: Json<Map<String, Value>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -131,7 +131,7 @@ pub struct PropertyInput {
     pub is_required: bool,
     pub sort: i32,
     pub multiple: bool,
-    pub link_iblock_id: Option<i64>,
+    pub link_collection_id: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -147,7 +147,7 @@ pub struct ElementInput {
     pub preview_picture_id: Option<i64>,
     pub detail_picture_id: Option<i64>,
     pub published_at: Option<DateTime<Utc>>,
-    pub properties: Map<String, Value>,
+    pub field_values: Map<String, Value>,
 }
 
 /// Упорядочивает разделы деревом: родитель, затем его потомки (для списков и
@@ -288,7 +288,7 @@ mod tests {
     fn section(id: i64, parent_id: Option<i64>) -> Section {
         Section {
             id,
-            iblock_id: 1,
+            collection_id: 1,
             parent_id,
             code: String::new(),
             xml_id: String::new(),

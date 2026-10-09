@@ -110,11 +110,11 @@ fn section_to_form(section: &Section) -> FormValues {
     form
 }
 
-async fn load(state: &AppState, iblock_id: i64) -> AppResult<(Iblock, Vec<Section>)> {
-    let iblock = repo::get_iblock(&state.db, iblock_id)
+async fn load(state: &AppState, collection_id: i64) -> AppResult<(Iblock, Vec<Section>)> {
+    let iblock = repo::get_iblock(&state.db, collection_id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let sections = section_tree(repo::list_sections(&state.db, iblock_id).await?);
+    let sections = section_tree(repo::list_sections(&state.db, collection_id).await?);
     Ok((iblock, sections))
 }
 
@@ -231,8 +231,8 @@ pub async fn edit_form(
     let section = repo::get_section(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    user.require_iblock(section.iblock_id, Level::Write)?;
-    let (iblock, sections) = load(&state, section.iblock_id).await?;
+    user.require_iblock(section.collection_id, Level::Write)?;
+    let (iblock, sections) = load(&state, section.collection_id).await?;
     let form = section_to_form(&section);
     render_form(&state, user, iblock, sections, Some(id), form, None).await
 }
@@ -246,8 +246,8 @@ pub async fn update(
     let section = repo::get_section(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    user.require_iblock(section.iblock_id, Level::Write)?;
-    let (iblock, sections) = load(&state, section.iblock_id).await?;
+    user.require_iblock(section.collection_id, Level::Write)?;
+    let (iblock, sections) = load(&state, section.collection_id).await?;
     save(&state, user, iblock, sections, Some(id), multipart).await
 }
 
@@ -259,9 +259,9 @@ pub async fn delete(
     let section = repo::get_section(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    user.require_iblock(section.iblock_id, Level::Write)?;
+    user.require_iblock(section.collection_id, Level::Write)?;
     repo::delete_section(&state.db, id).await?;
-    let mut url = format!("/admin/iblocks/{}/elements", section.iblock_id);
+    let mut url = format!("/admin/iblocks/{}/elements", section.collection_id);
     if let Some(parent) = section.parent_id {
         url.push_str(&format!("?section={parent}"));
     }
@@ -276,7 +276,7 @@ mod tests {
     fn section(id: i64, parent_id: Option<i64>) -> Section {
         Section {
             id,
-            iblock_id: 1,
+            collection_id: 1,
             parent_id,
             code: String::new(),
             xml_id: String::new(),

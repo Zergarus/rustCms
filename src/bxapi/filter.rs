@@ -1,4 +1,4 @@
-//! Компиляция `filter` bxapi в SQL над `iblock_elements`.
+//! Компиляция `filter` bxapi в SQL над `collection_items`.
 //!
 //! Ключ фильтра — оператор + путь: `!@id`, `%name`, `relatedBrands.value`,
 //! `alwaysShow.item.value`, `autoModel.element.id`, `iblockSection.globalActive`.
@@ -29,7 +29,7 @@ pub struct Ctx<'a> {
     pub snap: &'a Snapshot,
     pub schema: &'a Schema,
     pub project: &'a Project,
-    /// SQL-алиас строки `iblock_elements`.
+    /// SQL-алиас строки `collection_items`.
     pub alias: String,
     pub depth: usize,
     /// Счётчик для уникальных алиасов вложенных подзапросов.
@@ -238,7 +238,7 @@ pub fn push_leaf(
         ["timestampX"] => push_column(qb, &format!("{a}.updated_at"), Ty::Ts, op, &values),
         ["activeFrom"] => push_column(qb, &format!("{a}.published_at"), Ty::Ts, op, &values),
         ["createdBy"] => push_column(qb, &format!("{a}.created_by"), Ty::Int, op, &values),
-        ["iblockId"] => push_column(qb, &format!("{a}.iblock_id"), Ty::Int, op, &values),
+        ["iblockId"] => push_column(qb, &format!("{a}.collection_id"), Ty::Int, op, &values),
         ["iblockSectionId"] => {
             // 0 и null — «без раздела»
             let no_section = values
@@ -547,7 +547,7 @@ fn push_column(
 /// Все значения свойства строки как массив JSONB (одиночное → массив из одного).
 fn prop_values_sql(alias: &str, code: &str) -> String {
     debug_assert!(is_valid_code(code));
-    let v = format!("{alias}.properties -> '{code}'");
+    let v = format!("{alias}.field_values -> '{code}'");
     format!(
         "(CASE WHEN jsonb_typeof({v}) = 'array' THEN {v} \
          WHEN jsonb_typeof({v}) IN ('string', 'number', 'boolean') THEN jsonb_build_array({v}) \
@@ -610,7 +610,7 @@ fn push_prop_related(
         ));
     }
     let linked = prop
-        .link_iblock_id
+        .link_collection_id
         .and_then(|id| ctx.snap.get(id))
         .ok_or_else(|| {
             BxError::new(
@@ -624,7 +624,7 @@ fn push_prop_related(
     let value = Value::Array(values.to_vec());
     push_exists(qb, ctx, prop, negative, |qb, x| {
         qb.push(format!(
-            "({x} #>> '{{}}') IN (SELECT {le}.id::text FROM iblock_elements {le} WHERE {le}.iblock_id = "
+            "({x} #>> '{{}}') IN (SELECT {le}.id::text FROM collection_items {le} WHERE {le}.collection_id = "
         ));
         qb.push_bind(linked.iblock.id).push(" AND ");
         push_leaf(qb, &nested, key, &value)?;
@@ -713,7 +713,7 @@ fn directory_field(ctx: &Ctx, prop: &Property, field: &str) -> Option<String> {
     if field == "ufXmlId" {
         return Some("xmlId".into());
     }
-    let linked = ctx.snap.get(prop.link_iblock_id?)?;
+    let linked = ctx.snap.get(prop.link_collection_id?)?;
     if linked.prop(&to_snake(field)).is_some() {
         return Some(field.to_string());
     }
@@ -833,7 +833,7 @@ pub fn push_order(
             "createdBy" => format!("{a}.created_by"),
             "sectionCode" => {
                 format!(
-                    "(SELECT s.code FROM iblock_sections s WHERE s.id = {a}.section_id) COLLATE \"ru-x-icu\""
+                    "(SELECT s.code FROM collection_sections s WHERE s.id = {a}.section_id) COLLATE \"ru-x-icu\""
                 )
             }
             other => {
@@ -846,9 +846,12 @@ pub fn push_order(
                         BxError::new("invalid_order", format!("Unknown order field: {other}"))
                     })?;
                 if prop.kind == "number" {
-                    format!("({a}.properties -> '{}')", prop.code)
+                    format!("({a}.field_values -> '{}')", prop.code)
                 } else {
-                    format!("({a}.properties ->> '{}') COLLATE \"ru-x-icu\"", prop.code)
+                    format!(
+                        "({a}.field_values ->> '{}') COLLATE \"ru-x-icu\"",
+                        prop.code
+                    )
                 }
             }
         };

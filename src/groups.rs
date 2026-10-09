@@ -64,10 +64,10 @@ pub async fn permissions(db: &PgPool, id: i64) -> sqlx::Result<Vec<String>> {
     Ok(rows.into_iter().map(|(p,)| p).collect())
 }
 
-/// Уровни доступа группы по инфоблокам: iblock_id → "read" | "write".
+/// Уровни доступа группы по инфоблокам: collection_id → "read" | "write".
 pub async fn iblock_levels(db: &PgPool, id: i64) -> sqlx::Result<HashMap<String, String>> {
     let rows: Vec<(i64, String)> =
-        sqlx::query_as("SELECT iblock_id, level FROM iblock_group_access WHERE group_id = $1")
+        sqlx::query_as("SELECT collection_id, level FROM collection_access WHERE group_id = $1")
             .bind(id)
             .fetch_all(db)
             .await?;
@@ -137,20 +137,20 @@ pub async fn save(db: &PgPool, id: Option<i64>, input: &GroupInput) -> sqlx::Res
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("DELETE FROM iblock_group_access WHERE group_id = $1")
+    sqlx::query("DELETE FROM collection_access WHERE group_id = $1")
         .bind(id)
         .execute(&mut *tx)
         .await?;
     let (iblock_ids, levels): (Vec<i64>, Vec<&str>) = input
         .iblock_levels
         .iter()
-        .filter_map(|(iblock_id, level)| level.as_db().map(|l| (*iblock_id, l)))
+        .filter_map(|(collection_id, level)| level.as_db().map(|l| (*collection_id, l)))
         .unzip();
     sqlx::query(
-        "INSERT INTO iblock_group_access (group_id, iblock_id, level)
+        "INSERT INTO collection_access (group_id, collection_id, level)
          SELECT $1, i.id, l.level
-         FROM unnest($2::bigint[], $3::text[]) AS l(iblock_id, level)
-         JOIN iblocks i ON i.id = l.iblock_id",
+         FROM unnest($2::bigint[], $3::text[]) AS l(collection_id, level)
+         JOIN collections i ON i.id = l.collection_id",
     )
     .bind(id)
     .bind(&iblock_ids)

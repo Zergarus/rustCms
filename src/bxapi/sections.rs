@@ -137,7 +137,7 @@ async fn sections_with_elements(
         let counter = Cell::new(0);
         let ctx = Ctx::root(snap, schema, &state.project, &counter);
         let mut qb = QueryBuilder::new(
-            "SELECT DISTINCT e.section_id FROM iblock_elements e WHERE e.section_id IS NOT NULL AND e.iblock_id = ",
+            "SELECT DISTINCT e.section_id FROM collection_items e WHERE e.section_id IS NOT NULL AND e.collection_id = ",
         );
         qb.push_bind(schema.iblock.id).push(" AND ");
         push_filter(&mut qb, &ctx, &filter)?;

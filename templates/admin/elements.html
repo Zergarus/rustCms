@@ -14,7 +14,7 @@
   <h1>{% if current %}{{ current.name }}{% else %}{{ iblock.name }}{% endif %} <span class="muted count">{{ total }}</span></h1>
   <div class="head-actions">
     {% if current and can_write %}<a class="btn" href="/admin/sections/{{ current.id }}">Изменить раздел</a>{% endif %}
-    {% if not current and "iblocks.manage" in user.permissions %}<a class="btn" href="/admin/iblocks/{{ iblock.id }}">Настройки</a>{% endif %}
+    {% if not current and "collections.manage" in user.permissions %}<a class="btn" href="/admin/iblocks/{{ iblock.id }}">Настройки</a>{% endif %}
     {% if can_write %}
     <a class="btn" href="/admin/iblocks/{{ iblock.id }}/sections/new{% if current %}?parent={{ current.id }}{% endif %}">Добавить раздел</a>
     <a class="btn primary" href="/admin/iblocks/{{ iblock.id }}/elements/new{% if current %}?section={{ current.id }}{% endif %}">Добавить элемент</a>

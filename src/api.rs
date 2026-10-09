@@ -161,11 +161,11 @@ async fn list_elements(
     }
 
     let push_where = |qb: &mut QueryBuilder<Postgres>| {
-        qb.push(" FROM iblock_elements WHERE iblock_id = ")
+        qb.push(" FROM collection_items WHERE collection_id = ")
             .push_bind(iblock.id)
             .push(" AND active AND (published_at IS NULL OR published_at <= now())");
         for (prop, value) in &prop_filters {
-            qb.push(" AND properties ->> ")
+            qb.push(" AND field_values ->> ")
                 .push_bind(prop.clone())
                 .push(" = ")
                 .push_bind(value.clone());
@@ -177,7 +177,7 @@ async fn list_elements(
     let (total,): (i64,) = count_qb.build_query_as().fetch_one(&state.db).await?;
 
     let mut qb = QueryBuilder::new(
-        "SELECT id, code, name, sort, preview_text, detail_text, published_at, properties, \
+        "SELECT id, code, name, sort, preview_text, detail_text, published_at, field_values AS properties, \
          created_at, updated_at",
     );
     push_where(&mut qb);
@@ -204,10 +204,10 @@ async fn get_element(
 ) -> AppResult<Json<ApiElement>> {
     let iblock = public_iblock(&state, &iblock_code).await?;
     let element: ApiElement = sqlx::query_as(
-        "SELECT id, code, name, sort, preview_text, detail_text, published_at, properties,
+        "SELECT id, code, name, sort, preview_text, detail_text, published_at, field_values AS properties,
                 created_at, updated_at
-         FROM iblock_elements
-         WHERE iblock_id = $1 AND code = $2 AND active
+         FROM collection_items
+         WHERE collection_id = $1 AND code = $2 AND active
            AND (published_at IS NULL OR published_at <= now())",
     )
     .bind(iblock.id)

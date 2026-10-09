@@ -240,7 +240,7 @@ pub async fn save_composition(
             return Ok(Err(format!("Товар {} не найден", line.element_id)));
         };
         line.price = main_price(&product.prices).map_or(0.0, |p| p.price);
-        line.name = sqlx::query_scalar("SELECT name FROM iblock_elements WHERE id = $1")
+        line.name = sqlx::query_scalar("SELECT name FROM collection_items WHERE id = $1")
             .bind(line.element_id)
             .fetch_one(&mut *tx)
             .await?;
@@ -294,7 +294,7 @@ pub async fn save_composition(
             }
             None => {
                 sqlx::query(
-                    "INSERT INTO cart_items (buyer_id, element_id, store_id, quantity, name, price,
+                    "INSERT INTO cart_items (buyer_id, item_id, store_id, quantity, name, price,
                                              currency, order_id, custom_price)
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)",
                 )

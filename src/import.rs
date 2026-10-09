@@ -65,14 +65,14 @@ struct IblockRow {
 
 struct PropertyRow {
     id: i64,
-    iblock_id: i64,
+    collection_id: i64,
     code: String,
     name: String,
     kind: &'static str,
     multiple: bool,
     is_required: bool,
     sort: i32,
-    link_iblock_id: Option<i64>,
+    link_collection_id: Option<i64>,
     /// Справочник: значения — UF_XML_ID строк HL-блока, их надо превратить в id элементов.
     directory: bool,
     /// USER_TYPE свойства Битрикса (`directory`, `UserID`, `DateTime`...).
@@ -90,7 +90,7 @@ struct EnumRow {
 
 struct SectionRow {
     id: i64,
-    iblock_id: i64,
+    collection_id: i64,
     parent_id: Option<i64>,
     code: String,
     xml_id: String,
@@ -106,7 +106,7 @@ struct SectionRow {
 
 struct ElementRow {
     id: i64,
-    iblock_id: i64,
+    collection_id: i64,
     section_id: Option<i64>,
     code: String,
     xml_id: String,
@@ -311,7 +311,7 @@ struct Catalog {
 
 pub async fn run(db: &PgPool, opts: Options) -> anyhow::Result<()> {
     let started = Instant::now();
-    let (existing,): (i64,) = sqlx::query_as("SELECT count(*) FROM iblocks")
+    let (existing,): (i64,) = sqlx::query_as("SELECT count(*) FROM collections")
         .fetch_one(db)
         .await?;
     if existing > 0 && !opts.replace {
@@ -346,7 +346,9 @@ pub async fn run(db: &PgPool, opts: Options) -> anyhow::Result<()> {
 
     let mut tx = db.begin().await?;
     if opts.replace {
-        sqlx::query("DELETE FROM iblocks").execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM collections")
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM files WHERE source = 'bitrix' OR path LIKE 'bitrix/%'")
             .execute(&mut *tx)
             .await?;
@@ -487,20 +489,20 @@ async fn read_iblocks(
     let mut used: HashSet<(i64, String)> = HashSet::new();
     for row in rows {
         let id = int_col(&row, 0).context("b_iblock_property.ID")?;
-        let iblock_id = int_col(&row, 1).unwrap_or_default();
+        let collection_id = int_col(&row, 1).unwrap_or_default();
         let mut code = clean_code(&str_col(&row, 2), format!("property_{id}"));
-        if !used.insert((iblock_id, code.clone())) {
+        if !used.insert((collection_id, code.clone())) {
             code = format!("{code}_{id}");
-            used.insert((iblock_id, code.clone()));
+            used.insert((collection_id, code.clone()));
         }
         let (ptype, user_type) = (str_col(&row, 4), str_col(&row, 5));
-        let mut link_iblock_id = id_col(&row, 9);
+        let mut link_collection_id = id_col(&row, 9);
         let mut directory = false;
         let kind = match (ptype.as_str(), user_type.as_str()) {
             ("S", "directory") => {
                 // Привязка к HL-блоку по имени таблицы из настроек свойства
                 let settings = str_col(&row, 10);
-                link_iblock_id = hl_tables
+                link_collection_id = hl_tables
                     .iter()
                     .find(|(table, _)| settings.contains(&format!("\"{table}\"")))
                     .map(|(_, hl_id)| HL_IBLOCK_ID_BASE + hl_id);
@@ -516,18 +518,18 @@ async fn read_iblocks(
             _ => "string",
         };
         if kind != "element" {
-            link_iblock_id = None;
+            link_collection_id = None;
         }
         data.properties.push(PropertyRow {
             id,
-            iblock_id,
+            collection_id,
             code,
             name: str_col(&row, 3),
             kind,
             multiple: str_col(&row, 6) == "Y",
             is_required: str_col(&row, 7) == "Y",
             sort: int_col(&row, 8).unwrap_or(500) as i32,
-            link_iblock_id,
+            link_collection_id,
             directory,
             user_type,
         });
@@ -596,9 +598,9 @@ async fn read_hlblocks(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
     for row in rows {
         let hl_id = int_col(&row, 0).context("b_hlblock_entity.ID")?;
         let (name, table) = (str_col(&row, 1), str_col(&row, 2));
-        let iblock_id = HL_IBLOCK_ID_BASE + hl_id;
+        let collection_id = HL_IBLOCK_ID_BASE + hl_id;
         data.iblocks.push(IblockRow {
-            id: iblock_id,
+            id: collection_id,
             api_enabled: false,
             code: clean_code(table.trim_start_matches("b_"), format!("hl_{hl_id}")),
             name: format!("{name} (HL)"),
@@ -648,14 +650,14 @@ async fn read_hlblocks(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
             };
             data.properties.push(PropertyRow {
                 id: next_property_id,
-                iblock_id,
+                collection_id,
                 code: field.to_ascii_lowercase(),
                 name: field.clone(),
                 kind,
                 multiple: *multiple && kind != "boolean",
                 is_required: false,
                 sort: *sort,
-                link_iblock_id: None,
+                link_collection_id: None,
                 directory: false,
                 user_type: String::new(),
             });
@@ -701,7 +703,7 @@ async fn read_hlblocks(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
             let now = Utc::now();
             data.elements.push(ElementRow {
                 id: next_element_id,
-                iblock_id,
+                collection_id,
                 section_id: None,
                 code: String::new(),
                 xml_id: value("UF_XML_ID"),
@@ -745,7 +747,7 @@ async fn read_sections(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
         let updated_at = bitrix_date(&str_col(&row, 12)).unwrap_or_else(Utc::now);
         data.sections.push(SectionRow {
             id,
-            iblock_id: int_col(&row, 1).unwrap_or_default(),
+            collection_id: int_col(&row, 1).unwrap_or_default(),
             parent_id: id_col(&row, 2),
             code: if code.is_empty() || is_valid_slug(&code) {
                 code
@@ -785,20 +787,20 @@ async fn read_elements(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
     let mut used: HashSet<(i64, String)> = HashSet::new();
     for row in rows {
         let id = int_col(&row, 0).context("b_iblock_element.ID")?;
-        let iblock_id = int_col(&row, 1).unwrap_or_default();
+        let collection_id = int_col(&row, 1).unwrap_or_default();
         let mut code = str_col(&row, 3);
         if !code.is_empty() && !is_valid_slug(&code) {
             code = slugify(&code);
         }
         // Коды в Битриксе не обязаны быть уникальными, у нас непустой — уникален
-        if !code.is_empty() && !used.insert((iblock_id, code.clone())) {
+        if !code.is_empty() && !used.insert((collection_id, code.clone())) {
             code = format!("{code}-{id}");
-            used.insert((iblock_id, code.clone()));
+            used.insert((collection_id, code.clone()));
         }
         let updated_at = bitrix_date(&str_col(&row, 14)).unwrap_or_else(Utc::now);
         data.elements.push(ElementRow {
             id,
-            iblock_id,
+            collection_id,
             section_id: id_col(&row, 2),
             code,
             xml_id: str_col(&row, 4),
@@ -859,12 +861,12 @@ async fn read_property_values(my: &MySqlPool, data: &mut Data) -> anyhow::Result
         sqlx::query_scalar("SELECT CAST(ID AS SIGNED) FROM b_iblock WHERE VERSION = 2 ORDER BY ID")
             .fetch_all(my)
             .await?;
-    for iblock_id in v2_iblocks {
+    for collection_id in v2_iblocks {
         // В s-таблице у множественных свойств лежит сериализованный кеш — берём только одиночные
         let singles: Vec<i64> = data
             .properties
             .iter()
-            .filter(|p| p.iblock_id == iblock_id && !p.multiple)
+            .filter(|p| p.collection_id == collection_id && !p.multiple)
             .map(|p| p.id)
             .collect();
         if !singles.is_empty() {
@@ -873,7 +875,7 @@ async fn read_property_values(my: &MySqlPool, data: &mut Data) -> anyhow::Result
                 .map(|id| format!("CAST(PROPERTY_{id} AS CHAR)"))
                 .collect();
             let sql = format!(
-                "SELECT CAST(IBLOCK_ELEMENT_ID AS SIGNED), {} FROM b_iblock_element_prop_s{iblock_id}",
+                "SELECT CAST(IBLOCK_ELEMENT_ID AS SIGNED), {} FROM b_iblock_element_prop_s{collection_id}",
                 columns.join(", ")
             );
             let rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(my).await?;
@@ -886,7 +888,7 @@ async fn read_property_values(my: &MySqlPool, data: &mut Data) -> anyhow::Result
         }
         let sql = format!(
             "SELECT CAST(IBLOCK_ELEMENT_ID AS SIGNED), CAST(IBLOCK_PROPERTY_ID AS SIGNED), CAST(VALUE AS CHAR)
-             FROM b_iblock_element_prop_m{iblock_id} ORDER BY ID"
+             FROM b_iblock_element_prop_m{collection_id} ORDER BY ID"
         );
         let rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(my).await?;
         for row in rows {
@@ -1778,7 +1780,7 @@ fn resolve_properties(data: &mut Data) -> Props {
         .elements
         .iter()
         .filter(|e| !e.xml_id.is_empty())
-        .map(|e| ((e.iblock_id, e.xml_id.as_str()), e.id))
+        .map(|e| ((e.collection_id, e.xml_id.as_str()), e.id))
         .collect();
 
     let mut out = Props::new();
@@ -1787,7 +1789,7 @@ fn resolve_properties(data: &mut Data) -> Props {
         for prop in data
             .properties
             .iter()
-            .filter(|p| p.iblock_id == element.iblock_id)
+            .filter(|p| p.collection_id == element.collection_id)
         {
             let raws = element.raw.get(&prop.id).map(Vec::as_slice).unwrap_or(&[]);
             let items: Vec<Value> = raws
@@ -1801,7 +1803,7 @@ fn resolve_properties(data: &mut Data) -> Props {
                         "list" => id().filter(|i| enum_ids.contains(i)).map(Value::from),
                         "file" => id().filter(|i| file_ids.contains(i)).map(Value::from),
                         "element" if prop.directory => prop
-                            .link_iblock_id
+                            .link_collection_id
                             .and_then(|ib| by_xml_id.get(&(ib, raw)))
                             .map(|i| Value::from(*i)),
                         "element" => id().filter(|i| element_ids.contains(i)).map(Value::from),
@@ -1834,7 +1836,7 @@ fn resolve_properties(data: &mut Data) -> Props {
     }
     let iblock_ids: HashSet<i64> = data.iblocks.iter().map(|i| i.id).collect();
     for p in &mut data.properties {
-        p.link_iblock_id = p.link_iblock_id.filter(|id| iblock_ids.contains(id));
+        p.link_collection_id = p.link_collection_id.filter(|id| iblock_ids.contains(id));
     }
     out
 }
@@ -1927,7 +1929,7 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
 
     for chunk in data.iblocks.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO iblocks (id, code, name, description, api_enabled, sort, detail_page_url,
+            "INSERT INTO collections (id, code, name, description, api_enabled, sort, detail_page_url,
                                   section_page_url, list_page_url, is_catalog) ",
         );
         qb.push_values(chunk, |mut b, i| {
@@ -1947,20 +1949,20 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
 
     for chunk in data.properties.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO iblock_properties
-                (id, iblock_id, code, name, kind, is_required, sort, multiple, link_iblock_id,
+            "INSERT INTO collection_fields
+                (id, collection_id, code, name, kind, is_required, sort, multiple, link_collection_id,
                  user_type) ",
         );
         qb.push_values(chunk, |mut b, p| {
             b.push_bind(p.id)
-                .push_bind(p.iblock_id)
+                .push_bind(p.collection_id)
                 .push_bind(&p.code)
                 .push_bind(&p.name)
                 .push_bind(p.kind)
                 .push_bind(p.is_required)
                 .push_bind(p.sort)
                 .push_bind(p.multiple)
-                .push_bind(p.link_iblock_id)
+                .push_bind(p.link_collection_id)
                 .push_bind(&p.user_type);
         });
         qb.build().execute(&mut *tx).await?;
@@ -1968,7 +1970,7 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
 
     for chunk in data.enums.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO iblock_property_enums (id, property_id, value, xml_id, sort, is_default) ",
+            "INSERT INTO collection_field_options (id, field_id, value, xml_id, sort, is_default) ",
         );
         qb.push_values(chunk, |mut b, e| {
             b.push_bind(e.id)
@@ -1984,13 +1986,13 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
     // Разделы отсортированы по глубине — родитель всегда вставлен раньше потомка
     for chunk in data.sections.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO iblock_sections
-                (id, iblock_id, parent_id, code, xml_id, name, active, sort, depth_level,
+            "INSERT INTO collection_sections
+                (id, collection_id, parent_id, code, xml_id, name, active, sort, depth_level,
                  description, picture_id, created_at, updated_at) ",
         );
         qb.push_values(chunk, |mut b, s| {
             b.push_bind(s.id)
-                .push_bind(s.iblock_id)
+                .push_bind(s.collection_id)
                 .push_bind(s.parent_id)
                 .push_bind(&s.code)
                 .push_bind(&s.xml_id)
@@ -2013,14 +2015,14 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
     let empty = Map::new();
     for chunk in data.elements.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO iblock_elements
-                (id, iblock_id, section_id, code, xml_id, name, active, sort, preview_text,
-                 detail_text, preview_picture_id, detail_picture_id, published_at, properties,
+            "INSERT INTO collection_items
+                (id, collection_id, section_id, code, xml_id, name, active, sort, preview_text,
+                 detail_text, preview_picture_id, detail_picture_id, published_at, field_values,
                  created_at, updated_at, created_by) ",
         );
         qb.push_values(chunk, |mut b, e| {
             b.push_bind(e.id)
-                .push_bind(e.iblock_id)
+                .push_bind(e.collection_id)
                 .push_bind(e.section_id)
                 .push_bind(&e.code)
                 .push_bind(&e.xml_id)
@@ -2046,11 +2048,14 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
     // Последовательности — после максимальных перенесённых id
     for (table, seq) in [
         ("files", "files_id_seq"),
-        ("iblocks", "iblocks_id_seq"),
-        ("iblock_properties", "iblock_properties_id_seq"),
-        ("iblock_property_enums", "iblock_property_enums_id_seq"),
-        ("iblock_sections", "iblock_sections_id_seq"),
-        ("iblock_elements", "iblock_elements_id_seq"),
+        ("collections", "collections_id_seq"),
+        ("collection_fields", "collection_fields_id_seq"),
+        (
+            "collection_field_options",
+            "collection_field_options_id_seq",
+        ),
+        ("collection_sections", "collection_sections_id_seq"),
+        ("collection_items", "collection_items_id_seq"),
         ("catalog_price_types", "catalog_price_types_id_seq"),
         ("catalog_prices", "catalog_prices_id_seq"),
         ("catalog_stores", "catalog_stores_id_seq"),
@@ -2521,7 +2526,7 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
     for chunk in c.prices.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
             "INSERT INTO catalog_prices
-                (element_id, price_type_id, price, currency, quantity_from, quantity_to) ",
+                (item_id, price_type_id, price, currency, quantity_from, quantity_to) ",
         );
         qb.push_values(chunk, |mut b, (el, pt, price, cur, from, to)| {
             b.push_bind(el)
@@ -2563,7 +2568,7 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
     }
     for chunk in c.amounts.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO catalog_store_amounts (element_id, store_id, amount) ",
+            "INSERT INTO catalog_store_amounts (item_id, store_id, amount) ",
         );
         qb.push_values(chunk, |mut b, (el, store, amount)| {
             b.push_bind(el).push_bind(store).push_bind(amount);
@@ -2573,7 +2578,7 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
     }
     for chunk in c.products.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO catalog_products (element_id, quantity, available, quantity_trace, can_buy_zero) ",
+            "INSERT INTO catalog_products (item_id, quantity, available, quantity_trace, can_buy_zero) ",
         );
         qb.push_values(chunk, |mut b, p| {
             b.push_bind(p.element_id)
@@ -2604,6 +2609,104 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Минимальный перенос контента: инфоблок, свойство-список с вариантом, раздел, элемент.
+    #[sqlx::test]
+    async fn import_writes_collections(db: PgPool) {
+        let now = Utc::now();
+        let mut data = Data::default();
+        data.iblocks.push(IblockRow {
+            id: 5,
+            api_enabled: true,
+            code: "news".into(),
+            name: "Новости".into(),
+            description: String::new(),
+            sort: 500,
+            detail_page_url: String::new(),
+            section_page_url: String::new(),
+            list_page_url: String::new(),
+            is_catalog: false,
+        });
+        data.properties.push(PropertyRow {
+            id: 7,
+            collection_id: 5,
+            code: "color".into(),
+            name: "Цвет".into(),
+            kind: "list",
+            multiple: false,
+            is_required: false,
+            sort: 500,
+            link_collection_id: None,
+            directory: false,
+            user_type: String::new(),
+        });
+        data.enums.push(EnumRow {
+            id: 9,
+            property_id: 7,
+            value: "Красный".into(),
+            xml_id: "red".into(),
+            sort: 500,
+            is_default: false,
+        });
+        data.sections.push(SectionRow {
+            id: 3,
+            collection_id: 5,
+            parent_id: None,
+            code: "a".into(),
+            xml_id: String::new(),
+            name: "Раздел".into(),
+            active: true,
+            sort: 500,
+            depth_level: 1,
+            description: String::new(),
+            picture_id: None,
+            created_at: now,
+            updated_at: now,
+        });
+        data.elements.push(ElementRow {
+            id: 11,
+            collection_id: 5,
+            section_id: Some(3),
+            code: "n".into(),
+            xml_id: String::new(),
+            name: "Новость".into(),
+            active: true,
+            sort: 500,
+            preview_text: String::new(),
+            detail_text: String::new(),
+            preview_picture_id: None,
+            detail_picture_id: None,
+            published_at: None,
+            created_by: None,
+            raw: HashMap::from([(7, vec!["9".to_string()])]),
+            created_at: now,
+            updated_at: now,
+        });
+        let props = resolve_properties(&mut data);
+        let mut tx = db.begin().await.unwrap();
+        write_all(&mut tx, &data, &props).await.unwrap();
+        tx.commit().await.unwrap();
+        for table in [
+            "collections",
+            "collection_fields",
+            "collection_field_options",
+            "collection_sections",
+            "collection_items",
+        ] {
+            let n: i64 =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(n, 1, "{table}");
+        }
+        let values: Value =
+            sqlx::query_scalar("SELECT field_values FROM collection_items WHERE id = 11")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(values, serde_json::json!({"color": 9}));
+    }
 
     #[sqlx::test]
     async fn pay_system_with_unmapped_groups_is_disabled(db: PgPool) {

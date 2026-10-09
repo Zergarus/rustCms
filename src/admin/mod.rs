@@ -342,8 +342,8 @@ async fn dashboard(
     Extension(user): Extension<Access>,
 ) -> AppResult<Html<String>> {
     let (iblocks, elements, users): (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM iblocks),
-                (SELECT count(*) FROM iblock_elements),
+        "SELECT (SELECT count(*) FROM collections),
+                (SELECT count(*) FROM collection_items),
                 (SELECT count(*) FROM users)",
     )
     .fetch_one(&state.db)

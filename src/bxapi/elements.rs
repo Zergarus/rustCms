@@ -73,7 +73,7 @@ fn iblock_json(snap: &Snapshot, schema: &Schema) -> Value {
                 item.insert("userType".into(), json!(p.user_type));
             }
             if p.kind == "element" && p.user_type.is_empty() {
-                item.insert("linkIblockId".into(), json!(p.link_iblock_id.unwrap_or(0)));
+                item.insert("linkIblockId".into(), json!(p.link_collection_id.unwrap_or(0)));
             }
             if p.kind == "list" {
                 let values: Vec<Value> = snap
@@ -124,7 +124,7 @@ pub fn build_list_query(
     let counter = Cell::new(0);
     let ctx = Ctx::root(snap, schema, &state.project, &counter);
     let mut qb = QueryBuilder::new(format!(
-        "SELECT {ROW_COLS} FROM iblock_elements e WHERE e.iblock_id = "
+        "SELECT {ROW_COLS} FROM collection_items e WHERE e.collection_id = "
     ));
     qb.push_bind(schema.iblock.id).push(" AND ");
     push_filter(&mut qb, &ctx, &req.filter)?;
@@ -161,7 +161,7 @@ pub async fn detail(
     let (snap, schema) = schema_for(state, api_code).await?;
     let select = Select::parse(body.get("select"), &state.project, &schema.iblock.code);
     let resize = image_resize(body.get("imageResize"));
-    let sql = format!("SELECT {ROW_COLS} FROM iblock_elements e WHERE e.iblock_id = $1 AND ");
+    let sql = format!("SELECT {ROW_COLS} FROM collection_items e WHERE e.collection_id = $1 AND ");
     let row: Option<Row> = match key {
         Key::Id(id) => {
             sqlx::query_as(sqlx::AssertSqlSafe(format!("{sql} e.id = $2")))

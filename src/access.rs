@@ -14,7 +14,7 @@ use crate::{
 };
 
 pub const ADMIN_ACCESS: &str = "admin.access";
-pub const IBLOCKS_MANAGE: &str = "iblocks.manage";
+pub const IBLOCKS_MANAGE: &str = "collections.manage";
 pub const USERS_MANAGE: &str = "users.manage";
 pub const SHOP_MANAGE: &str = "shop.manage";
 pub const ORDERS_MANAGE: &str = "orders.manage";
@@ -118,8 +118,8 @@ impl Access {
         .fetch_all(db)
         .await?;
         let levels: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT a.iblock_id, a.level
-             FROM iblock_group_access a JOIN user_groups ug ON ug.group_id = a.group_id
+            "SELECT a.collection_id, a.level
+             FROM collection_access a JOIN user_groups ug ON ug.group_id = a.group_id
              WHERE ug.user_id = $1",
         )
         .bind(user.id)
@@ -128,10 +128,10 @@ impl Access {
 
         let permissions: BTreeSet<String> = permissions.into_iter().map(|(p,)| p).collect();
         let mut iblock_levels = HashMap::new();
-        for (iblock_id, level) in levels {
+        for (collection_id, level) in levels {
             // из нескольких групп берётся максимальный уровень
             let level = Level::from_db(&level);
-            let entry = iblock_levels.entry(iblock_id).or_insert(Level::None);
+            let entry = iblock_levels.entry(collection_id).or_insert(Level::None);
             *entry = (*entry).max(level);
         }
         let can_see_iblocks = permissions.contains(IBLOCKS_MANAGE)
@@ -157,12 +157,12 @@ impl Access {
         self.user.active && self.can(ADMIN_ACCESS)
     }
 
-    pub fn iblock_level(&self, iblock_id: i64) -> Level {
+    pub fn iblock_level(&self, collection_id: i64) -> Level {
         if self.can(IBLOCKS_MANAGE) {
             Level::Write
         } else {
             self.iblock_levels
-                .get(&iblock_id)
+                .get(&collection_id)
                 .copied()
                 .unwrap_or(Level::None)
         }
@@ -184,8 +184,8 @@ impl Access {
         }
     }
 
-    pub fn require_iblock(&self, iblock_id: i64, level: Level) -> AppResult<()> {
-        if self.iblock_level(iblock_id) >= level {
+    pub fn require_iblock(&self, collection_id: i64, level: Level) -> AppResult<()> {
+        if self.iblock_level(collection_id) >= level {
             Ok(())
         } else {
             Err(AppError::Forbidden)

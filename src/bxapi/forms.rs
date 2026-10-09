@@ -154,7 +154,7 @@ async fn write_element(
         name = format!("Заявка от {}", chrono::Utc::now().format("%d.%m.%Y %H:%M"));
     }
     let (id,): (i64,) = sqlx::query_as(
-        "INSERT INTO iblock_elements (iblock_id, code, name, preview_text, detail_text, properties)
+        "INSERT INTO collection_items (collection_id, code, name, preview_text, detail_text, field_values)
          VALUES ($1, '', $2, $3, $4, $5) RETURNING id",
     )
     .bind(schema.iblock.id)
@@ -252,14 +252,14 @@ mod tests {
     fn list_values() {
         let prop = Property {
             id: 1,
-            iblock_id: 1,
+            collection_id: 1,
             code: "consent".into(),
             name: "Согласие".into(),
             kind: "list".into(),
             is_required: false,
             sort: 500,
             multiple: false,
-            link_iblock_id: None,
+            link_collection_id: None,
             user_type: String::new(),
         };
         let enums = vec![(759, "Y".to_string(), "Да".to_string())];
