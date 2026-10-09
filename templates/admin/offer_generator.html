@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% set section = "collections" %}
+{% block title %}Генератор предложений{% endblock %}
+
+{% block content %}
+<div class="breadcrumbs">
+  <a href="/admin/collections">Коллекции</a> /
+  <a href="/admin/collections/{{ product_collection.id }}/items">{{ product_collection.name }}</a> /
+  <a href="/admin/items/{{ product.id }}#offers">{{ product.name }}</a> /
+</div>
+<h1>Генератор предложений</h1>
+
+<form class="card form" method="post" action="/admin/items/{{ product.id }}/offers/generate">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <p class="muted">Отметьте значения полей выбора: для каждого сочетания будет создано предложение. Сочетания, которые уже есть у товара, пропускаются. За один раз можно создать не больше 100 предложений.</p>
+
+  {% for a in axes %}
+  <fieldset>
+    <legend>{{ a.name }}</legend>
+    {% if a.text %}
+    <label>Значения через запятую
+      <input name="axis_{{ a.code }}" value="{{ a.typed }}" placeholder="1 л, 4 л">
+    </label>
+    {% else %}
+    <div class="grid-3">
+      {% for c in a.choices %}
+      <label class="check"><input type="checkbox" name="axis_{{ a.code }}" value="{{ c.value }}" {% if c.checked %}checked{% endif %}> {{ c.label }}</label>
+      {% endfor %}
+    </div>
+    {% if not a.choices %}<p class="muted">Вариантов нет.</p>{% endif %}
+    {% endif %}
+  </fieldset>
+  {% endfor %}
+  {% if not axes %}<div class="notice">У коллекции предложений нет полей выбора предложения (список, привязка к записи или строка).</div>{% endif %}
+
+  <label>Шаблон названия
+    <input name="template" value="{{ form.template }}" placeholder="#PRODUCT_NAME# (#КОД_ПОЛЯ#, ...)">
+  </label>
+  <p class="muted">#PRODUCT_NAME# — название товара, #КОД_ПОЛЯ# — значение поля, например #VOLUME#.</p>
+  <label class="check"><input type="checkbox" name="active" {% if form.active %}checked{% endif %}> Активны</label>
+
+  <fieldset>
+    <legend>Одинаковые для всех предложений</legend>
+    <div class="grid-2">
+      <div class="field">
+        <span class="field-label">Цены</span>
+        {% for t in price_types %}
+        <label>{{ t[1] }}<input name="price_{{ t[0] }}" inputmode="decimal" value="{{ form['price_' ~ t[0]] }}"></label>
+        {% endfor %}
+      </div>
+      <div class="field">
+        <span class="field-label">Остатки по складам</span>
+        {% for s in stores %}
+        <label>{{ s[1] }}<input name="amount_{{ s[0] }}" inputmode="decimal" value="{{ form['amount_' ~ s[0]] }}"></label>
+        {% endfor %}
+      </div>
+    </div>
+    <label>Вес, г<input name="weight" inputmode="decimal" value="{{ form.weight }}" placeholder="0"></label>
+  </fieldset>
+
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сгенерировать</button>
+    <a class="btn" href="/admin/items/{{ product.id }}#offers">Отмена</a>
+  </div>
+</form>
+{% endblock %}

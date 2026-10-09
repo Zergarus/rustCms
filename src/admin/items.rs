@@ -32,10 +32,10 @@ const PICTURE_FIELDS: [&str; 2] = ["preview_picture_id", "detail_picture_id"];
 /// detail_text, published_at, preview_picture_id, detail_picture_id и `prop_<код>`.
 /// Ключ может повторяться (множественный список, файлы).
 #[derive(Debug, Default)]
-struct FormValues(HashMap<String, Vec<String>>);
+pub(super) struct FormValues(HashMap<String, Vec<String>>);
 
 impl FormValues {
-    fn from_pairs(pairs: impl IntoIterator<Item = (String, String)>) -> Self {
+    pub(super) fn from_pairs(pairs: impl IntoIterator<Item = (String, String)>) -> Self {
         let mut form = Self::default();
         for (key, value) in pairs {
             form.0.entry(key).or_default().push(value);
@@ -43,7 +43,7 @@ impl FormValues {
         form
     }
 
-    fn get(&self, key: &str) -> &str {
+    pub(super) fn get(&self, key: &str) -> &str {
         self.0
             .get(key)
             .and_then(|v| v.first())
@@ -51,19 +51,19 @@ impl FormValues {
             .unwrap_or("")
     }
 
-    fn all(&self, key: &str) -> Vec<&str> {
+    pub(super) fn all(&self, key: &str) -> Vec<&str> {
         self.0
             .get(key)
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default()
     }
 
-    fn set(&mut self, key: &str, value: impl Into<String>) {
+    pub(super) fn set(&mut self, key: &str, value: impl Into<String>) {
         self.0.insert(key.to_string(), vec![value.into()]);
     }
 
     /// Первые значения — для обычных полей в шаблоне.
-    fn first_values(&self) -> HashMap<&str, &str> {
+    pub(super) fn first_values(&self) -> HashMap<&str, &str> {
         self.0
             .iter()
             .filter_map(|(k, v)| Some((k.as_str(), v.first()?.as_str())))
@@ -286,7 +286,7 @@ struct CatalogContext {
 
 /// Вкладка «Торговый каталог» из полей формы: `price_<тип>`, `amount_<склад>`,
 /// `available`, `quantity_trace` / `can_buy_zero` (`Y` | `N` | `default`).
-fn purchase_input_from_form(
+pub(super) fn purchase_input_from_form(
     form: &FormValues,
     price_types: &[i64],
     stores: &[i64],
@@ -467,6 +467,7 @@ async fn render_form(
     item_id: Option<i64>,
     form: FormValues,
     error: Option<String>,
+    notice: Option<String>,
 ) -> AppResult<Html<String>> {
     let CollectionContext {
         collection,
@@ -558,14 +559,14 @@ async fn render_form(
         "item_form.html",
         context! {
             user, collection, properties, item_id, error, can_write, sections, enums, files, linked,
-            multi, catalog, offers_priced, offers, offers_tab, can_write_offers, offer_product,
+            multi, catalog, offers_priced, offers, offers_tab, can_write_offers, offer_product, notice,
             form => form.first_values(),
         },
     )
 }
 
 /// Работа с предложениями требует записи и в коллекции товаров.
-fn require_parent_write(user: &Access, collection: &Collection) -> AppResult<()> {
+pub(super) fn require_parent_write(user: &Access, collection: &Collection) -> AppResult<()> {
     match collection.product_collection_id {
         Some(parent) => user.require_collection(parent, Level::Write),
         None => Ok(()),
@@ -782,7 +783,7 @@ pub async fn new_form(
             .collect();
         form.0.insert(format!("prop_{}", prop.code), defaults);
     }
-    render_form(&state, user, ctx, None, form, None).await
+    render_form(&state, user, ctx, None, form, None, None).await
 }
 
 /// Разбирает отправленную форму и сохраняет запись (`item_id` = None — создание).
@@ -892,7 +893,7 @@ async fn save(
         }
         Err(msg) => msg,
     };
-    let page = render_form(state, user, ctx, item_id, form, Some(error)).await?;
+    let page = render_form(state, user, ctx, item_id, form, Some(error), None).await?;
     Ok(page.into_response())
 }
 
@@ -940,10 +941,18 @@ pub async fn create(
     save(&state, user, ctx, None, multipart).await
 }
 
+/// Итог генератора предложений, переданный редиректом (`?generated=N&skipped=M`).
+#[derive(Deserialize)]
+pub struct EditQuery {
+    generated: Option<usize>,
+    skipped: Option<usize>,
+}
+
 pub async fn edit_form(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
+    Query(q): Query<EditQuery>,
 ) -> AppResult<Html<String>> {
     let element = repo::get_item(&state.db, id)
         .await?
@@ -954,7 +963,13 @@ pub async fn edit_form(
     if ctx.catalog.is_some() {
         purchase_to_form(&state, id, &mut form).await?;
     }
-    render_form(&state, user, ctx, Some(id), form, None).await
+    let notice = q.generated.map(|n| {
+        format!(
+            "Создано {n}, пропущено {} (уже есть)",
+            q.skipped.unwrap_or(0)
+        )
+    });
+    render_form(&state, user, ctx, Some(id), form, None, notice).await
 }
 
 pub async fn update(

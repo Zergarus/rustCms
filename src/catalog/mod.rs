@@ -287,6 +287,16 @@ pub async fn raw_flags(
 /// Сохраняет цены, остатки и флаги товара; общий остаток не задан — сумма по складам.
 pub async fn save_purchase(db: &PgPool, item_id: i64, input: &PurchaseInput) -> sqlx::Result<()> {
     let mut tx = db.begin().await?;
+    save_purchase_in(&mut tx, item_id, input).await?;
+    tx.commit().await
+}
+
+/// То же в уже открытой транзакции (вызывающий коммитит сам).
+pub async fn save_purchase_in(
+    tx: &mut sqlx::PgConnection,
+    item_id: i64,
+    input: &PurchaseInput,
+) -> sqlx::Result<()> {
     let default_currency: String = sqlx::query_scalar(
         "SELECT COALESCE((SELECT code FROM currencies ORDER BY code = 'RUB' DESC, code LIMIT 1), 'RUB')",
     )
@@ -340,7 +350,7 @@ pub async fn save_purchase(db: &PgPool, item_id: i64, input: &PurchaseInput) -> 
     .bind(input.weight)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1265,3 +1265,293 @@ async fn existing_mode_refuses_linked_or_non_catalog(db: PgPool) {
             .unwrap();
     assert_eq!(linked, None);
 }
+
+/// POST формы админки, но вместо тела — заголовок `Location` редиректа.
+async fn post_form_location(
+    app: &Router,
+    path: &str,
+    cookie: &str,
+    body: &str,
+) -> (StatusCode, String) {
+    let req = Request::post(path)
+        .header(header::COOKIE, cookie)
+        .header(header::HOST, "127.0.0.1:3000")
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let location = res
+        .headers()
+        .get(header::LOCATION)
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    (res.status(), location)
+}
+
+/// Предложения `news_offers` с полями выбора: `volume` (строка) и `color` (список из двух
+/// вариантов); базовая цена и склад 1. Возвращает (id поля `color`, id вариантов).
+async fn generator_setup(db: &PgPool, offers: i64) -> (i64, Vec<i64>) {
+    for sql in [
+        "INSERT INTO catalog_price_types (id, code, name, is_base) VALUES (1, 'BASE', 'Базовая', TRUE)",
+        "INSERT INTO catalog_stores (id, name) VALUES (1, 'Склад')",
+    ] {
+        sqlx::query(sql).execute(db).await.unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO collection_fields (collection_id, code, name, kind, offer_tree)
+         VALUES ($1, 'volume', 'Объём', 'string', TRUE)",
+    )
+    .bind(offers)
+    .execute(db)
+    .await
+    .unwrap();
+    let color: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_fields (collection_id, code, name, kind, offer_tree)
+         VALUES ($1, 'color', 'Цвет', 'list', TRUE) RETURNING id",
+    )
+    .bind(offers)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    let mut options = Vec::new();
+    for value in ["Красный", "Синий"] {
+        options.push(
+            sqlx::query_scalar(
+                "INSERT INTO collection_field_options (field_id, value, xml_id) VALUES ($1, $2, $2) RETURNING id",
+            )
+            .bind(color)
+            .bind(value)
+            .fetch_one(db)
+            .await
+            .unwrap(),
+        );
+    }
+    (color, options)
+}
+
+#[sqlx::test]
+async fn generator_creates_offers(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    generator_setup(&db, offers).await;
+    let path = format!("/admin/items/{}/offers/generate", c.item_id);
+    page_has(
+        &app,
+        &cookie,
+        &path,
+        &["Объём", "Цвет", "Красный", "Базовая"],
+    )
+    .await;
+
+    let (status, location) = post_form_location(
+        &app,
+        &path,
+        &cookie,
+        "axis_volume=1+%D0%BB%2C+4+%D0%BB&template=%23PRODUCT_NAME%23+%28%23VOLUME%23%29&active=on&price_1=500&amount_1=3&weight=900",
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        location,
+        format!("/admin/items/{}?generated=2&skipped=0#offers", c.item_id)
+    );
+    page_has(
+        &app,
+        &cookie,
+        &format!("/admin/items/{}?generated=2&skipped=0", c.item_id),
+        &["Создано 2, пропущено 0 (уже есть)", "Первая новость (4 л)"],
+    )
+    .await;
+
+    let rows: Vec<(i64, String, String, f64, f64, f64, i16)> = sqlx::query_as(
+        "SELECT i.id, i.name, i.xml_id, pr.price::float8, a.amount::float8, p.weight::float8, p.type
+         FROM collection_items i
+         JOIN catalog_prices pr ON pr.item_id = i.id AND pr.price_type_id = 1
+         JOIN catalog_store_amounts a ON a.item_id = i.id AND a.store_id = 1
+         JOIN catalog_products p ON p.item_id = i.id
+         WHERE i.collection_id = $1 AND i.product_id = $2 ORDER BY i.id",
+    )
+    .bind(offers)
+    .bind(c.item_id)
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].1, "Первая новость (1 л)");
+    assert_eq!(rows[1].1, "Первая новость (4 л)");
+    for r in &rows {
+        assert_eq!((r.3, r.4, r.5, r.6), (500.0, 3.0, 900.0, 4));
+        assert_eq!(r.2.len(), 36, "xml_id не UUID: {}", r.2);
+        assert_eq!(r.2.matches('-').count(), 4);
+    }
+    let volumes: Vec<String> = sqlx::query_scalar(
+        "SELECT field_values->>'volume' FROM collection_items
+         WHERE collection_id = $1 ORDER BY id",
+    )
+    .bind(offers)
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    assert_eq!(volumes, ["1 л", "4 л"]);
+    // связь с товаром читается как значение CML2_LINK
+    let link = crate::collection::repo::get_item(&db, rows[0].0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(link.field_values["cml2_link"], json!(c.item_id));
+    let kind: i16 = sqlx::query_scalar("SELECT type FROM catalog_products WHERE item_id = $1")
+        .bind(c.item_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(kind, 3);
+}
+
+#[sqlx::test]
+async fn generator_skips_existing_any_order(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    let (_, options) = generator_setup(&db, offers).await;
+    let path = format!("/admin/items/{}/offers/generate", c.item_id);
+    let colors = format!("axis_color={}&axis_color={}", options[0], options[1]);
+
+    let (status, location) = post_form_location(
+        &app,
+        &path,
+        &cookie,
+        &format!("{colors}&axis_volume=1+%D0%BB%2C+4+%D0%BB&price_1=10&active=on"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert!(location.contains("generated=4&skipped=0"), "{location}");
+
+    // те же значения, оси в другом порядке (поля формы переставлены)
+    let (status, location) = post_form_location(
+        &app,
+        &path,
+        &cookie,
+        &format!("axis_volume=4+%D0%BB%2C1+%D0%BB&{colors}&price_1=10&active=on"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        location,
+        format!("/admin/items/{}?generated=0&skipped=4#offers", c.item_id)
+    );
+    page_has(
+        &app,
+        &cookie,
+        &format!("/admin/items/{}?generated=0&skipped=4", c.item_id),
+        &["Создано 0, пропущено 4 (уже есть)"],
+    )
+    .await;
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM collection_items WHERE product_id = $1")
+            .bind(c.item_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(count, 4);
+
+    // новое значение добавляет только недостающие
+    let (_, location) = post_form_location(
+        &app,
+        &path,
+        &cookie,
+        &format!("{colors}&axis_volume=1+%D0%BB%2C+10+%D0%BB&price_1=10"),
+    )
+    .await;
+    assert!(location.contains("generated=2&skipped=2"), "{location}");
+}
+
+#[sqlx::test]
+async fn generator_rejects_bad_input_and_writes_nothing(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    generator_setup(&db, offers).await;
+    let path = format!("/admin/items/{}/offers/generate", c.item_id);
+    let count = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM collection_items WHERE product_id = $1")
+            .bind(c.item_id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+    };
+
+    let (status, html) = post_form(&app, &path, &cookie, "template=x").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.contains("Выберите значения хотя бы одного поля"),
+        "{html}"
+    );
+
+    let many: Vec<String> = (0..101).map(|i| format!("v{i}")).collect();
+    let (status, html) = post_form(
+        &app,
+        &path,
+        &cookie,
+        &format!("axis_volume={}", many.join("%2C")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.contains("Сочетаний 101, больше 100 за раз нельзя"),
+        "{html}"
+    );
+
+    let (status, html) = post_form(&app, &path, &cookie, "axis_volume=1+%D0%BB&price_1=abc").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Цена: ожидается число"), "{html}");
+    assert_eq!(count().await, 0);
+}
+
+#[sqlx::test]
+async fn generator_needs_write_on_both_collections(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    generator_setup(&db, offers).await;
+    let (user_id, user_cookie) = crate::test_support::user_cookie(&db, "editor", false).await;
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(c.group_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO group_permissions (group_id, permission) VALUES ($1, 'admin.access')")
+        .bind(c.group_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM collection_access WHERE collection_id = $1")
+        .bind(c.collection_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO collection_access (collection_id, group_id, level) VALUES ($1, $2, 'write')",
+    )
+    .bind(offers)
+    .bind(c.group_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    let path = format!("/admin/items/{}/offers/generate", c.item_id);
+    assert_eq!(
+        get(&app, &path, &user_cookie).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, _) = post_form(&app, &path, &user_cookie, "axis_volume=1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM collection_items WHERE product_id = $1")
+            .bind(c.item_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+}

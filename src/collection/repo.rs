@@ -464,7 +464,11 @@ pub async fn item_names(
     .await
 }
 
-pub async fn create_item(db: &PgPool, collection_id: i64, input: &ItemInput) -> sqlx::Result<i64> {
+pub async fn create_item<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    collection_id: i64,
+    input: &ItemInput,
+) -> sqlx::Result<i64> {
     let (id,): (i64,) = sqlx::query_as(
         "INSERT INTO collection_items
             (collection_id, section_id, code, xml_id, name, active, sort, preview_text, detail_text,

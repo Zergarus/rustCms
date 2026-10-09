@@ -19,6 +19,7 @@
   <a href="/admin/collections/{{ collection.id }}/items">{{ collection.name }}</a> /
 </div>
 <h1>{% if item_id %}{{ form.name }}{% else %}Новая запись{% endif %}</h1>
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
 
 <form class="card form" method="post" enctype="multipart/form-data"
       action="{% if item_id %}/admin/items/{{ item_id }}{% else %}/admin/collections/{{ collection.id }}/items{% endif %}">
@@ -176,7 +177,8 @@
 <section class="card" id="offers">
   <div class="page-head">
     <h2>Торговые предложения</h2>
-    {% if can_write_offers %}<a class="btn" href="/admin/collections/{{ offers.id }}/items/new?product={{ item_id }}">Добавить предложение</a>{% endif %}
+    {% if can_write_offers %}<a class="btn" href="/admin/collections/{{ offers.id }}/items/new?product={{ item_id }}">Добавить предложение</a>
+    <a class="btn" href="/admin/items/{{ item_id }}/offers/generate">Сгенерировать</a>{% endif %}
   </div>
   {% if offers_tab.rows %}
   <div class="table-wrap">
