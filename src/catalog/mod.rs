@@ -20,7 +20,7 @@ pub struct Price {
 #[derive(Debug, Clone)]
 pub struct PurchaseInfo {
     pub active: bool,
-    /// Инфоблок товара — торговый каталог.
+    /// Коллекция товара — торговый каталог.
     pub is_catalog: bool,
     pub available: bool,
     pub quantity_trace: bool,

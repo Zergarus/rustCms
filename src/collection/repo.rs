@@ -7,7 +7,7 @@ use super::{
     ItemInput, Section, SectionInput,
 };
 
-const IBLOCK_COLS: &str = "id, code, name, description, api_enabled, sort, detail_page_url, \
+const COLLECTION_COLS: &str = "id, code, name, description, api_enabled, sort, detail_page_url, \
      section_page_url, list_page_url, is_catalog, created_at, updated_at";
 const PROPERTY_COLS: &str = "id, collection_id, code, name, kind, is_required, sort, multiple, link_collection_id, user_type";
 const SECTION_COLS: &str = "id, collection_id, parent_id, code, xml_id, name, active, sort, depth_level, \
@@ -29,7 +29,7 @@ pub async fn list_collections(db: &PgPool) -> sqlx::Result<Vec<CollectionSummary
 
 pub async fn get_collection(db: &PgPool, id: i64) -> sqlx::Result<Option<Collection>> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {IBLOCK_COLS} FROM collections WHERE id = $1"
+        "SELECT {COLLECTION_COLS} FROM collections WHERE id = $1"
     )))
     .bind(id)
     .fetch_optional(db)
@@ -38,7 +38,7 @@ pub async fn get_collection(db: &PgPool, id: i64) -> sqlx::Result<Option<Collect
 
 pub async fn get_collection_by_code(db: &PgPool, code: &str) -> sqlx::Result<Option<Collection>> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {IBLOCK_COLS} FROM collections WHERE code = $1"
+        "SELECT {COLLECTION_COLS} FROM collections WHERE code = $1"
     )))
     .bind(code)
     .fetch_optional(db)
@@ -48,7 +48,7 @@ pub async fn get_collection_by_code(db: &PgPool, code: &str) -> sqlx::Result<Opt
 pub async fn create_collection(db: &PgPool, input: &CollectionInput) -> sqlx::Result<Collection> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "INSERT INTO collections (code, name, description, api_enabled, sort, is_catalog)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING {IBLOCK_COLS}"
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING {COLLECTION_COLS}"
     )))
     .bind(&input.code)
     .bind(&input.name)

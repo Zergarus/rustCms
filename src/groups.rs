@@ -32,7 +32,7 @@ pub struct GroupInput {
     pub description: String,
     pub sort: i32,
     pub permissions: Vec<String>,
-    /// Уровни доступа к инфоблокам; `Level::None` не сохраняется.
+    /// Уровни доступа к коллекциям; `Level::None` не сохраняется.
     pub collection_levels: Vec<(i64, Level)>,
 }
 
@@ -64,14 +64,14 @@ pub async fn permissions(db: &PgPool, id: i64) -> sqlx::Result<Vec<String>> {
     Ok(rows.into_iter().map(|(p,)| p).collect())
 }
 
-/// Уровни доступа группы по инфоблокам: collection_id → "read" | "write".
+/// Уровни доступа группы по коллекциям: collection_id → "read" | "write".
 pub async fn collection_levels(db: &PgPool, id: i64) -> sqlx::Result<HashMap<String, String>> {
     let rows: Vec<(i64, String)> =
         sqlx::query_as("SELECT collection_id, level FROM collection_access WHERE group_id = $1")
             .bind(id)
             .fetch_all(db)
             .await?;
-    // ключи-строки — чтобы в шаблоне обращаться как levels[iblock.id|string]
+    // ключи-строки — чтобы в шаблоне обращаться как levels[collection.id|string]
     Ok(rows.into_iter().map(|(i, l)| (i.to_string(), l)).collect())
 }
 
@@ -141,7 +141,7 @@ pub async fn save(db: &PgPool, id: Option<i64>, input: &GroupInput) -> sqlx::Res
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    let (iblock_ids, levels): (Vec<i64>, Vec<&str>) = input
+    let (collection_ids, levels): (Vec<i64>, Vec<&str>) = input
         .collection_levels
         .iter()
         .filter_map(|(collection_id, level)| level.as_db().map(|l| (*collection_id, l)))
@@ -153,7 +153,7 @@ pub async fn save(db: &PgPool, id: Option<i64>, input: &GroupInput) -> sqlx::Res
          JOIN collections i ON i.id = l.collection_id",
     )
     .bind(id)
-    .bind(&iblock_ids)
+    .bind(&collection_ids)
     .bind(&levels)
     .execute(&mut *tx)
     .await?;

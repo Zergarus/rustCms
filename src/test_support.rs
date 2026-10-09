@@ -11,7 +11,7 @@ pub struct Fixture {
 
 /// Товар с остатком 10 (склад 1 — 5), гость-покупатель с позицией 1 шт., тип плательщика, статус N.
 pub async fn order_fixture(db: &PgPool) -> Fixture {
-    let iblock: i64 = sqlx::query_scalar(
+    let collection: i64 = sqlx::query_scalar(
         "INSERT INTO collections (code, name, is_catalog) VALUES ('catalog', 'Каталог', TRUE) RETURNING id",
     )
     .fetch_one(db)
@@ -20,7 +20,7 @@ pub async fn order_fixture(db: &PgPool) -> Fixture {
     let product_id: i64 = sqlx::query_scalar(
         "INSERT INTO collection_items (collection_id, code, name) VALUES ($1, 'tovar', 'Товар') RETURNING id",
     )
-    .bind(iblock)
+    .bind(collection)
     .fetch_one(db)
     .await
     .unwrap();

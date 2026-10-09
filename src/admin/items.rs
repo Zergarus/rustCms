@@ -424,7 +424,7 @@ async fn load_collection(state: &AppState, id: i64) -> AppResult<CollectionConte
         enums: repo::list_collection_options(&state.db, id).await?,
         sections: section_tree(repo::list_sections(&state.db, id).await?),
         catalog,
-        collection: collection,
+        collection,
     })
 }
 
@@ -445,7 +445,7 @@ async fn render_form(
     error: Option<String>,
 ) -> AppResult<Html<String>> {
     let CollectionContext {
-        collection: collection,
+        collection,
         catalog,
         properties,
         enums,

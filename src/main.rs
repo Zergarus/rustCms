@@ -51,7 +51,7 @@ const USAGE: &str = "\
   cms import-bitrix <mysql-url> [--upload <каталог>] [--replace] [--api-code ID=код ...]
                               перенести инфоблоки, HL-блоки, каталог и пользователей из базы
                               Битрикса; --upload — каталог upload сайта (файлы линкуются в
-                              UPLOAD_DIR), --replace — удалить уже существующие инфоблоки,
+                              UPLOAD_DIR), --replace — удалить уже существующие коллекции,
                               --api-code — apiCode инфоблока, если API_CODE в базе не заполнен";
 
 #[tokio::main]

@@ -13,7 +13,7 @@ pub struct AppState {
     pub db: PgPool,
     pub templates: Arc<Environment<'static>>,
     pub config: Arc<Config>,
-    /// Снимок схемы инфоблоков для API bxapi.
+    /// Снимок схемы коллекций для API bxapi.
     pub registry: Arc<Registry>,
     /// Проектные настройки bxapi (`BXAPI_PROJECT`).
     pub project: Arc<Project>,
