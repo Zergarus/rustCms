@@ -14,6 +14,8 @@ mod import;
 mod mail;
 mod passwords;
 mod sale;
+#[cfg(test)]
+mod smoke_tests;
 mod state;
 #[cfg(test)]
 mod test_support;
@@ -168,18 +170,9 @@ fn cors_layer(config: &Config) -> CorsLayer {
     }
 }
 
-async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
-    let mut env = Environment::new();
-    env.set_loader(path_loader(config.templates_dir.join("admin")));
-    let state = AppState {
-        db,
-        templates: Arc::new(env),
-        config: Arc::new(config),
-        registry: Arc::default(),
-        project: bxapi::project::Project::from_env(),
-    };
-
-    let app = Router::new()
+/// Роутер приложения: админка, наш API, bxapi и файлы.
+pub(crate) fn app(state: AppState) -> Router {
+    Router::new()
         .route("/", get(|| async { Redirect::to("/admin") }))
         .nest("/api", api::router().layer(cors_layer(&state.config)))
         .nest("/api/v1", bxapi::router().layer(cors_layer(&state.config)))
@@ -192,7 +185,21 @@ async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
             )),
         )
         .layer(TraceLayer::new_for_http())
-        .with_state(state.clone());
+        .with_state(state)
+}
+
+async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
+    let mut env = Environment::new();
+    env.set_loader(path_loader(config.templates_dir.join("admin")));
+    let state = AppState {
+        db,
+        templates: Arc::new(env),
+        config: Arc::new(config),
+        registry: Arc::default(),
+        project: bxapi::project::Project::from_env(),
+    };
+
+    let app = app(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&state.config.bind_addr)
         .await

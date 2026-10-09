@@ -114,3 +114,133 @@ pub async fn place_order(db: &PgPool, f: &Fixture, user_id: Option<i64>) -> i64 
     tx.commit().await.unwrap();
     id
 }
+
+/// Состояние приложения для тестов через роутер: шаблоны из `templates/admin`,
+/// файлы и письма — во временном каталоге, проект bxapi по умолчанию.
+pub fn test_state(db: PgPool) -> crate::state::AppState {
+    use std::sync::Arc;
+    let tmp = std::env::temp_dir().join(format!("cms-test-{}", rand::random::<u64>()));
+    let config = crate::config::Config {
+        database_url: String::new(),
+        bind_addr: "127.0.0.1:3000".into(),
+        cors_origins: vec!["*".into()],
+        templates_dir: "templates".into(),
+        static_dir: "static".into(),
+        upload_dir: tmp.join("upload"),
+        upload_origin_url: None,
+        mail_smtp_url: None,
+        mail_dir: tmp.join("mail"),
+        cookie_secure: false,
+    };
+    let mut env = minijinja::Environment::new();
+    env.set_loader(minijinja::path_loader(config.templates_dir.join("admin")));
+    crate::state::AppState {
+        db,
+        templates: Arc::new(env),
+        config: Arc::new(config),
+        registry: Arc::default(),
+        project: Arc::new(crate::bxapi::project::Project::default()),
+    }
+}
+
+/// Создаёт пользователя (`admin` — суперпользователь) и возвращает заголовок Cookie его сессии.
+pub async fn user_cookie(db: &PgPool, login: &str, admin: bool) -> (i64, String) {
+    let user = crate::auth::create_user(db, login, "password123".into(), admin)
+        .await
+        .unwrap();
+    let token = crate::auth::create_session(db, user.id).await.unwrap();
+    (user.id, format!("{}={token}", crate::auth::SESSION_COOKIE))
+}
+
+pub async fn admin_cookie(db: &PgPool) -> String {
+    user_cookie(db, "smoke", true).await.1
+}
+
+/// Контент для проверки страниц: коллекция `news` с разделом, полями (список с вариантом,
+/// привязка к себе), записью и группой с доступом на запись.
+pub struct Content {
+    pub collection_id: i64,
+    pub section_id: i64,
+    pub field_id: i64,
+    pub link_field_id: i64,
+    pub option_id: i64,
+    pub item_id: i64,
+    pub group_id: i64,
+}
+
+pub async fn content_fixture(db: &PgPool) -> Content {
+    let one = |sql: &'static str| sqlx::query_scalar::<_, i64>(sql);
+    let collection_id =
+        one("INSERT INTO iblocks (code, name) VALUES ('news', 'Новости') RETURNING id")
+            .fetch_one(db)
+            .await
+            .unwrap();
+    let section_id = one(
+        "INSERT INTO iblock_sections (iblock_id, code, name) VALUES ($1, 'razdel-a', 'Раздел А') RETURNING id",
+    )
+    .bind(collection_id)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    let field_id = one(
+        "INSERT INTO iblock_properties (iblock_id, code, name, kind) VALUES ($1, 'color', 'Цвет', 'list') RETURNING id",
+    )
+    .bind(collection_id)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    let link_field_id = one(
+        "INSERT INTO iblock_properties (iblock_id, code, name, kind, link_iblock_id)
+         VALUES ($1, 'link', 'Связь', 'element', $1) RETURNING id",
+    )
+    .bind(collection_id)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    let option_id = one(
+        "INSERT INTO iblock_property_enums (property_id, value, xml_id) VALUES ($1, 'Красный', 'red') RETURNING id",
+    )
+    .bind(field_id)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    let item_id = one(
+        "INSERT INTO iblock_elements (iblock_id, section_id, code, name, published_at, created_at, updated_at, properties)
+         VALUES ($1, $2, 'pervaya', 'Первая новость', '2026-01-02T03:04:05Z', '2026-01-02T03:04:05Z',
+                 '2026-01-02T03:04:05Z', jsonb_build_object('color', $3))
+         RETURNING id",
+    )
+    .bind(collection_id)
+    .bind(section_id)
+    .bind(option_id)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE iblock_elements SET properties = properties || jsonb_build_object('link', id) WHERE id = $1")
+        .bind(item_id)
+        .execute(db)
+        .await
+        .unwrap();
+    let group_id =
+        one("INSERT INTO groups (code, name) VALUES ('editors', 'Редакторы') RETURNING id")
+            .fetch_one(db)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO iblock_group_access (iblock_id, group_id, level) VALUES ($1, $2, 'write')",
+    )
+    .bind(collection_id)
+    .bind(group_id)
+    .execute(db)
+    .await
+    .unwrap();
+    Content {
+        collection_id,
+        section_id,
+        field_id,
+        link_field_id,
+        option_id,
+        item_id,
+        group_id,
+    }
+}
