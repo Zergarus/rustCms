@@ -469,6 +469,16 @@ async fn apply_offers(
                     offers.name
                 )));
             }
+            // Записи новой коллекции предложений остались бы без товара
+            if offers.product_collection_id.is_none() {
+                let records = repo::items_count(db, offers.id).await?;
+                if records > 0 {
+                    return Ok(Err(format!(
+                        "В коллекции «{}» есть записи ({records}) — предложениями может стать только пустая коллекция",
+                        offers.name
+                    )));
+                }
+            }
             Some(Some(offers.id))
         }
         "create" => Some(None),

@@ -755,6 +755,14 @@ pub async fn offers_collection(
     .await
 }
 
+/// Число записей коллекции `collection_id`.
+pub async fn items_count(db: &PgPool, collection_id: i64) -> sqlx::Result<i64> {
+    sqlx::query_scalar("SELECT count(*) FROM collection_items WHERE collection_id = $1")
+        .bind(collection_id)
+        .fetch_one(db)
+        .await
+}
+
 /// Сколько записей коллекции `offers_id` привязано (`product_id`) к товарам не из
 /// коллекции `product_collection_id`.
 pub async fn foreign_offers_count(

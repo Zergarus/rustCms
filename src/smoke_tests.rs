@@ -1089,6 +1089,49 @@ async fn catalog_flag_kept_while_linked(db: PgPool) {
     assert_eq!(status, StatusCode::SEE_OTHER);
 }
 
+/// Коллекцию с записями нельзя сделать предложениями: записи остались бы без товара.
+#[sqlx::test]
+async fn existing_mode_refuses_collection_with_records(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let c = content_fixture(&db).await;
+    sqlx::query("UPDATE collections SET is_catalog = TRUE WHERE id = $1")
+        .bind(c.collection_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let spare: i64 = sqlx::query_scalar(
+        "INSERT INTO collections (code, name, is_catalog) VALUES ('spare', 'Запас', TRUE) RETURNING id",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO collection_items (collection_id, code, name) VALUES ($1, 'x', 'x')")
+        .bind(spare)
+        .execute(&db)
+        .await
+        .unwrap();
+    let (status, html) = post_form(
+        &app,
+        &format!("/admin/collections/{}/offers", c.collection_id),
+        &cookie,
+        &format!("mode=existing&offers_id={spare}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.contains("В коллекции «Запас» есть записи (1)"),
+        "{html}"
+    );
+    let linked: Option<i64> =
+        sqlx::query_scalar("SELECT product_collection_id FROM collections WHERE id = $1")
+            .bind(spare)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(linked, None);
+}
+
 #[sqlx::test]
 async fn relink_refused_with_foreign_offers(db: PgPool) {
     let cookie = admin_cookie(&db).await;
