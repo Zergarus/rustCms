@@ -1435,6 +1435,25 @@ async fn offer_needs_write_on_both_collections(db: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    // и правка предложения
+    let (status, _) = post_multipart(
+        &app,
+        &format!("/admin/items/{offer}"),
+        &user_cookie,
+        &[
+            ("name", "Вариант 1 правка"),
+            ("sort", "500"),
+            ("prop_cml2_link", &c.item_id.to_string()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let name: String = sqlx::query_scalar("SELECT name FROM collection_items WHERE id = $1")
+        .bind(offer)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(name, "Вариант 1");
 }
 
 #[sqlx::test]
