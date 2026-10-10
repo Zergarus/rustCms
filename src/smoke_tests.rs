@@ -1652,15 +1652,36 @@ async fn generator_creates_offers(db: PgPool) {
     assert_eq!(kind, 3);
 }
 
+/// Уже существующее сочетание узнаётся независимо от порядка полей: у предложения,
+/// созданного вручную, значения в JSONB лежат в порядке «color, volume», оси генератора
+/// идут в порядке полей («volume, color»), а между запусками порядок полей меняется.
 #[sqlx::test]
 async fn generator_skips_existing_any_order(db: PgPool) {
     let cookie = admin_cookie(&db).await;
     let app = app(&db);
     let (c, offers) = sku_setup(&db, &app, &cookie).await;
     let (_, options) = generator_setup(&db, offers).await;
+    sqlx::query(
+        "INSERT INTO collection_items (collection_id, code, name, product_id, field_values)
+         VALUES ($1, 'hand', 'Вручную', $2, $3)",
+    )
+    .bind(offers)
+    .bind(c.item_id)
+    .bind(json!({"color": options[0], "volume": "1 л"}))
+    .execute(&db)
+    .await
+    .unwrap();
+    let stored: Value =
+        sqlx::query_scalar("SELECT field_values FROM collection_items WHERE code = 'hand'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    let stored_order: Vec<&String> = stored.as_object().unwrap().keys().collect();
+    assert_eq!(stored_order, ["color", "volume"]);
     let path = format!("/admin/items/{}/offers/generate", c.item_id);
     let colors = format!("axis_color={}&axis_color={}", options[0], options[1]);
 
+    // оси: volume, color (порядок полей) — ручное сочетание пропускается
     let (status, location) = post_form_location(
         &app,
         &path,
@@ -1669,9 +1690,16 @@ async fn generator_skips_existing_any_order(db: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
-    assert!(location.contains("generated=4&skipped=0"), "{location}");
+    assert!(location.contains("generated=3&skipped=1"), "{location}");
 
-    // те же значения, оси в другом порядке (поля формы переставлены)
+    // порядок полей меняется: оси color, volume — все четыре уже есть
+    sqlx::query(
+        "UPDATE collection_fields SET sort = 1 WHERE collection_id = $1 AND code = 'color'",
+    )
+    .bind(offers)
+    .execute(&db)
+    .await
+    .unwrap();
     let (status, location) = post_form_location(
         &app,
         &path,
