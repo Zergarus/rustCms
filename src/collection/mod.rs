@@ -29,6 +29,8 @@ pub struct Collection {
     pub product_collection_id: Option<i64>,
     /// Системное поле связи предложения с товаром (`CML2_LINK`).
     pub sku_field_id: Option<i64>,
+    /// Внешний код для обмена с 1С (`ИдКаталога`); пусто — не задан.
+    pub xml_id: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -59,6 +61,8 @@ pub struct Field {
     pub in_basket: bool,
     /// Поле выбора предложения.
     pub offer_tree: bool,
+    /// Внешний код для обмена с 1С (`Ид` свойства); пусто — не задан.
+    pub xml_id: String,
 }
 
 /// Вариант значения поля-списка.

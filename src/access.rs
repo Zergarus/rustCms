@@ -18,6 +18,7 @@ pub const COLLECTIONS_MANAGE: &str = "collections.manage";
 pub const USERS_MANAGE: &str = "users.manage";
 pub const SHOP_MANAGE: &str = "shop.manage";
 pub const ORDERS_MANAGE: &str = "orders.manage";
+pub const EXCHANGE_1C: &str = "exchange.1c";
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct PermissionDef {
@@ -51,6 +52,11 @@ pub const PERMISSIONS: &[PermissionDef] = &[
         code: ORDERS_MANAGE,
         name: "Работа с заказами",
         description: "Просмотр заказов, смена статуса, оплата, отмена, правка свойств и состава",
+    },
+    PermissionDef {
+        code: EXCHANGE_1C,
+        name: "Обмен с 1С",
+        description: "Приём каталога из 1С по протоколу обмена",
     },
 ];
 

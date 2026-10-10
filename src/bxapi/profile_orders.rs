@@ -482,6 +482,7 @@ mod tests {
             width: None,
             height: None,
             created_at: DateTime::<Utc>::default(),
+            sha256: String::new(),
         }
     }
 

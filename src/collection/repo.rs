@@ -8,9 +8,9 @@ use super::{
 };
 
 const COLLECTION_COLS: &str = "id, code, name, description, api_enabled, sort, detail_page_url, \
-     section_page_url, list_page_url, is_catalog, product_collection_id, sku_field_id, created_at, \
+     section_page_url, list_page_url, is_catalog, product_collection_id, sku_field_id, xml_id, created_at, \
      updated_at";
-const PROPERTY_COLS: &str = "id, collection_id, code, name, kind, is_required, sort, multiple, link_collection_id, user_type, in_basket, offer_tree";
+const PROPERTY_COLS: &str = "id, collection_id, code, name, kind, is_required, sort, multiple, link_collection_id, user_type, in_basket, offer_tree, xml_id";
 const SECTION_COLS: &str = "id, collection_id, parent_id, code, xml_id, name, active, sort, depth_level, \
      description, picture_id, created_at, updated_at";
 /// Колонки записи; `field_values` дополнен ключом связи предложения с товаром.
@@ -26,7 +26,7 @@ fn element_cols() -> String {
 pub async fn list_collections(db: &PgPool) -> sqlx::Result<Vec<CollectionSummary>> {
     sqlx::query_as(
         "SELECT i.id, i.code, i.name, i.description, i.api_enabled, i.sort, i.detail_page_url,
-                i.section_page_url, i.list_page_url, i.is_catalog, i.product_collection_id, i.sku_field_id, i.created_at, i.updated_at,
+                i.section_page_url, i.list_page_url, i.is_catalog, i.product_collection_id, i.sku_field_id, i.xml_id, i.created_at, i.updated_at,
                 (SELECT count(*) FROM collection_items e WHERE e.collection_id = i.id) AS item_count
          FROM collections i ORDER BY i.sort, i.id",
     )

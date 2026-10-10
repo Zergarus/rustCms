@@ -204,6 +204,7 @@ mod tests {
             user_type: String::new(),
             in_basket: false,
             offer_tree: false,
+            xml_id: String::new(),
         }
     }
 

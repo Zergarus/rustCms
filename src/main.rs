@@ -8,6 +8,7 @@ mod catalog;
 mod collection;
 mod config;
 mod error;
+mod exchange;
 mod files;
 mod groups;
 mod import;

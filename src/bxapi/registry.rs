@@ -152,7 +152,7 @@ async fn load(db: &PgPool) -> sqlx::Result<Snapshot> {
     let mut props: HashMap<i64, Vec<Field>> = HashMap::new();
     for p in sqlx::query_as::<_, Field>(
         "SELECT id, collection_id, code, name, kind, is_required, sort, multiple, link_collection_id,
-                user_type, in_basket, offer_tree
+                user_type, in_basket, offer_tree, xml_id
          FROM collection_fields ORDER BY sort, id",
     )
     .fetch_all(db)

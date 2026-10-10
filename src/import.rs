@@ -62,6 +62,8 @@ struct IblockRow {
     section_page_url: String,
     list_page_url: String,
     is_catalog: bool,
+    /// `b_iblock.XML_ID` — внешний код для обмена с 1С.
+    xml_id: String,
 }
 
 struct PropertyRow {
@@ -78,6 +80,8 @@ struct PropertyRow {
     directory: bool,
     /// USER_TYPE свойства Битрикса (`directory`, `UserID`, `DateTime`...).
     user_type: String,
+    /// `b_iblock_property.XML_ID` — внешний код для обмена с 1С.
+    xml_id: String,
 }
 
 struct EnumRow {
@@ -273,6 +277,8 @@ struct StoreRow {
     /// UF-поля склада (`uf_city_id`...).
     extra: Map<String, Value>,
     image_id: Option<i64>,
+    /// `b_catalog_store.XML_ID`.
+    xml_id: String,
 }
 
 /// Почтовый шаблон `b_event_message`.
@@ -295,7 +301,43 @@ const OPTIONS: &[(&str, &str)] = &[
     ("main", "email_from"),
     ("main", "server_name"),
     ("main", "site_name"),
+    ("catalog", "1C_SECTION_ACTION"),
+    ("catalog", "1C_ELEMENT_ACTION"),
+    ("catalog", "1C_TRANSLIT_ON_ADD"),
+    ("catalog", "1C_TRANSLIT_ON_UPDATE"),
+    ("catalog", "1C_USE_OFFERS"),
+    ("catalog", "1C_INTERVAL"),
+    ("catalog", "1C_FILE_SIZE_LIMIT"),
+    ("catalog", "1C_USE_ZIP"),
+    ("catalog", "deactivate_1c_no_price"),
 ];
+
+/// Опции обмена с 1С в `catalog` Битрикса → настройки модуля `exchange`
+/// (Y/N и действия N/A/D совпадают с нашими значениями).
+const EXCHANGE_OPTIONS: &[(&str, &str)] = &[
+    ("1C_SECTION_ACTION", "section_action"),
+    ("1C_ELEMENT_ACTION", "element_action"),
+    ("1C_TRANSLIT_ON_ADD", "translit_on_add"),
+    ("1C_TRANSLIT_ON_UPDATE", "translit_on_update"),
+    ("1C_USE_OFFERS", "use_offers"),
+    ("1C_INTERVAL", "interval"),
+    ("1C_FILE_SIZE_LIMIT", "file_limit"),
+    ("1C_USE_ZIP", "use_zip"),
+    ("deactivate_1c_no_price", "deactivate_without_price"),
+];
+
+/// Внешний код в Битриксе не обязан быть уникальным, у нас — обязан: повтор становится пустым.
+fn unique_xml_id<K: std::hash::Hash + Eq + Clone>(
+    scope: K,
+    xml_id: String,
+    seen: &mut HashSet<(K, String)>,
+) -> String {
+    if xml_id.is_empty() || !seen.insert((scope, xml_id.clone())) {
+        String::new()
+    } else {
+        xml_id
+    }
+}
 
 /// Цена: (элемент, тип цены, цена, валюта, количество от, до).
 type PriceRow = (i64, i64, f64, String, Option<i32>, Option<i32>);
@@ -303,8 +345,8 @@ type PriceRow = (i64, i64, f64, String, Option<i32>, Option<i32>);
 /// Торговый каталог: цены, склады, остатки, форматы валют.
 #[derive(Default)]
 struct Catalog {
-    /// (id, код, название, базовый)
-    price_types: Vec<(i64, String, String, bool)>,
+    /// (id, код, название, базовый, внешний код)
+    price_types: Vec<(i64, String, String, bool, String)>,
     prices: Vec<PriceRow>,
     stores: Vec<StoreRow>,
     /// (элемент, склад, количество)
@@ -447,12 +489,14 @@ async fn read_iblocks(
                 CAST(NAME AS CHAR), CAST(SORT AS SIGNED), CAST(IFNULL(DESCRIPTION, '') AS CHAR),
                 CAST(IFNULL(DETAIL_PAGE_URL, '') AS CHAR), CAST(IFNULL(SECTION_PAGE_URL, '') AS CHAR),
                 CAST(IFNULL(LIST_PAGE_URL, '') AS CHAR),
-                CAST(ID IN (SELECT IBLOCK_ID FROM b_catalog_iblock) AS SIGNED)
+                CAST(ID IN (SELECT IBLOCK_ID FROM b_catalog_iblock) AS SIGNED),
+                CAST(IFNULL(XML_ID, '') AS CHAR)
          FROM b_iblock ORDER BY ID",
     )
     .fetch_all(my)
     .await?;
     let mut used = HashSet::new();
+    let mut used_xml = HashSet::new();
     for row in rows {
         let id = int_col(&row, 0).context("b_iblock.ID")?;
         let api_code = str_col(&row, 1);
@@ -482,6 +526,7 @@ async fn read_iblocks(
             section_page_url: str_col(&row, 7),
             list_page_url: str_col(&row, 8),
             is_catalog: int_col(&row, 9) == Some(1),
+            xml_id: unique_xml_id((), str_col(&row, 10), &mut used_xml),
         });
     }
 
@@ -490,12 +535,14 @@ async fn read_iblocks(
         "SELECT CAST(ID AS SIGNED), CAST(IBLOCK_ID AS SIGNED), CAST(IFNULL(CODE, '') AS CHAR),
                 CAST(NAME AS CHAR), CAST(PROPERTY_TYPE AS CHAR), CAST(IFNULL(USER_TYPE, '') AS CHAR),
                 CAST(MULTIPLE AS CHAR), CAST(IS_REQUIRED AS CHAR), CAST(SORT AS SIGNED),
-                CAST(IFNULL(LINK_IBLOCK_ID, 0) AS SIGNED), CAST(IFNULL(USER_TYPE_SETTINGS, '') AS CHAR)
+                CAST(IFNULL(LINK_IBLOCK_ID, 0) AS SIGNED), CAST(IFNULL(USER_TYPE_SETTINGS, '') AS CHAR),
+                CAST(IFNULL(XML_ID, '') AS CHAR)
          FROM b_iblock_property ORDER BY IBLOCK_ID, SORT, ID",
     )
     .fetch_all(my)
     .await?;
     let mut used: HashSet<(i64, String)> = HashSet::new();
+    let mut used_xml: HashSet<(i64, String)> = HashSet::new();
     for row in rows {
         let id = int_col(&row, 0).context("b_iblock_property.ID")?;
         let collection_id = int_col(&row, 1).unwrap_or_default();
@@ -541,6 +588,7 @@ async fn read_iblocks(
             link_collection_id,
             directory,
             user_type,
+            xml_id: unique_xml_id(collection_id, str_col(&row, 11), &mut used_xml),
         });
     }
 
@@ -619,6 +667,7 @@ async fn read_hlblocks(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
             section_page_url: String::new(),
             list_page_url: String::new(),
             is_catalog: false,
+            xml_id: String::new(),
         });
 
         let fields = sqlx::query(
@@ -669,6 +718,7 @@ async fn read_hlblocks(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
                 link_collection_id: None,
                 directory: false,
                 user_type: String::new(),
+                xml_id: String::new(),
             });
             prop_ids.insert(field.clone(), next_property_id);
         }
@@ -1431,6 +1481,14 @@ async fn write_mail(tx: &mut sqlx::PgConnection, data: &Data) -> anyhow::Result<
         .await?;
     }
     for (module, name, value) in &data.options {
+        // Опции обмена с 1С переезжают в настройки модуля `exchange`
+        let exchange = (module == "catalog")
+            .then(|| EXCHANGE_OPTIONS.iter().find(|(from, _)| from == name))
+            .flatten();
+        let (module, name) = match exchange {
+            Some((_, to)) => ("exchange", *to),
+            None => (module.as_str(), name.as_str()),
+        };
         sqlx::query(
             "INSERT INTO options (module, name, value) VALUES ($1, $2, $3)
              ON CONFLICT (module, name) DO UPDATE SET value = EXCLUDED.value",
@@ -1629,9 +1687,12 @@ async fn write_locations(
 async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
     let elements: HashSet<i64> = data.elements.iter().map(|e| e.id).collect();
     let c = &mut data.catalog;
+    let mut price_xml = HashSet::new();
+    let mut store_xml = HashSet::new();
 
     for row in sqlx::query(
-        "SELECT CAST(ID AS SIGNED), CAST(NAME AS CHAR), CAST(BASE AS CHAR) FROM b_catalog_group ORDER BY ID",
+        "SELECT CAST(ID AS SIGNED), CAST(NAME AS CHAR), CAST(BASE AS CHAR), CAST(IFNULL(XML_ID, '') AS CHAR)
+         FROM b_catalog_group ORDER BY ID",
     )
     .fetch_all(my)
     .await?
@@ -1647,7 +1708,9 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
         .await?
         .flatten();
         let name = name.filter(|n| !n.is_empty()).unwrap_or_else(|| code.clone());
-        c.price_types.push((id, code, name, str_col(&row, 2) == "Y"));
+        let xml_id = unique_xml_id((), str_col(&row, 3), &mut price_xml);
+        c.price_types
+            .push((id, code, name, str_col(&row, 2) == "Y", xml_id));
     }
 
     for row in sqlx::query(
@@ -1679,7 +1742,7 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
         "SELECT CAST(ID AS SIGNED), CAST(TITLE AS CHAR), CAST(ACTIVE AS CHAR), CAST(SORT AS SIGNED),
                 CAST(IFNULL(ADDRESS, '') AS CHAR), CAST(IFNULL(PHONE, '') AS CHAR),
                 CAST(IFNULL(EMAIL, '') AS CHAR), CAST(IFNULL(SCHEDULE, '') AS CHAR),
-                CAST(IMAGE_ID AS SIGNED)
+                CAST(IMAGE_ID AS SIGNED), CAST(IFNULL(XML_ID, '') AS CHAR)
          FROM b_catalog_store ORDER BY ID",
     )
     .fetch_all(my)
@@ -1696,6 +1759,7 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
             schedule: str_col(&row, 7),
             extra: Map::new(),
             image_id: id_col(&row, 8),
+            xml_id: unique_xml_id((), str_col(&row, 9), &mut store_xml),
         });
     }
     let store_uf = read_uf(my, "CAT_STORE", "b_uts_cat_store", "b_utm_cat_store").await?;
@@ -1998,7 +2062,7 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
     for chunk in data.iblocks.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
             "INSERT INTO collections (id, code, name, description, api_enabled, sort, detail_page_url,
-                                  section_page_url, list_page_url, is_catalog) ",
+                                  section_page_url, list_page_url, is_catalog, xml_id) ",
         );
         qb.push_values(chunk, |mut b, i| {
             b.push_bind(i.id)
@@ -2010,7 +2074,8 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
                 .push_bind(&i.detail_page_url)
                 .push_bind(&i.section_page_url)
                 .push_bind(&i.list_page_url)
-                .push_bind(i.is_catalog);
+                .push_bind(i.is_catalog)
+                .push_bind(&i.xml_id);
         });
         qb.build().execute(&mut *tx).await?;
     }
@@ -2019,7 +2084,7 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
         let mut qb = QueryBuilder::<Postgres>::new(
             "INSERT INTO collection_fields
                 (id, collection_id, code, name, kind, is_required, sort, multiple, link_collection_id,
-                 user_type) ",
+                 user_type, xml_id) ",
         );
         qb.push_values(chunk, |mut b, p| {
             b.push_bind(p.id)
@@ -2031,7 +2096,8 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
                 .push_bind(p.sort)
                 .push_bind(p.multiple)
                 .push_bind(p.link_collection_id)
-                .push_bind(&p.user_type);
+                .push_bind(&p.user_type)
+                .push_bind(&p.xml_id);
         });
         qb.build().execute(&mut *tx).await?;
     }
@@ -2665,13 +2731,14 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
     }
     for chunk in c.price_types.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO catalog_price_types (id, code, name, is_base) ",
+            "INSERT INTO catalog_price_types (id, code, name, is_base, xml_id) ",
         );
-        qb.push_values(chunk, |mut b, (id, code, name, base)| {
+        qb.push_values(chunk, |mut b, (id, code, name, base, xml_id)| {
             b.push_bind(id)
                 .push_bind(code)
                 .push_bind(name)
-                .push_bind(base);
+                .push_bind(base)
+                .push_bind(xml_id);
         });
         qb.build().execute(&mut *tx).await?;
     }
@@ -2692,7 +2759,7 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
     }
     for chunk in c.stores.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO catalog_stores (id, name, active, sort, address, phone, email, schedule, extra) ",
+            "INSERT INTO catalog_stores (id, name, active, sort, address, phone, email, schedule, extra, xml_id) ",
         );
         qb.push_values(chunk, |mut b, st| {
             b.push_bind(st.id)
@@ -2703,7 +2770,8 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
                 .push_bind(&st.phone)
                 .push_bind(&st.email)
                 .push_bind(&st.schedule)
-                .push_bind(sqlx::types::Json(&st.extra));
+                .push_bind(sqlx::types::Json(&st.extra))
+                .push_bind(&st.xml_id);
         });
         qb.build().execute(&mut *tx).await?;
     }
@@ -2781,6 +2849,7 @@ mod tests {
             section_page_url: String::new(),
             list_page_url: String::new(),
             is_catalog: false,
+            xml_id: String::new(),
         });
         data.properties.push(PropertyRow {
             id: 7,
@@ -2794,6 +2863,7 @@ mod tests {
             link_collection_id: None,
             directory: false,
             user_type: String::new(),
+            xml_id: String::new(),
         });
         data.enums.push(EnumRow {
             id: 9,
@@ -2875,6 +2945,7 @@ mod tests {
             section_page_url: String::new(),
             list_page_url: String::new(),
             is_catalog: true,
+            xml_id: String::new(),
         }
     }
 
@@ -2891,6 +2962,7 @@ mod tests {
             link_collection_id: (kind == "element").then_some(1),
             directory: false,
             user_type: String::new(),
+            xml_id: String::new(),
         }
     }
 
@@ -3203,5 +3275,80 @@ mod tests {
         let d = bitrix_date("2026-09-01 03:00:00").unwrap();
         assert_eq!(d.to_rfc3339(), "2026-09-01T00:00:00+00:00");
         assert!(bitrix_date("").is_none());
+    }
+
+    /// XML_ID справочников и опции обмена с 1С переезжают из Битрикса.
+    #[sqlx::test]
+    async fn import_carries_xml_ids_and_exchange_options(db: PgPool) {
+        use crate::exchange::settings::{Action, Settings};
+        let mut data = Data::default();
+        let mut iblock = sku_iblock(5, "goods");
+        iblock.xml_id = "iblock-xml".into();
+        data.iblocks.push(iblock);
+        let mut prop = sku_property(7, 5, "brand", "string");
+        prop.xml_id = "prop-xml".into();
+        data.properties.push(prop);
+        data.catalog.stores.push(StoreRow {
+            id: 3,
+            name: "Склад".into(),
+            active: true,
+            sort: 500,
+            address: String::new(),
+            phone: String::new(),
+            email: String::new(),
+            schedule: String::new(),
+            extra: Map::new(),
+            image_id: None,
+            xml_id: "store-xml".into(),
+        });
+        data.catalog.price_types.push((
+            2,
+            "BASE".into(),
+            "Базовая".into(),
+            true,
+            "price-xml".into(),
+        ));
+        for (name, value) in [
+            ("1C_SECTION_ACTION", "A"),
+            ("1C_ELEMENT_ACTION", "D"),
+            ("1C_TRANSLIT_ON_ADD", "N"),
+            ("1C_TRANSLIT_ON_UPDATE", "Y"),
+            ("1C_USE_OFFERS", "Y"),
+            ("1C_INTERVAL", "120"),
+            ("1C_FILE_SIZE_LIMIT", "1000000"),
+            ("1C_USE_ZIP", "N"),
+            ("deactivate_1c_no_price", "Y"),
+        ] {
+            data.options
+                .push(("catalog".into(), name.into(), value.into()));
+        }
+        let props = resolve_properties(&mut data);
+        let mut tx = db.begin().await.unwrap();
+        write_all(&mut tx, &data, &props).await.unwrap();
+        tx.commit().await.unwrap();
+
+        for (table, xml_id) in [
+            ("collections", "iblock-xml"),
+            ("collection_fields", "prop-xml"),
+            ("catalog_stores", "store-xml"),
+            ("catalog_price_types", "price-xml"),
+        ] {
+            let got: String =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT xml_id FROM {table}")))
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(got, xml_id, "{table}");
+        }
+        let s = Settings::load(&db).await.unwrap();
+        assert_eq!(s.section_action, Action::Deactivate);
+        assert_eq!(s.element_action, Action::Delete);
+        assert!(!s.translit_on_add);
+        assert!(s.translit_on_update);
+        assert!(s.use_offers);
+        assert!(s.deactivate_without_price);
+        assert_eq!(s.interval_secs, 120);
+        assert_eq!(s.file_limit, 1_000_000);
+        assert!(!s.use_zip);
     }
 }

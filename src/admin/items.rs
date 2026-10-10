@@ -1073,6 +1073,7 @@ mod tests {
             user_type: String::new(),
             in_basket: false,
             offer_tree: false,
+            xml_id: String::new(),
         }
     }
 
@@ -1131,6 +1132,7 @@ mod tests {
             width: None,
             height: None,
             created_at: chrono::Utc::now(),
+            sha256: String::new(),
         };
         form.apply_uploads(
             vec![
