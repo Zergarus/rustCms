@@ -28,11 +28,14 @@ pub fn field_values_sql(alias: &str) -> String {
 
 /// Вынимает из `values` значение поля связи коллекции предложений и возвращает id
 /// родительского товара (число или строка с числом, у множественного — первый).
+/// Коллекция без коллекции товаров предложений не имеет: `None`, значение остаётся.
 pub fn take_link(
     collection: &Collection,
     fields: &[Field],
     values: &mut Map<String, Value>,
 ) -> Option<i64> {
+    // Поле связи без коллекции товаров — обычное поле
+    collection.product_collection_id?;
     let id = collection.sku_field_id?;
     let code = &fields.iter().find(|f| f.id == id)?.code;
     let value = values.remove(code)?;

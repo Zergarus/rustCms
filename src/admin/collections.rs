@@ -299,10 +299,23 @@ pub async fn delete(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
-) -> AppResult<Redirect> {
+) -> AppResult<Response> {
     user.require(COLLECTIONS_MANAGE)?;
-    repo::delete_collection(&state.db, id).await?;
-    Ok(Redirect::to("/admin/collections"))
+    let error = match repo::delete_collection(&state.db, id).await {
+        Ok(()) => return Ok(Redirect::to("/admin/collections").into_response()),
+        Err(repo::UnlinkError::HasOffers(n)) => format!("Сначала удалите предложения ({n})"),
+        Err(repo::UnlinkError::Db(e)) => return Err(e.into()),
+    };
+    let page = render_edit(
+        &state,
+        user,
+        id,
+        None,
+        Some(error),
+        empty_field_form(),
+        BlockErrors::default(),
+    );
+    Ok(page.await?.into_response())
 }
 
 pub async fn add_field(

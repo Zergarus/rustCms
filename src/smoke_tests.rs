@@ -960,6 +960,89 @@ async fn unlink_makes_product_simple_again(db: PgPool) {
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
+/// Коллекцию предложений с записями удалить нельзя; пустую — можно, и товары снова простые.
+#[sqlx::test]
+async fn offers_collection_delete_refused_with_offers(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    create_offer(&app, &cookie, offers, c.item_id, "Вариант 1").await;
+    let path = format!("/admin/collections/{offers}/delete");
+    let (status, html) = post_form(&app, &path, &cookie, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Сначала удалите предложения (1)"), "{html}");
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM collections WHERE id = $1)")
+            .bind(offers)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert!(exists);
+
+    sqlx::query("DELETE FROM collection_items WHERE collection_id = $1")
+        .bind(offers)
+        .execute(&db)
+        .await
+        .unwrap();
+    let (status, _) = post_form(&app, &path, &cookie, "").await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let kind: i16 = sqlx::query_scalar("SELECT type FROM catalog_products WHERE item_id = $1")
+        .bind(c.item_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(kind, 1);
+}
+
+/// После удаления коллекции товаров оставшееся поле связи бывшей коллекции предложений —
+/// обычное поле: запись с ним не становится предложением.
+#[sqlx::test]
+async fn product_collection_delete_drops_sku_field(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    let (status, _) = post_form(
+        &app,
+        &format!("/admin/collections/{}/delete", c.collection_id),
+        &cookie,
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let other: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_items (collection_id, code, name) VALUES ($1, 'x', 'Чужая') RETURNING id",
+    )
+    .bind(offers)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let (status, _) = post_multipart(
+        &app,
+        &format!("/admin/collections/{offers}/items"),
+        &cookie,
+        &[
+            ("name", "Запись"),
+            ("sort", "500"),
+            ("prop_cml2_link", &other.to_string()),
+        ],
+    )
+    .await;
+    assert!(status.is_redirection(), "{status}");
+    let parent: Option<i64> =
+        sqlx::query_scalar("SELECT product_id FROM collection_items WHERE name = 'Запись'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(parent, None);
+    let field: Option<i64> =
+        sqlx::query_scalar("SELECT sku_field_id FROM collections WHERE id = $1")
+            .bind(offers)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(field, None);
+}
+
 #[sqlx::test]
 async fn relink_refused_with_foreign_offers(db: PgPool) {
     let cookie = admin_cookie(&db).await;

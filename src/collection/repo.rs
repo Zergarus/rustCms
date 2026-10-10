@@ -89,11 +89,44 @@ pub async fn update_collection(
     Ok(res.rows_affected() > 0)
 }
 
-pub async fn delete_collection(db: &PgPool, id: i64) -> sqlx::Result<()> {
+/// Удаляет коллекцию. Коллекцию предложений с записями — нет (`HasOffers`); после удаления
+/// пустой коллекции предложений типы товаров сверяются. У коллекции предложений удаляемой
+/// коллекции товаров снимается поле связи: иначе оно делало бы записи предложениями.
+pub async fn delete_collection(db: &PgPool, id: i64) -> Result<(), UnlinkError> {
+    let mut tx = db.begin().await?;
+    let Some(parent): Option<Option<i64>> = sqlx::query_scalar(
+        "SELECT product_collection_id FROM collections WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Ok(());
+    };
+    if parent.is_some() {
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM collection_items WHERE collection_id = $1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if count > 0 {
+            return Err(UnlinkError::HasOffers(count));
+        }
+    }
+    sqlx::query(
+        "UPDATE collections SET sku_field_id = NULL, updated_at = now() WHERE product_collection_id = $1",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM collections WHERE id = $1")
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    if let Some(parent) = parent {
+        reconcile_sku_types(&mut tx, &[parent]).await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -618,6 +651,7 @@ pub async fn link_offers(db: &PgPool, product_id: i64, offers_id: i64) -> sqlx::
     tx.commit().await
 }
 
+/// Отказ снять связь с коллекцией предложений или удалить её.
 #[derive(Debug)]
 pub enum UnlinkError {
     /// В коллекции предложений есть записи (их число).
