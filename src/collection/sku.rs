@@ -626,6 +626,41 @@ mod tests {
         assert_eq!(left, 0);
     }
 
+    /// Пересчёт сначала блокирует строку товара: параллельные пересчёты одного товара
+    /// идут по очереди и не перезаписывают друг друга устаревшей доступностью.
+    #[sqlx::test]
+    async fn refresh_locks_product_row(db: PgPool) {
+        let (products, offers) = collections(&db).await;
+        let product = item(&db, products, "tovar", None).await;
+        let offer = item(&db, offers, "offer", Some(product)).await;
+        stock(&db, offer, 5, true, false).await;
+
+        let mut holder = db.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM collection_items WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(product)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let mut other = db.begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout = '200ms'")
+            .execute(&mut *other)
+            .await
+            .unwrap();
+        let err = sqlx::query("SELECT refresh_sku_product($1)")
+            .bind(product)
+            .execute(&mut *other)
+            .await
+            .expect_err("пересчёт должен ждать блокировку товара");
+        assert!(err.to_string().contains("lock timeout"), "{err}");
+        drop(other);
+        holder.rollback().await.unwrap();
+        // несуществующий товар — без ошибки
+        sqlx::query("SELECT refresh_sku_product(-1)")
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+
     /// Каталог с коллекцией предложений, созданной через `create_offer_collection`.
     async fn linked(db: &PgPool) -> (i64, crate::collection::Collection, i64, i64) {
         let products: i64 = sqlx::query_scalar(

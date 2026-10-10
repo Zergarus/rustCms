@@ -6,6 +6,8 @@ use std::{env, fs, path::Path};
 
 fn main() {
     println!("cargo:rerun-if-changed=projects");
+    // sqlx::migrate! встраивает миграции при сборке: новая миграция — пересборка
+    println!("cargo:rerun-if-changed=migrations");
     let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let dir = Path::new(&manifest).join("projects");
 
