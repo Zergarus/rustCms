@@ -908,6 +908,58 @@ async fn unlink_refused_with_offers(db: PgPool) {
     assert!(html.contains("Системное поле связи с товаром"), "{html}");
 }
 
+/// Снятая связь с предложениями возвращает бывшему товару с предложениями тип простого:
+/// его снова можно купить и править цены и остатки.
+#[sqlx::test]
+async fn unlink_makes_product_simple_again(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    create_offer(&app, &cookie, offers, c.item_id, "Вариант 1").await;
+    let offer: i64 = sqlx::query_scalar("SELECT id FROM collection_items WHERE name = 'Вариант 1'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    let (status, _) = post_form(&app, &format!("/admin/items/{offer}/delete"), &cookie, "").await;
+    assert!(status.is_redirection(), "{status}");
+    let kind = || async {
+        sqlx::query_as::<_, (i16, bool)>(
+            "SELECT type, available FROM catalog_products WHERE item_id = $1",
+        )
+        .bind(c.item_id)
+        .fetch_one(&db)
+        .await
+        .unwrap()
+    };
+    assert_eq!(kind().await, (6, false));
+    let (status, _) = post_form(
+        &app,
+        &format!("/admin/collections/{}/offers", c.collection_id),
+        &cookie,
+        "mode=none",
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(kind().await, (1, true));
+
+    let (_, html) = get(&app, &format!("/admin/items/{}", c.item_id), &cookie).await;
+    assert!(html.contains("Доступен для покупки"), "{html}");
+    assert!(!html.contains("Цены и остатки задаются у предложений"));
+    sqlx::query("UPDATE catalog_products SET quantity = 5 WHERE item_id = $1")
+        .bind(c.item_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let (status, body) = cart_post(
+        &app,
+        "/api/v1/cart/items",
+        "tok",
+        json!({"productId": c.item_id}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 #[sqlx::test]
 async fn relink_refused_with_foreign_offers(db: PgPool) {
     let cookie = admin_cookie(&db).await;

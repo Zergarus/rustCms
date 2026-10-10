@@ -665,7 +665,45 @@ pub async fn unlink_offers(db: &PgPool, product_id: i64) -> Result<(), UnlinkErr
             .execute(&mut *tx)
             .await?;
     }
+    // Товары без коллекции предложений снова простые
+    reconcile_sku_types(&mut tx, &[product_id, offers_id]).await?;
     tx.commit().await?;
+    Ok(())
+}
+
+/// Приводит типы товаров записей коллекций `collection_ids` в соответствие со связями:
+/// товар с предложениями (3/6) без предложений — 6, если у коллекции есть коллекция
+/// предложений, иначе 1 (снова продаётся: `available` включается); запись типа 4 без
+/// родительского товара (`collection_items.product_id`) — 1. Нужна там, где связь
+/// коллекций меняется без изменения записей (снятие связи, удаление коллекции, импорт).
+pub async fn reconcile_sku_types(
+    conn: &mut sqlx::PgConnection,
+    collection_ids: &[i64],
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE catalog_products c
+         SET type = t.target,
+             available = CASE WHEN t.target = 6 THEN FALSE
+                              WHEN c.type IN (3, 6) THEN TRUE
+                              ELSE c.available END
+         FROM (
+             SELECT i.id,
+                    CASE WHEN cp.type = 4 THEN 1
+                         WHEN EXISTS (SELECT 1 FROM collections oc
+                                      WHERE oc.product_collection_id = i.collection_id) THEN 6
+                         ELSE 1 END AS target
+             FROM collection_items i
+             JOIN catalog_products cp ON cp.item_id = i.id
+             WHERE i.collection_id = ANY($1)
+               AND ((cp.type = 4 AND i.product_id IS NULL)
+                    OR (cp.type IN (3, 6)
+                        AND NOT EXISTS (SELECT 1 FROM collection_items o WHERE o.product_id = i.id)))
+         ) t
+         WHERE c.item_id = t.id AND c.type <> t.target",
+    )
+    .bind(collection_ids)
+    .execute(conn)
+    .await?;
     Ok(())
 }
 

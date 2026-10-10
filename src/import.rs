@@ -2649,6 +2649,9 @@ async fn write_sku(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
         .execute(&mut *tx)
         .await?;
     }
+    // Тип из Битрикса мог разойтись со связями (предложения не перенеслись, связи нет)
+    let collections: Vec<i64> = data.iblocks.iter().map(|i| i.id).collect();
+    crate::collection::repo::reconcile_sku_types(&mut *tx, &collections).await?;
     Ok(())
 }
 
@@ -3004,6 +3007,68 @@ mod tests {
                 "round {round}"
             );
         }
+    }
+
+    /// Типы после переноса сверяются со связями: товар с предложениями без предложений —
+    /// 6 в связанной коллекции и 1 в коллекции без предложений; предложение без товара — 1.
+    #[sqlx::test]
+    async fn import_reconciles_sku_types(db: PgPool) {
+        let product = |item_id, product_type, available| ProductRow {
+            item_id,
+            quantity: 5.0,
+            available,
+            quantity_trace: None,
+            can_buy_zero: None,
+            product_type,
+            weight: 0.0,
+        };
+        let mut data = Data {
+            iblocks: vec![
+                sku_iblock(1, "goods"),
+                sku_iblock(2, "offers"),
+                sku_iblock(3, "plain"),
+            ],
+            properties: vec![sku_property(10, 2, "cml2_link", "element")],
+            elements: vec![
+                sku_element(100, 1, HashMap::new()),
+                sku_element(101, 1, HashMap::new()),
+                sku_element(200, 2, HashMap::from([(10, vec!["100".to_string()])])),
+                sku_element(201, 2, HashMap::new()),
+                sku_element(300, 3, HashMap::new()),
+                sku_element(301, 3, HashMap::new()),
+            ],
+            sku_links: vec![(2, 1, 10)],
+            ..Default::default()
+        };
+        data.catalog.products = vec![
+            product(100, 3, true),
+            product(101, 3, true),
+            product(200, 4, true),
+            product(201, 4, true),
+            product(300, 6, false),
+            product(301, 3, true),
+        ];
+        let props = resolve_properties(&mut data);
+        let mut tx = db.begin().await.unwrap();
+        write_all(&mut tx, &data, &props).await.unwrap();
+        tx.commit().await.unwrap();
+        let rows: Vec<(i64, i16, bool)> = sqlx::query_as(
+            "SELECT item_id, type, available FROM catalog_products ORDER BY item_id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (100, 3, true),
+                (101, 6, false),
+                (200, 4, true),
+                (201, 1, true),
+                (300, 1, true),
+                (301, 1, true),
+            ]
+        );
     }
 
     #[sqlx::test]
