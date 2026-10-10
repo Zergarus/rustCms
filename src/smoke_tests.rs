@@ -1043,6 +1043,52 @@ async fn product_collection_delete_drops_sku_field(db: PgPool) {
     assert_eq!(field, None);
 }
 
+/// Снять «Торговый каталог» с коллекции товаров с предложениями (и с самой коллекции
+/// предложений) нельзя: связью потом не управлять.
+#[sqlx::test]
+async fn catalog_flag_kept_while_linked(db: PgPool) {
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let (c, offers) = sku_setup(&db, &app, &cookie).await;
+    for (id, code, error) in [
+        (
+            c.collection_id,
+            "news",
+            "сначала отключите торговые предложения",
+        ),
+        (
+            offers,
+            "news_offers",
+            "Коллекция предложений должна быть торговым каталогом",
+        ),
+    ] {
+        let (status, html) = post_form(
+            &app,
+            &format!("/admin/collections/{id}"),
+            &cookie,
+            &format!("code={code}&name=X&sort=500"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{code}");
+        assert!(html.contains(error), "{html}");
+        let catalog: bool = sqlx::query_scalar("SELECT is_catalog FROM collections WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert!(catalog, "{code}");
+    }
+    // с отметкой сохраняется как обычно
+    let (status, _) = post_form(
+        &app,
+        &format!("/admin/collections/{}", c.collection_id),
+        &cookie,
+        "code=news&name=X&sort=500&is_catalog=on",
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+}
+
 #[sqlx::test]
 async fn relink_refused_with_foreign_offers(db: PgPool) {
     let cookie = admin_cookie(&db).await;

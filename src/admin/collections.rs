@@ -272,7 +272,13 @@ pub async fn update(
     Form(form): Form<CollectionForm>,
 ) -> AppResult<Response> {
     user.require(COLLECTIONS_MANAGE)?;
-    let error = match form.validate() {
+    let validated = match form.validate() {
+        Ok(input) if !input.is_catalog => {
+            catalog_flag_error(&state, id).await?.map_or(Ok(input), Err)
+        }
+        other => other,
+    };
+    let error = match validated {
         Ok(input) => match repo::update_collection(&state.db, id, &input).await {
             Ok(true) => {
                 return Ok(Redirect::to(&format!("/admin/collections/{id}")).into_response());
@@ -293,6 +299,25 @@ pub async fn update(
         BlockErrors::default(),
     );
     Ok(page.await?.into_response())
+}
+
+/// Отметку «Торговый каталог» не снять, пока коллекция связана с предложениями —
+/// как коллекция товаров или как коллекция предложений.
+async fn catalog_flag_error(state: &AppState, id: i64) -> AppResult<Option<String>> {
+    let Some(collection) = repo::get_collection(&state.db, id).await? else {
+        return Ok(None);
+    };
+    if collection.product_collection_id.is_some() {
+        return Ok(Some(
+            "Коллекция предложений должна быть торговым каталогом".into(),
+        ));
+    }
+    if repo::offers_collection(&state.db, id).await?.is_some() {
+        return Ok(Some(
+            "У коллекции есть торговые предложения: сначала отключите торговые предложения".into(),
+        ));
+    }
+    Ok(None)
 }
 
 pub async fn delete(
