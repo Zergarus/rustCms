@@ -445,7 +445,12 @@ impl Loaded {
                     loaded.stocks.entry(el).or_default().push((store, amount));
                 }
             }
-            if select.has("catalogType") || select.has("catalogPrice") || select.has("stocks") {
+            // Цена «от» и сумма остатков нужны только товарам с предложениями, а они есть
+            // лишь у коллекции с коллекцией предложений (типы сверяются при снятии связи);
+            // без запроса тип по умолчанию — простой
+            if select.has("catalogType")
+                || (schema.offers.is_some() && (select.has("catalogPrice") || select.has("stocks")))
+            {
                 loaded.load_types(env, &row_ids).await?;
             }
             if select.has("catalogQuantity") {

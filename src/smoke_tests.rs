@@ -1998,6 +1998,47 @@ async fn catalog_type_defaults_to_simple(db: PgPool) {
     assert_eq!(body["data"]["items"][0]["catalogType"], json!(1));
 }
 
+/// Без коллекции предложений цена и остатки не требуют запроса типов: товаров с
+/// предложениями там нет (их тип сверяется при снятии связи). Наблюдаемо по записи с
+/// заведомо неверным типом 3 — её собственная цена выводится как есть.
+#[sqlx::test]
+async fn catalog_price_skips_types_without_offers(db: PgPool) {
+    let c = content_fixture(&db).await;
+    sqlx::query("UPDATE collections SET is_catalog = TRUE WHERE id = $1")
+        .bind(c.collection_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let base: i64 = sqlx::query_scalar(
+        "INSERT INTO catalog_price_types (code, name, is_base) VALUES ('BASE', 'Базовая', TRUE) RETURNING id",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO catalog_prices (item_id, price_type_id, price, currency) VALUES ($1, $2, 700, 'RUB')",
+    )
+    .bind(c.item_id)
+    .bind(base)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO catalog_products (item_id, type) VALUES ($1, 3)")
+        .bind(c.item_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let app = app(&db);
+    let body = bx_list(&app, "news", json!({"select": ["id", "catalogPrice"]})).await;
+    assert_eq!(
+        body["data"]["items"][0]["catalogPrice"]["value"],
+        json!(700)
+    );
+    // catalogType по-прежнему читается из базы
+    let body = bx_list(&app, "news", json!({"select": ["id", "catalogType"]})).await;
+    assert_eq!(body["data"]["items"][0]["catalogType"], json!(3));
+}
+
 #[sqlx::test]
 async fn filter_by_offers(db: PgPool) {
     let (a, _, dear, offers) = price_from_fixture(&db).await;
