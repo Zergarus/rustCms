@@ -692,6 +692,81 @@ async fn bxapi_filters_and_selects_cml2link(db: PgPool) {
     assert_eq!(none["data"]["items"], json!([]));
 }
 
+/// Фильтр по связи с товаром идёт по колонке `product_id` (индекс), с тем же результатом;
+/// отрицание включает записи без товара.
+#[sqlx::test]
+async fn cml2link_filter_uses_product_column(db: PgPool) {
+    let (product, offer) = sku_fixture(&db).await;
+    let offers: i64 =
+        sqlx::query_scalar("SELECT collection_id FROM collection_items WHERE id = $1")
+            .bind(offer)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    let products: i64 =
+        sqlx::query_scalar("SELECT collection_id FROM collection_items WHERE id = $1")
+            .bind(product)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    let other: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_items (collection_id, code, name) VALUES ($1, 'drugoy', 'Другой') RETURNING id",
+    )
+    .bind(products)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let other_offer: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_items (collection_id, code, name, product_id)
+         VALUES ($1, 'offer2', 'Второе', $2) RETURNING id",
+    )
+    .bind(offers)
+    .bind(other)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let orphan: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_items (collection_id, code, name) VALUES ($1, 'orphan', 'Без товара') RETURNING id",
+    )
+    .bind(offers)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let app = app(&db);
+    let ids = |body: Value| -> Vec<i64> {
+        body["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_i64().unwrap())
+            .collect()
+    };
+    let list = |filter: Value| {
+        bx_list(
+            &app,
+            "catalog_offers",
+            json!({"select": ["id"], "filter": filter, "order": {"id": "asc"}}),
+        )
+    };
+    for filter in [
+        json!({"cml2Link.element.id": [product]}),
+        json!({"=cml2Link": product}),
+        json!({"@cml2Link.element.id": [product, product + 1000]}),
+    ] {
+        assert_eq!(ids(list(filter.clone()).await), vec![offer], "{filter}");
+    }
+    for filter in [
+        json!({"!cml2Link.element.id": [product]}),
+        json!({"!@cml2Link": [product]}),
+    ] {
+        assert_eq!(
+            ids(list(filter.clone()).await),
+            vec![other_offer, orphan],
+            "{filter}"
+        );
+    }
+}
+
 #[sqlx::test]
 async fn own_api_shows_product_link(db: PgPool) {
     let (product, offer) = sku_fixture(&db).await;

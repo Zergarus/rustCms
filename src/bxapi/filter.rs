@@ -630,6 +630,18 @@ fn push_prop_ids(
     negative: bool,
     ids: Vec<i64>,
 ) -> Result<(), BxError> {
+    if ctx.schema.collection.sku_field_id == Some(prop.id) {
+        // Связь предложения с товаром — колонка `product_id` (родительский товар) с индексом;
+        // запись без товара под отрицание попадает, как пустое свойство
+        let a = &ctx.alias;
+        qb.push(if negative {
+            format!("({a}.product_id IS NULL OR NOT ({a}.product_id = ANY(")
+        } else {
+            format!("({a}.product_id = ANY(")
+        });
+        qb.push_bind(ids).push(if negative { ")))" } else { "))" });
+        return Ok(());
+    }
     let ids: Vec<String> = ids.iter().map(i64::to_string).collect();
     push_exists(qb, ctx, prop, negative, |qb, x| {
         qb.push(format!("({x} #>> '{{}}') = ANY("))
@@ -917,6 +929,54 @@ pub fn push_order(
 mod tests {
     use super::*;
     use serde_json::json;
+    use sqlx::PgPool;
+
+    /// Фильтр по связи предложения с товаром — по колонке `product_id` (её индекс),
+    /// а не по JSONB.
+    #[sqlx::test]
+    async fn cml2link_filter_sql_uses_product_column(db: PgPool) {
+        let products: i64 = sqlx::query_scalar(
+            "INSERT INTO collections (code, name, is_catalog) VALUES ('catalog', 'Каталог', TRUE) RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let parent = crate::collection::repo::get_collection(&db, products)
+            .await
+            .unwrap()
+            .unwrap();
+        crate::collection::repo::create_offer_collection(&db, &parent)
+            .await
+            .unwrap();
+        let state = crate::test_support::test_state(db.clone());
+        let snap = state.registry.snapshot(&db).await.unwrap();
+        let schema = snap.by_code("catalog_offers").unwrap().clone();
+        for (filter, expected) in [
+            (json!({"cml2Link.element.id": [5]}), "(e.product_id = ANY("),
+            (json!({"@cml2Link": [5, 6]}), "(e.product_id = ANY("),
+            (
+                json!({"!cml2Link.element.id": [5]}),
+                "(e.product_id IS NULL OR NOT (e.product_id = ANY(",
+            ),
+        ] {
+            let body = json!({ "filter": filter });
+            let req = super::super::query::ListRequest::parse(
+                body.as_object().unwrap(),
+                &state.project,
+                "catalog_offers",
+            )
+            .unwrap();
+            let qb =
+                super::super::elements::build_list_query(&snap, &schema, &state, &req).unwrap();
+            let sql = qb.sql();
+            assert!(sql.as_str().contains(expected), "{}", sql.as_str());
+            assert!(
+                !sql.as_str().contains("jsonb_array_elements"),
+                "{}",
+                sql.as_str()
+            );
+        }
+    }
 
     #[test]
     fn operators() {
