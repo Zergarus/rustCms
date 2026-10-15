@@ -220,6 +220,19 @@ async fn collection_for(
     Ok(Some(resolve_any(conn, settings, &ids, name).await?))
 }
 
+/// Ключ `pg_advisory_xact_lock` обмена с 1С: импорты и деактивация разных сессий идут
+/// по очереди (поиск записи по `xml_id` и вставка не защищены уникальным индексом).
+const EXCHANGE_LOCK: i64 = 0x1C_E8C4_A06E;
+
+/// Берёт блокировку обмена до конца текущей транзакции. Вызывать первым запросом.
+pub async fn lock_exchange(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(EXCHANGE_LOCK)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 pub async fn apply(
     conn: &mut PgConnection,
     ctx: &Ctx<'_>,

@@ -354,6 +354,8 @@ pub(crate) async fn import_file(
     let settings = Settings::load(&state.db).await.map_err(db_err)?;
 
     let mut tx = state.db.begin().await.map_err(db_err)?;
+    // Импорты разных сессий не пишут каталог одновременно
+    apply::lock_exchange(&mut tx).await.map_err(db_err)?;
     // Блокировка строки сессии: два одновременных import одного файла не удвоят запись
     let current: Value =
         sqlx::query_scalar("SELECT state FROM exchange_sessions WHERE id = $1 FOR UPDATE")
@@ -429,6 +431,7 @@ async fn deactivate_now(state: &AppState, session: &Session) -> Reply {
         }
     }
     let mut tx = state.db.begin().await.map_err(db_err)?;
+    apply::lock_exchange(&mut tx).await.map_err(db_err)?;
     let stats = apply::deactivate_missing(&mut tx, &settings, session.id)
         .await
         .map_err(|e| e.to_string())?;
@@ -1362,6 +1365,80 @@ mod tests {
         }
         assert_eq!(active_items(&db).await, []);
         assert!(c.get(&t_root, "mode=init").await.starts_with("zip="));
+    }
+
+    /// Сессия с файлом `name` в каталоге.
+    async fn session_with_file(state: &AppState, user_id: i64, name: &str, data: &[u8]) -> Session {
+        let (s, _) = session::start(&state.db, user_id).await.unwrap();
+        let dir = session::dir(&state.config.upload_dir, &s);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), data).unwrap();
+        s
+    }
+
+    #[sqlx::test]
+    async fn concurrent_imports_do_not_duplicate(db: PgPool) {
+        let user_id = exchange_user(&db, "exch").await;
+        let state = test_state(db.clone());
+        let ids: Vec<String> = (0..150).map(|i| format!("g-{i}")).collect();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let goods = goods_xml(&refs, false);
+        let offers: String = ids
+            .iter()
+            .map(|id| {
+                format!(
+                    "<Предложение><Ид>{id}</Ид><Цены><Цена><ИдТипаЦены>pt-1</ИдТипаЦены>\
+                     <ЦенаЗаЕдиницу>10</ЦенаЗаЕдиницу><Валюта>RUB</Валюта></Цена></Цены></Предложение>"
+                )
+            })
+            .collect();
+        let prices = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<КоммерческаяИнформация xmlns="urn:1C.ru:commerceml_3" ВерсияСхемы="3.1"><ПакетПредложений СодержитТолькоИзменения="true"><ИдКаталога>cat-0001</ИдКаталога><ИдКлассификатора>cls-0001</ИдКлассификатора><Предложения>{offers}</Предложения></ПакетПредложений></КоммерческаяИнформация>"#
+        );
+        let mut sessions = Vec::new();
+        for _ in 0..2 {
+            let s = session_with_file(&state, user_id, "goods.xml", goods.as_bytes()).await;
+            let dir = session::dir(&state.config.upload_dir, &s);
+            std::fs::write(dir.join("prices.xml"), prices.as_bytes()).unwrap();
+            sessions.push(s);
+        }
+        for file in ["goods.xml", "prices.xml"] {
+            let (a, b) = tokio::join!(
+                import_file(&state, &sessions[0], file, Limits::default(), None),
+                import_file(&state, &sessions[1], file, Limits::default(), None),
+            );
+            a.unwrap();
+            b.unwrap();
+        }
+        let dup_items: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM (SELECT xml_id FROM collection_items
+                                   GROUP BY xml_id HAVING count(*) > 1) d",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(dup_items, 0);
+        let (collections, items): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM collections), (SELECT count(*) FROM collection_items)",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!((collections, items), (1, 150));
+        let dup_prices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM (SELECT item_id, price_type_id FROM catalog_prices
+                                   GROUP BY 1, 2 HAVING count(*) > 1) d",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(dup_prices, 0);
+        let types: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog_price_types")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(types, 1);
     }
 
     #[sqlx::test]
