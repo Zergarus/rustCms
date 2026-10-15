@@ -1434,6 +1434,8 @@ async fn apply_offers(
     .collect();
     let mut sku: Option<SkuState> = None;
     let mut carried_prices = false;
+    let mut in_package: Vec<i64> = Vec::new();
+    let mut priced: Vec<i64> = Vec::new();
 
     for offer in package.offers.iter().filter(|o| !o.id.is_empty()) {
         if offer.deleted {
@@ -1461,6 +1463,7 @@ async fn apply_offers(
             bump(&mut stats.skipped, "offers");
             continue;
         };
+        in_package.push(item_id);
 
         if let Some(prices) = &offer.prices {
             // Последняя цена типа в предложении побеждает
@@ -1470,6 +1473,9 @@ async fn apply_offers(
                     Some(slot) => slot.1 = price,
                     None => by_type.push((&price.type_id, price)),
                 }
+            }
+            if !by_type.is_empty() {
+                priced.push(item_id);
             }
             for (type_xml, price) in by_type {
                 carried_prices = true;
@@ -1529,7 +1535,7 @@ async fn apply_offers(
     }
 
     if carried_prices && ctx.settings.deactivate_without_price {
-        deactivate_without_price(conn, collection, stats).await?;
+        deactivate_without_price(conn, &in_package, &priced, stats).await?;
     }
     Ok(())
 }
@@ -1656,24 +1662,35 @@ async fn write_quantity(
     Ok(())
 }
 
-/// После пакета с ценами записи без единой цены становятся неактивными. У товара с
-/// предложениями считаются цены его предложений.
+/// После пакета с ценами: запись пакета, получившая цену, снова активна; запись пакета
+/// без единой цены неактивна. Записи вне пакета не трогаются. У товара с предложениями
+/// считаются цены его предложений.
 async fn deactivate_without_price(
     conn: &mut PgConnection,
-    collection: &Collection,
+    in_package: &[i64],
+    priced: &[i64],
     stats: &mut Stats,
 ) -> Result<(), ApplyError> {
+    let reactivated = sqlx::query(
+        "UPDATE collection_items SET active = TRUE, updated_at = now()
+         WHERE id = ANY($1) AND NOT active",
+    )
+    .bind(priced)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if reactivated > 0 {
+        *stats.updated.entry("items").or_default() += reactivated as u32;
+    }
     let done = sqlx::query(
         "UPDATE collection_items i SET active = FALSE, updated_at = now()
-         WHERE i.active
-           AND i.collection_id IN (
-                 $1, COALESCE((SELECT id FROM collections WHERE product_collection_id = $1), 0))
+         WHERE i.id = ANY($1) AND i.active
            AND NOT EXISTS (SELECT 1 FROM catalog_prices p WHERE p.item_id = i.id)
            AND NOT EXISTS (SELECT 1 FROM collection_items o
                            JOIN catalog_prices p ON p.item_id = o.id
                            WHERE o.product_id = i.id)",
     )
-    .bind(collection.id)
+    .bind(in_package)
     .execute(&mut *conn)
     .await?
     .rows_affected();
@@ -3183,5 +3200,71 @@ mod tests {
         // Повтор не считает уже неактивную
         let st = run_in(&db, &on, &dirs, &prices_package()).await.unwrap();
         assert!(st.deactivated.is_empty(), "{st:?}");
+    }
+
+    #[sqlx::test]
+    async fn deactivation_follows_package_and_reactivates(db: PgPool) {
+        let on = Settings {
+            deactivate_without_price: true,
+            ..Settings::default()
+        };
+        let dirs = Dirs::new();
+        let mut goods = goods_package();
+        goods.catalog.as_mut().unwrap().goods[1].deleted = false;
+        load_goods(&db, &on, &dirs, &goods).await;
+        let active = |db: PgPool| async move {
+            sqlx::query_as::<_, (String, bool)>(
+                "SELECT xml_id, active FROM collection_items ORDER BY xml_id",
+            )
+            .fetch_all(&db)
+            .await
+            .unwrap()
+        };
+        // Цены раздельными пакетами: сначала good-1, потом good-2
+        let price = |id: &str, ty: &str| {
+            let mut p = prices_package();
+            let offers = &mut p.offers.as_mut().unwrap().offers;
+            offers.retain(|o| o.id == "good-1");
+            offers[0].id = id.into();
+            offers[0]
+                .prices
+                .as_mut()
+                .unwrap()
+                .retain(|x| x.type_id == ty);
+            p
+        };
+        run_in(&db, &on, &dirs, &price("good-1", "pt-1"))
+            .await
+            .unwrap();
+        // good-2 вне пакета: не тронут
+        assert!(active(db.clone()).await.iter().all(|r| r.1));
+        run_in(&db, &on, &dirs, &price("good-2", "pt-1"))
+            .await
+            .unwrap();
+        assert!(active(db.clone()).await.iter().all(|r| r.1));
+
+        // Запись пакета без цены неактивна, запись вне пакета не тронута
+        sqlx::query("DELETE FROM catalog_prices p USING collection_items i WHERE i.id = p.item_id AND i.xml_id = 'good-2'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut p = price("good-1", "pt-2");
+        p.offers.as_mut().unwrap().offers.push(cml::Offer {
+            id: "good-2".into(),
+            prices: Some(Vec::new()),
+            ..cml::Offer::default()
+        });
+        let st = run_in(&db, &on, &dirs, &p).await.unwrap();
+        assert_eq!(st.deactivated.get("items"), Some(&1), "{st:?}");
+        assert_eq!(
+            active(db.clone()).await,
+            [("good-1".to_string(), true), ("good-2".to_string(), false)]
+        );
+        // Получила цену: снова активна
+        let st = run_in(&db, &on, &dirs, &price("good-2", "pt-1"))
+            .await
+            .unwrap();
+        assert_eq!(st.updated.get("items"), Some(&1), "{st:?}");
+        assert!(active(db.clone()).await.iter().all(|r| r.1));
     }
 }
