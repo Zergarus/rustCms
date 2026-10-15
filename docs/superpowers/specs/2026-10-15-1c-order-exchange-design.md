@@ -70,6 +70,8 @@ CMS — универсальный шаблон под любой проект (
 - `shipments`: `id_1c`, `version_1c`, `allow_delivery BOOLEAN`, `allow_delivery_at`,
   `deducted BOOLEAN` («отгружена»), `deducted_at`, `delivery_doc_num`,
   `delivery_doc_date DATE`, `tracking_number`, `updated_1c`.
+- `shipments_removed` — удалённые отгрузки (заказ, id, `id_1c`, время) для документов
+  удалённых отгрузок, как `SHIPMENT_REMOVED` у Битрикса; заполняется триггером.
 - `users.xml_id TEXT NOT NULL DEFAULT ''` + уникальный индекс по непустому.
 - `person_types.domain CHAR(1) NOT NULL DEFAULT 'I'` (`I` — физлицо, `E` — юрлицо;
   `b_sale_bizval_persondomain`).
