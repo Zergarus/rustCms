@@ -220,16 +220,21 @@ fn flag(s: &str) -> bool {
     s.eq_ignore_ascii_case("true") || s == "1" || s.eq_ignore_ascii_case("да")
 }
 
-/// Число из 1С: допускает запятую как разделитель; пустая строка — `None`.
+/// Число из 1С: пробелы (в том числе неразрывные) отбрасываются, запятая — десятичный разделитель;
+/// пустая строка — `None`, нечисловое и не конечное значение — ошибка.
 fn number(s: &str) -> Result<Option<f64>, CmlError> {
-    let s = s.trim();
-    if s.is_empty() {
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '\u{a0}' && *c != '\u{202f}')
+        .map(|c| if c == ',' { '.' } else { c })
+        .collect();
+    if cleaned.is_empty() {
         return Ok(None);
     }
-    s.replace(',', ".")
-        .parse::<f64>()
-        .map(Some)
-        .map_err(|_| CmlError::Number(s.to_string()))
+    match cleaned.parse::<f64>() {
+        Ok(v) if v.is_finite() => Ok(Some(v)),
+        _ => Err(CmlError::Number(s.trim().to_string())),
+    }
 }
 
 #[derive(Default)]
@@ -258,6 +263,7 @@ struct State {
     weight_element: Option<String>,
     weight_requisite: Option<String>,
     weight_unit: String,
+    base_unit_code: String,
     offer: Offer,
     price: Option<f64>,
     price_item: Price,
@@ -355,6 +361,9 @@ impl State {
                 self.weight_element = None;
                 self.weight_requisite = None;
                 self.weight_unit.clear();
+            }
+            ("БазоваяЕдиница", "Товар") => {
+                self.base_unit_code = attr(attrs, "Код").unwrap_or("").trim().to_string();
             }
             ("Изготовитель", "Товар") => self.manufacturer = Default::default(),
             ("ЗначенияСвойства", "ЗначенияСвойств") => {
@@ -475,7 +484,11 @@ impl State {
             ("Штрихкод", "Товар") => self.goods.barcode = id,
             ("Артикул", "Товар") => self.goods.article = id,
             ("Наименование", "Товар") => self.goods.name = text,
-            ("БазоваяЕдиница", "Товар") => self.goods.base_unit = id,
+            ("БазоваяЕдиница", "Товар") => {
+                // 2.x: код единицы лежит в атрибуте, 3.1 — в тексте.
+                let code = std::mem::take(&mut self.base_unit_code);
+                self.goods.base_unit = if code.is_empty() { id } else { code };
+            }
             ("Описание", "Товар") => self.goods.description = text,
             ("Картинка", "Товар") => self.goods.pictures.push(id),
             ("Вес", "Товар") => self.weight_element = Some(id),
@@ -614,7 +627,7 @@ impl State {
     }
 
     /// Вес товара в граммах: «Вес» (элемент или реквизит) в 1С хранится в килограммах, как и в Битриксе;
-    /// граммы берутся как есть только если реквизит «ЕдиницаВеса» явно называет граммы.
+    /// граммы берутся как есть только если реквизит «ЕдиницаВеса» явно называет граммы (грамм, «г», код ОКЕИ 163).
     fn weight_grams(&self) -> Option<f64> {
         let raw = self
             .weight_requisite
@@ -622,7 +635,9 @@ impl State {
             .or(self.weight_element.as_ref())?;
         let value = number(raw).ok().flatten()?;
         let unit = self.weight_unit.as_str();
-        let grams = unit.contains('г') && !unit.contains("кг");
+        // Сначала килограммы («килограмм» содержит «грамм»), затем граммы; неизвестная единица — килограммы.
+        let kilograms = unit.contains("кг") || unit.starts_with("килограмм") || unit == "166";
+        let grams = !kilograms && (unit.contains("грамм") || unit == "г" || unit == "163");
         Some(if grams { value } else { value * 1000.0 })
     }
 }
@@ -851,7 +866,7 @@ mod tests {
         assert_eq!(cat.id, "cat-2x");
         let g = &cat.goods[0];
         assert_eq!(g.id, "g2-good");
-        assert_eq!(g.base_unit, "шт");
+        assert_eq!(g.base_unit, "796");
         assert_eq!(g.weight_grams, Some(300.0));
         assert_eq!(g.properties[0].1, vec!["v2-1"]);
     }
@@ -921,5 +936,56 @@ mod tests {
         ));
         let msg = parse(b"<a/>").unwrap_err().to_string();
         assert!(msg.contains("CommerceML"));
+    }
+
+    fn weight_of(raw: &str, unit: &str) -> Option<f64> {
+        let st = State {
+            weight_requisite: Some(raw.to_string()),
+            weight_unit: unit.to_string(),
+            ..State::default()
+        };
+        st.weight_grams()
+    }
+
+    #[test]
+    fn weight_units() {
+        for unit in ["", "кг", "килограмм", "килограммы", "166", "неизвестно"]
+        {
+            assert_eq!(weight_of("1,5", unit), Some(1500.0), "{unit}");
+        }
+        for unit in ["г", "грамм", "граммы", "163"] {
+            assert_eq!(weight_of("1,5", unit), Some(1.5), "{unit}");
+        }
+    }
+
+    #[test]
+    fn number_formats() {
+        assert_eq!(number("6 540,66").unwrap(), Some(6540.66));
+        assert_eq!(number("6\u{a0}540.66").unwrap(), Some(6540.66));
+        assert_eq!(number("1\u{202f}000").unwrap(), Some(1000.0));
+        assert_eq!(number(" ").unwrap(), None);
+        for bad in ["NaN", "inf", "-inf", "infinity", "abc"] {
+            assert!(matches!(number(bad), Err(CmlError::Number(_))), "{bad}");
+        }
+    }
+
+    #[test]
+    fn base_unit_prefers_code_attribute() {
+        let xml = |inner: &str| {
+            format!(
+                "<КоммерческаяИнформация><Каталог><Товары><Товар><Ид>x</Ид>{inner}</Товар></Товары></Каталог></КоммерческаяИнформация>"
+            )
+        };
+        let unit = |inner: &str| {
+            let p = parse(xml(inner).as_bytes()).unwrap();
+            p.catalog.unwrap().goods[0].base_unit.clone()
+        };
+        assert_eq!(
+            unit(r#"<БазоваяЕдиница Код=" 796 ">шт</БазоваяЕдиница>"#),
+            "796"
+        );
+        assert_eq!(unit(r#"<БазоваяЕдиница Код="796"/>"#), "796");
+        assert_eq!(unit("<БазоваяЕдиница>796 </БазоваяЕдиница>"), "796");
+        assert_eq!(unit("<БазоваяЕдиница>шт</БазоваяЕдиница>"), "шт");
     }
 }
