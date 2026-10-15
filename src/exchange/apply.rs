@@ -1327,7 +1327,7 @@ async fn write_goods(
             bump(&mut stats.created, "items");
             (id, true, true)
         }
-        Some((id, name, old_section, old_code, old_text, ..)) => {
+        Some((id, name, old_section, old_code, old_text, _, _, _, old_active)) => {
             let code = if settings.translit_on_update {
                 unique_item_code(conn, collection.id, Some(id), &goods.name)
                     .await?
@@ -1341,13 +1341,14 @@ async fn write_goods(
                 && old_text == goods.description
                 && old_preview == preview
                 && old_detail == detail
-                && old_values == values;
+                && old_values == values
+                && old_active;
             if !same {
                 sqlx::query(
                     "UPDATE collection_items
                      SET name = $2, section_id = $3, code = $4, detail_text = $5,
                          preview_picture_id = $6, detail_picture_id = $7, field_values = $8,
-                         updated_at = now()
+                         active = TRUE, updated_at = now()
                      WHERE id = $1",
                 )
                 .bind(id)
@@ -2351,5 +2352,37 @@ mod tests {
         .unwrap();
         // удалённый в 1С товар «виденным» не считается
         assert_eq!(seen, ["good-1"]);
+    }
+
+    #[sqlx::test]
+    async fn goods_without_delete_mark_are_reactivated(db: PgPool) {
+        let dirs = Dirs::new();
+        let settings = Settings {
+            element_action: Action::Deactivate,
+            ..Settings::default()
+        };
+        load_goods(&db, &settings, &dirs, &goods_package()).await;
+        let active = || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT active FROM collection_items WHERE xml_id = 'good-1'",
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        let mut gone = goods_package();
+        gone.catalog.as_mut().unwrap().goods[0].deleted = true;
+        run_in(&db, &settings, &dirs, &gone).await.unwrap();
+        assert!(!active().await);
+        let st = run_in(&db, &settings, &dirs, &goods_package())
+            .await
+            .unwrap();
+        assert!(active().await);
+        assert_eq!(st.updated.get("items"), Some(&1), "{st:?}");
+        // уже активная и неизменная запись не пишется
+        let st = run_in(&db, &settings, &dirs, &goods_package())
+            .await
+            .unwrap();
+        assert!(st.updated.is_empty() && st.created.is_empty(), "{st:?}");
     }
 }
