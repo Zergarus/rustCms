@@ -1674,8 +1674,8 @@ async fn apply_offers(
                 .await?;
                 write_quantity(conn, item_id, total).await?;
             }
-            // Склады не пришли: только общее количество (CommerceML 2.x)
-            (None, Some(quantity)) => write_quantity(conn, item_id, quantity).await?,
+            // Склады не пришли (или пусты): только общее количество (CommerceML 2.x)
+            (_, Some(quantity)) => write_quantity(conn, item_id, quantity).await?,
             _ => {}
         }
     }
@@ -1819,20 +1819,23 @@ async fn write_amount(
     amount: f64,
     stats: &mut Stats,
 ) -> Result<(), ApplyError> {
-    let changed = sqlx::query(
+    // `xmax = 0` — строка вставлена, иначе обновлена; неизменная строку не возвращает
+    let written: Option<bool> = sqlx::query_scalar(
         "INSERT INTO catalog_store_amounts (item_id, store_id, amount)
          VALUES ($1, $2, round($3::float8::numeric, 2))
          ON CONFLICT (item_id, store_id) DO UPDATE SET amount = EXCLUDED.amount
-         WHERE catalog_store_amounts.amount <> EXCLUDED.amount",
+         WHERE catalog_store_amounts.amount <> EXCLUDED.amount
+         RETURNING (xmax = 0)",
     )
     .bind(item_id)
     .bind(store_id)
     .bind(amount)
-    .execute(&mut *conn)
-    .await?
-    .rows_affected();
-    if changed > 0 {
-        bump(&mut stats.updated, "rests");
+    .fetch_optional(&mut *conn)
+    .await?;
+    match written {
+        Some(true) => bump(&mut stats.created, "rests"),
+        Some(false) => bump(&mut stats.updated, "rests"),
+        None => {}
     }
     Ok(())
 }
@@ -2032,20 +2035,27 @@ async fn write_sku_offer(
 }
 
 /// Поле-характеристика коллекции предложений: строка с `offer_tree`, `xml_id` —
-/// `CML2_ATTR_` + транслит названия (повторные пакеты находят то же поле).
+/// `CML2_ATTR_` + транслит названия (повторные пакеты находят то же поле). Название без
+/// транслита (`№`, `★`) — короткий хеш названия: `CML2_ATTR_h<hex>`, код `attr_<hex>`.
 async fn characteristic_field(
     conn: &mut PgConnection,
     state: &mut GoodsState,
     name: &str,
 ) -> Result<FieldInfo, ApplyError> {
-    let xml_id = format!("CML2_ATTR_{}", slugify(name));
+    let slug = slugify(name);
+    let (xml_id, base) = if slug.is_empty() {
+        let h = hex::encode(&Sha256::digest(name.as_bytes())[..4]);
+        (format!("CML2_ATTR_h{h}"), format!("attr_{h}"))
+    } else {
+        (
+            format!("CML2_ATTR_{slug}"),
+            field_code_base(name, state.fields.len() + 1),
+        )
+    };
     if let Some(f) = state.fields.get(&xml_id) {
         return Ok(f.clone());
     }
-    let code = unique_code(
-        &field_code_base(name, state.fields.len() + 1),
-        &mut state.taken_codes,
-    );
+    let code = unique_code(&base, &mut state.taken_codes);
     let sort: i32 = sqlx::query_scalar(
         "SELECT COALESCE(max(sort), 0) + 10 FROM collection_fields WHERE collection_id = $1",
     )
@@ -3430,6 +3440,88 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[sqlx::test]
+    async fn rests_stats_count_created_and_updated(db: PgPool) {
+        let settings = Settings::default();
+        let dirs = Dirs::new();
+        load_goods(&db, &settings, &dirs, &goods_package()).await;
+        let st = run_in(&db, &settings, &dirs, &rests_package())
+            .await
+            .unwrap();
+        assert_eq!(st.created.get("rests"), Some(&2), "{st:?}");
+        assert!(!st.updated.contains_key("rests"), "{st:?}");
+        let mut changed = rests_package();
+        changed.offers.as_mut().unwrap().offers[0]
+            .rests
+            .as_mut()
+            .unwrap()[0]
+            .1 = 1.0;
+        let st = run_in(&db, &settings, &dirs, &changed).await.unwrap();
+        assert_eq!(st.updated.get("rests"), Some(&1), "{st:?}");
+        assert!(!st.created.contains_key("rests"), "{st:?}");
+    }
+
+    #[sqlx::test]
+    async fn empty_rests_with_quantity_set_quantity(db: PgPool) {
+        let settings = Settings::default();
+        let dirs = Dirs::new();
+        load_goods(&db, &settings, &dirs, &goods_package()).await;
+        let mut p = rests_package();
+        {
+            let offer = &mut p.offers.as_mut().unwrap().offers[0];
+            offer.rests = Some(Vec::new());
+            offer.quantity = Some(5.0);
+        }
+        run_in(&db, &settings, &dirs, &p).await.unwrap();
+        let qty: String = sqlx::query_scalar(
+            "SELECT c.quantity::text FROM catalog_products c
+             JOIN collection_items i ON i.id = c.item_id WHERE i.xml_id = 'good-1'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(qty, "5.00");
+    }
+
+    #[sqlx::test]
+    async fn characteristics_without_slug_get_own_fields(db: PgPool) {
+        let settings = Settings {
+            use_offers: true,
+            ..Settings::default()
+        };
+        let dirs = Dirs::new();
+        load_2x(&db, &settings, &dirs).await;
+        let mut p = offers_file(include_bytes!("../../tests/fixtures/1c/offers.xml"));
+        p.offers.as_mut().unwrap().offers[0].characteristics =
+            vec![("№".into(), "1".into()), ("★".into(), "2".into())];
+        run_in(&db, &settings, &dirs, &p).await.unwrap();
+        let fields: Vec<(String, String)> = sqlx::query_as(
+            "SELECT code, xml_id FROM collection_fields
+             WHERE offer_tree AND name IN ('№', '★') ORDER BY name",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(fields.len(), 2, "{fields:?}");
+        assert_ne!(fields[0].1, fields[1].1);
+        assert_ne!(fields[0].0, fields[1].0);
+        for (code, xml_id) in &fields {
+            assert!(xml_id.len() > "CML2_ATTR_".len(), "{xml_id}");
+            assert!(code.starts_with("attr_"), "{code}");
+        }
+        let v = values(&item_row(&db, "g2-good#sku-red-m").await);
+        assert_eq!(v[&fields[0].0], "1");
+        assert_eq!(v[&fields[1].0], "2");
+        // повтор находит те же поля
+        run_in(&db, &settings, &dirs, &p).await.unwrap();
+        let n: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM collection_fields WHERE name IN ('№', '★')")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(n, 2);
     }
 
     /// Классификатор и товары 2.x (`import.xml`), затем предложения (`offers.xml`).
