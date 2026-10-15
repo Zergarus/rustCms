@@ -183,6 +183,8 @@ async fn resolve_any(
     .await?)
 }
 
+// Используется следующими задачами плана обмена (админка, проектные обработчики).
+#[allow(dead_code)]
 /// Коллекция по `Ид` каталога или классификатора (см. `resolve_any`).
 pub async fn resolve_collection(
     conn: &mut PgConnection,
@@ -256,6 +258,74 @@ async fn apply_inner(
     }
     if let Some(offers) = &parsed.offers {
         apply_offers(conn, ctx, &collection, offers, &mut stats).await?;
+    }
+    Ok(stats)
+}
+
+/// Полная выгрузка закончена: записи и разделы тех коллекций, до которых дошла сессия
+/// (по `exchange_seen`), но не пришедшие в этой сессии, деактивируются или удаляются
+/// по настройкам. Записи без `xml_id` (заведены вручную) и предложения не трогаются.
+pub async fn deactivate_missing(
+    conn: &mut PgConnection,
+    settings: &Settings,
+    session_id: i64,
+) -> Result<Stats, ApplyError> {
+    let mut stats = Stats::default();
+    for (kind, table, key, action) in [
+        ("item", "collection_items", "items", settings.element_action),
+        (
+            "section",
+            "collection_sections",
+            "sections",
+            settings.section_action,
+        ),
+    ] {
+        if action == Action::None {
+            continue;
+        }
+        let extra = if kind == "item" {
+            "AND t.product_id IS NULL"
+        } else {
+            ""
+        };
+        let ids: Vec<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT t.id FROM {table} t
+             WHERE t.xml_id <> '' {extra}
+               AND t.collection_id IN (
+                   SELECT t2.collection_id FROM {table} t2
+                   JOIN exchange_seen s ON s.session_id = $1 AND s.kind = $2
+                                       AND s.xml_id = t2.xml_id)
+               AND NOT EXISTS (SELECT 1 FROM exchange_seen s
+                               WHERE s.session_id = $1 AND s.kind = $2 AND s.xml_id = t.xml_id)"
+        )))
+        .bind(session_id)
+        .bind(kind)
+        .fetch_all(&mut *conn)
+        .await?;
+        if ids.is_empty() {
+            continue;
+        }
+        let (sql, map) = match action {
+            Action::Deactivate => (
+                format!(
+                    "UPDATE {table} SET active = FALSE, updated_at = now()
+                     WHERE id = ANY($1) AND active"
+                ),
+                &mut stats.deactivated,
+            ),
+            _ => (
+                format!("DELETE FROM {table} WHERE id = ANY($1)"),
+                &mut stats.deleted,
+            ),
+        };
+        let n = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(&ids)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected();
+        if n > 0 {
+            *map.entry(key).or_default() += n as u32;
+        }
     }
     Ok(stats)
 }
@@ -1017,6 +1087,8 @@ fn content_type_of(name: &str) -> &'static str {
     }
 }
 
+// Используется следующими задачами плана обмена (админка, проектные обработчики).
+#[allow(dead_code)]
 /// Файл из каталога сессии по относительному пути пакета. Совпал по sha256 с одним из
 /// `existing` — его id; нет файла в пакете — `None`; иначе новый файл. Путь вне каталога
 /// сессии — ошибка. Новые файлы запоминаются в `ctx` (см. `Ctx::discard_written`).

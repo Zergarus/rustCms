@@ -15,6 +15,8 @@ pub enum Action {
 }
 
 impl Action {
+    // Используется настройками в админке (следующая задача плана обмена).
+    #[allow(dead_code)]
     pub fn code(self) -> &'static str {
         match self {
             Action::None => "N",
@@ -65,6 +67,8 @@ impl Default for Settings {
     }
 }
 
+// Используется настройками в админке (следующая задача плана обмена).
+#[allow(dead_code)]
 fn flag(v: bool) -> &'static str {
     if v { "Y" } else { "N" }
 }
@@ -107,6 +111,8 @@ impl Settings {
         })
     }
 
+    // Используется настройками в админке (следующая задача плана обмена).
+    #[allow(dead_code)]
     pub async fn save(&self, db: &PgPool) -> sqlx::Result<()> {
         let values: [(&str, String); 10] = [
             (

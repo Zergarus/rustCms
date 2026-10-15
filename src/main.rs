@@ -185,6 +185,7 @@ pub(crate) fn app(state: AppState) -> Router {
                 HeaderValue::from_static("nosniff"),
             )),
         )
+        .merge(exchange::http::router())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

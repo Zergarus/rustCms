@@ -266,8 +266,6 @@ pub struct Project {
     pub forms: Vec<FormConfig>,
     pub form_guards: Vec<Arc<dyn FormGuard>>,
     /// Обработчик товаров при обмене с 1С (`None` — ничего не делается).
-    // Подключается к обмену с 1С в следующей задаче плана.
-    #[allow(dead_code)]
     pub import_hook: Option<Arc<dyn ImportHook>>,
     pub cart: CartConfig,
     pub order: OrderConfig,
