@@ -84,8 +84,10 @@ pub struct ExportOrder {
     pub version_1c: String,
     pub agent: Agent,
     pub items: Vec<ExportItem>,
+    /// Строка доставки до 2.10; от 2.10 строки доставки заказа берутся из отгрузок.
     pub delivery: Option<ExportDelivery>,
-    pub store_xml_id: Option<String>,
+    /// Склады отгрузок заказа (`getShipmentsStoreList` + `getXmlSaleStore`).
+    pub stores: Vec<ExportStore>,
     pub traits: Vec<(String, String)>,
     pub payments: Vec<ExportPayment>,
     pub shipments: Vec<ExportShipment>,
@@ -94,7 +96,7 @@ pub struct ExportOrder {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemovedShipment {
-    /// `id_1c` отгрузки или наш id.
+    /// Наш id отгрузки (`ENTITY_ID` журнала `SHIPMENT_REMOVED`).
     pub id: String,
     pub date: DateTime<Utc>,
 }
@@ -112,11 +114,28 @@ pub struct ExportItem {
     pub xml_id: String,
     pub catalog_xml_id: String,
     pub name: String,
+    /// id позиции корзины: `НомерПозицииКорзины` = `basket_id % 100000`.
+    pub basket_id: i64,
     pub unit_code: String,
     pub unit_name: String,
+    /// Условное обозначение (`SYMBOL_RUS`) — текст `БазоваяЕдиница` до 2.05 включительно.
+    pub unit_symbol: String,
+    /// Международное сокращение (`SYMBOL_LETTER_INTL`).
+    pub unit_intl: String,
     pub price: f64,
     pub quantity: f64,
     pub sum: f64,
+}
+
+/// Склад (`CCatalogStore`: XML_ID, TITLE, ADDRESS, PHONE, EMAIL).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportStore {
+    pub xml_id: String,
+    pub name: String,
+    pub address: String,
+    pub phone: String,
+    /// Битрикс выбирает EMAIL склада, но в документ не пишет.
+    pub email: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +151,7 @@ pub struct ExportPayment {
     pub operation: PayOperation,
     pub sum: f64,
     pub version_1c: String,
+    pub comment: String,
     pub traits: Vec<(String, String)>,
 }
 
@@ -149,8 +169,10 @@ pub struct ExportShipment {
     pub date: DateTime<Utc>,
     pub sum: f64,
     pub version_1c: String,
+    pub comment: String,
     pub items: Vec<ExportItem>,
     pub delivery: Option<ExportDelivery>,
+    pub store: Option<ExportStore>,
     pub traits: Vec<(String, String)>,
 }
 
@@ -176,8 +198,9 @@ pub fn render(
     let mut x = Xml::new();
     x.decl();
     let schema = version.0.to_string();
+    // `date("Y-m-d")."T".date("G:i:s")`: час без ведущего нуля
     let generated = site_time(generated_at)
-        .format("%Y-%m-%dT%H:%M:%S")
+        .format("%Y-%m-%dT%-H:%M:%S")
         .to_string();
     x.open_attrs(
         "КоммерческаяИнформация",
@@ -264,14 +287,17 @@ fn order_document(x: &mut Xml, o: &ExportOrder, v: SchemaVersion) {
     contragents(x, &o.agent, v);
     x.leaf("Время", &time(o.created_at));
     x.leaf("Комментарий", &o.comment);
-    if let Some(store) = o.store_xml_id.as_deref().filter(|s| !s.is_empty()) {
-        x.open("Склады");
-        x.open("Склад");
-        x.leaf("Ид", store);
-        x.close("Склад");
-        x.close("Склады");
-    }
-    goods(x, &o.items, o.delivery.as_ref(), v);
+    stores(x, &o.stores, v);
+    // От 2.10 — строка доставки на каждую отгрузку, до — доставка заказа
+    let deliveries: Vec<&ExportDelivery> = if v.documents() {
+        o.shipments
+            .iter()
+            .filter_map(|s| s.delivery.as_ref())
+            .collect()
+    } else {
+        o.delivery.iter().collect()
+    };
+    goods(x, &o.items, &deliveries, v);
     traits(x, &o.traits);
     x.close("Документ");
 }
@@ -314,7 +340,7 @@ fn payment_document(x: &mut Xml, o: &ExportOrder, p: &ExportPayment, v: SchemaVe
     );
     contragents(x, &o.agent, v);
     x.leaf("Время", &time(p.date));
-    x.leaf("Комментарий", "");
+    x.leaf("Комментарий", &p.comment);
     traits(x, &p.traits);
     x.close("Документ");
 }
@@ -331,9 +357,11 @@ fn shipment_document(x: &mut Xml, o: &ExportOrder, s: &ExportShipment, v: Schema
         &s.version_1c,
     );
     contragents(x, &o.agent, v);
+    stores(x, s.store.as_slice(), v);
     x.leaf("Время", &time(s.date));
-    x.leaf("Комментарий", "");
-    goods(x, &s.items, s.delivery.as_ref(), v);
+    x.leaf("Комментарий", &s.comment);
+    let deliveries: Vec<&ExportDelivery> = s.delivery.iter().collect();
+    goods(x, &s.items, &deliveries, v);
     traits(x, &s.traits);
     x.close("Документ");
 }
@@ -448,13 +476,13 @@ fn contragents(x: &mut Xml, a: &Agent, v: SchemaVersion) {
     }
     let (phone, email) = (f("PHONE"), f("EMAIL"));
     if !phone.is_empty() || !email.is_empty() {
-        let (phone_type, email_type) = if v.new_contacts() {
-            ("Телефон рабочий", "Электронная почта")
+        let email_type = if v.new_contacts() {
+            "Электронная почта"
         } else {
-            ("ТелефонРабочий", "Почта")
+            "Почта"
         };
         x.open("Контакты");
-        for (kind, value) in [(phone_type, phone), (email_type, email)] {
+        for (kind, value) in [(phone_type(v), phone), (email_type, email)] {
             if !value.is_empty() {
                 x.open("Контакт");
                 x.leaf("Тип", kind);
@@ -481,88 +509,156 @@ fn contragents(x: &mut Xml, a: &Agent, v: SchemaVersion) {
     x.close("Контрагенты");
 }
 
-/// `Товары` (`getXmlBasketItems`) со строкой доставки (`getOrderDeliveryItem`).
-fn goods(x: &mut Xml, items: &[ExportItem], delivery: Option<&ExportDelivery>, v: SchemaVersion) {
+/// `Товары` (`getXmlBasketItems`) со строками доставки (`getOrderDeliveryItem`, цена > 0).
+fn goods(x: &mut Xml, items: &[ExportItem], deliveries: &[&ExportDelivery], v: SchemaVersion) {
     x.open("Товары");
     for it in items {
         x.open("Товар");
         x.leaf("Ид", &it.xml_id);
         x.leaf("ИдКаталога", &it.catalog_xml_id);
         x.leaf("Наименование", &it.name);
-        unit(x, &it.unit_code, &it.unit_name, v);
+        unit(x, it, v);
         x.leaf("ЦенаЗаЕдиницу", &num(it.price));
         x.leaf("Количество", &num(it.quantity));
         x.leaf("Сумма", &num(it.sum));
-        nomenclature(x, "Товар");
+        traits(
+            x,
+            &[
+                ("ВидНоменклатуры".into(), "Товар".into()),
+                ("ТипНоменклатуры".into(), "Товар".into()),
+                (
+                    "НомерПозицииКорзины".into(),
+                    (it.basket_id % BASKET_POSITION_DIVIDER).to_string(),
+                ),
+            ],
+        );
         x.close("Товар");
     }
-    if let Some(d) = delivery.filter(|d| d.price > 0.0) {
+    for d in deliveries.iter().filter(|d| d.price > 0.0) {
         let price = num(d.price);
         x.open("Товар");
         x.leaf("Ид", "ORDER_DELIVERY");
         x.leaf("Наименование", "Доставка заказа");
-        unit(x, "796", "", v);
+        if v.new_contacts() {
+            piece_unit(x);
+        } else {
+            piece_base_unit(x);
+        }
         x.leaf("ЦенаЗаЕдиницу", &price);
         x.leaf("Количество", "1");
         x.leaf("Сумма", &price);
-        nomenclature(x, "Услуга");
+        traits(
+            x,
+            &[
+                ("ВидНоменклатуры".into(), "Услуга".into()),
+                ("ТипНоменклатуры".into(), "Услуга".into()),
+            ],
+        );
         x.close("Товар");
     }
     x.close("Товары");
 }
 
+/// `CSaleExport::DIVIDER_NUMBER_POSITION`.
+const BASKET_POSITION_DIVIDER: i64 = 100_000;
+
+/// Код единицы целым, как `MEASURE_CODE` (`"006"` → 6).
+fn measure_code(code: &str) -> i64 {
+    leading_number(code.trim()) as i64
+}
+
 /// Единица измерения позиции (`outputXmlUnit`): после 2.05 — `Единица` с кодом (796 по
-/// умолчанию) и `Коэффициент`, до — атрибуты `БазоваяЕдиница`.
-fn unit(x: &mut Xml, code: &str, name: &str, v: SchemaVersion) {
-    let code = code.trim();
-    let is_piece = leading_number(code) == 796.0;
+/// умолчанию) и `Коэффициент`, до — `БазоваяЕдиница` с атрибутами.
+fn unit(x: &mut Xml, it: &ExportItem, v: SchemaVersion) {
+    let code = measure_code(&it.unit_code);
     if v.new_contacts() {
-        let code = if leading_number(code) < 1.0 {
-            "796"
-        } else {
-            code
-        };
-        let name = if name.is_empty() && leading_number(code) == 796.0 {
+        let code = if code <= 0 { 796 } else { code };
+        let name = if it.unit_name.is_empty() && code == 796 {
             "Штука"
         } else {
-            name
+            &it.unit_name
         };
         x.open("Единица");
-        x.leaf("Код", code);
+        x.leaf("Код", &code.to_string());
         x.leaf("НаименованиеПолное", name);
         x.close("Единица");
         x.leaf("Коэффициент", "1");
-    } else if is_piece {
-        x.leaf_attrs(
-            "БазоваяЕдиница",
-            &[
-                ("Код", "796"),
-                ("НаименованиеПолное", "Штука"),
-                ("МеждународноеСокращение", "PCE"),
-            ],
-            "шт",
-        );
+    } else if code == 796 {
+        piece_base_unit(x);
     } else {
+        let code = if code > 0 {
+            code.to_string()
+        } else {
+            String::new()
+        };
         x.leaf_attrs(
             "БазоваяЕдиница",
             &[
-                ("Код", code),
-                ("НаименованиеПолное", name),
-                ("МеждународноеСокращение", ""),
+                ("Код", &code),
+                ("НаименованиеПолное", &it.unit_name),
+                ("МеждународноеСокращение", &it.unit_intl),
             ],
-            name,
+            &it.unit_symbol,
         );
     }
 }
 
-fn nomenclature(x: &mut Xml, kind: &str) {
-    traits(
-        x,
+/// Штука после 2.05 (`getOrderDeliveryItem`: `MEASURE_TITLE` кода 796).
+fn piece_unit(x: &mut Xml) {
+    x.open("Единица");
+    x.leaf("Код", "796");
+    x.leaf("НаименованиеПолное", "Штука");
+    x.close("Единица");
+    x.leaf("Коэффициент", "1");
+}
+
+/// Штука до 2.05 включительно — постоянные из языкового файла.
+fn piece_base_unit(x: &mut Xml) {
+    x.leaf_attrs(
+        "БазоваяЕдиница",
         &[
-            ("ВидНоменклатуры".to_string(), kind.to_string()),
-            ("ТипНоменклатуры".to_string(), kind.to_string()),
+            ("Код", "796"),
+            ("НаименованиеПолное", "Штука"),
+            ("МеждународноеСокращение", "PCE"),
         ],
+        "шт",
     );
+}
+
+/// `Склады` (`getXmlSaleStore`); пустой список — без элемента.
+fn stores(x: &mut Xml, list: &[ExportStore], v: SchemaVersion) {
+    if list.is_empty() {
+        return;
+    }
+    x.open("Склады");
+    for st in list {
+        x.open("Склад");
+        x.leaf("Ид", &st.xml_id);
+        x.leaf("Наименование", &st.name);
+        x.open("Адрес");
+        x.leaf("Представление", &st.address);
+        x.open("АдресноеПоле");
+        x.leaf("Тип", "Улица");
+        x.leaf("Значение", &st.address);
+        x.close("АдресноеПоле");
+        x.close("Адрес");
+        x.open("Контакты");
+        x.open("Контакт");
+        x.leaf("Тип", phone_type(v));
+        x.leaf("Значение", &st.phone);
+        x.close("Контакт");
+        x.close("Контакты");
+        x.close("Склад");
+    }
+    x.close("Склады");
+}
+
+fn phone_type(v: SchemaVersion) -> &'static str {
+    if v.new_contacts() {
+        "Телефон рабочий"
+    } else {
+        "ТелефонРабочий"
+    }
 }
 
 fn traits(x: &mut Xml, list: &[(String, String)]) {
@@ -732,7 +828,8 @@ mod tests {
     }
 
     fn generated() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 16, 7, 5, 9).unwrap()
+        // 08:05:09 по Москве — час < 10 различает `G` и `H`
+        Utc.with_ymd_and_hms(2026, 10, 16, 5, 5, 9).unwrap()
     }
 
     fn s(v: &str) -> String {
@@ -751,11 +848,18 @@ mod tests {
         }
     }
 
+    /// Единица: (код, название, обозначение, международное сокращение).
+    type Unit<'a> = (&'a str, &'a str, &'a str, &'a str);
+
+    const PIECE: Unit = ("796", "Штука", "шт", "PCE");
+
+    #[allow(clippy::too_many_arguments)]
     fn item(
+        basket_id: i64,
         xml_id: &str,
         catalog: &str,
         name: &str,
-        unit: (&str, &str),
+        unit: Unit,
         price: f64,
         qty: f64,
         sum: f64,
@@ -764,11 +868,24 @@ mod tests {
             xml_id: s(xml_id),
             catalog_xml_id: s(catalog),
             name: s(name),
+            basket_id,
             unit_code: s(unit.0),
             unit_name: s(unit.1),
+            unit_symbol: s(unit.2),
+            unit_intl: s(unit.3),
             price,
             quantity: qty,
             sum,
+        }
+    }
+
+    fn store() -> ExportStore {
+        ExportStore {
+            xml_id: s("store-main"),
+            name: s("Склад на Складском"),
+            address: s("Москва, Складской пр., д. 3"),
+            phone: s("+7 495 000-00-10"),
+            email: s("sklad@example.com"),
         }
     }
 
@@ -791,13 +908,15 @@ mod tests {
             agent,
             items,
             delivery: None,
-            store_xml_id: None,
+            stores: vec![],
             traits: vec![],
             payments: vec![],
             shipments: vec![],
             removed_shipments: vec![],
         }
     }
+
+    const SITE: (&str, &str) = ("Сайт", "[s1] Трансопт");
 
     fn person_205() -> ExportOrder {
         let a = agent(
@@ -826,19 +945,21 @@ mod tests {
             a,
             vec![
                 item(
+                    100001,
                     "a1b2c3",
                     "cat-1",
                     "Перчатки нитриловые",
-                    ("796", "Штука"),
+                    PIECE,
                     500.0,
                     3.0,
                     1500.0,
                 ),
                 item(
+                    100002,
                     "d4e5f6#7788",
                     "cat-1",
                     "Песок кварцевый",
-                    ("166", "Килограмм"),
+                    ("166", "Килограмм", "кг", "KGM"),
                     110.0,
                     5.0,
                     550.0,
@@ -850,24 +971,25 @@ mod tests {
         o.version_1c = s("4");
         o.delivery = Some(ExportDelivery { price: 300.0 });
         o.traits = pairs(&[
-            ("Метод оплаты ИД", "2"),
+            ("Способ доставки", "Курьер"),
+            ("Метод доставки ИД", "2"),
             ("Метод оплаты", "Наличные"),
+            ("Метод оплаты ИД", "2"),
             ("Заказ оплачен", "false"),
             ("Доставка разрешена", "false"),
-            ("Способ доставки", "Курьер"),
-            ("Сумма доставки", "300"),
             ("Отменен", "false"),
             ("Финальный статус", "false"),
             ("Статус заказа", "[N] Принят"),
             ("Статуса заказа ИД", "N"),
-            ("Сайт", "[s1] Трансопт"),
+            ("Дата изменения статуса", "15.10.2026 12:30:00"),
+            SITE,
             (
                 "Адрес доставки",
                 "101000, Москва, ул. Мясницкая, д. 1, кв. 5",
             ),
         ]);
-        // Оплаты и отгрузки до 2.10 не выгружаются
-        o.payments = vec![payment("1", PayOperation::Cash, &[])];
+        // Оплаты, отгрузки и удалённые отгрузки до 2.10 не выгружаются
+        o.payments = vec![payment("1", PayOperation::Cash)];
         o.removed_shipments = vec![RemovedShipment {
             id: s("9"),
             date: at("2026-10-15T09:30:00Z"),
@@ -909,10 +1031,11 @@ mod tests {
             "2026-10-15T14:05:30Z",
             a,
             vec![item(
+                7,
                 "f00d-cable",
                 "cat-2",
                 "Кабель ВВГ 3x2,5",
-                ("006", "Метр"),
+                ("006", "Метр", "м", "MTR"),
                 120.0,
                 100.0,
                 12000.0,
@@ -922,13 +1045,24 @@ mod tests {
         o.number = s("TR-102");
         o.id_1c = s("ab12-cd34");
         o.version_1c = s("3");
-        o.store_xml_id = Some(s("store-main"));
+        o.stores = vec![store()];
         o.traits = pairs(&[
-            ("Метод оплаты ИД", "3"),
-            ("Метод оплаты", "Безналичный расчёт"),
-            ("Заказ оплачен", "true"),
             ("Дата оплаты", "15.10.2026 18:00:00"),
-            ("Сайт", "[s1] Трансопт"),
+            ("Дата разрешения доставки", "15.10.2026 18:30:00"),
+            ("Способ доставки", "Самовывоз"),
+            ("Метод доставки ИД", "3"),
+            ("Метод оплаты", "Безналичный расчёт"),
+            ("Метод оплаты ИД", "3"),
+            ("Заказ оплачен", "true"),
+            ("Доставка разрешена", "true"),
+            ("Отменен", "false"),
+            ("Финальный статус", "false"),
+            ("Статус заказа", "[P] Оплачен"),
+            ("Статуса заказа ИД", "P"),
+            ("Дата изменения статуса", "15.10.2026 18:00:00"),
+            SITE,
+            ("Отсрочка платежа", "30 дней"),
+            ("Адрес доставки", "Москва, Складской пр., д. 3"),
         ]);
         o
     }
@@ -948,17 +1082,18 @@ mod tests {
 
     fn tape() -> ExportItem {
         item(
+            123456,
             "beef-tape",
             "cat-1",
             "Лента сигнальная",
-            ("796", "Штука"),
+            PIECE,
             1000.0,
             1.0,
             1000.0,
         )
     }
 
-    fn payment(id: &str, op: PayOperation, traits: &[(&str, &str)]) -> ExportPayment {
+    fn payment(id: &str, op: PayOperation) -> ExportPayment {
         ExportPayment {
             id: s(id),
             number: s(id),
@@ -966,7 +1101,8 @@ mod tests {
             operation: op,
             sum: 1250.0,
             version_1c: String::new(),
-            traits: pairs(traits),
+            comment: String::new(),
+            traits: vec![],
         }
     }
 
@@ -979,7 +1115,7 @@ mod tests {
             ("Оплачено", "false"),
             ("Признак возврата", "false"),
             ("Причина к возврату", ""),
-            ("Сайт", "[s1] Трансопт"),
+            SITE,
         ])
     }
 
@@ -1000,59 +1136,85 @@ mod tests {
             ("Причина отмены", ""),
             ("Ошибка отгрузки", ""),
             ("Идентификатор отправления", ""),
-            ("Сайт", "[s1] Трансопт"),
+            SITE,
         ])
     }
 
-    fn with_documents(
-        id: i64,
-        version: &str,
-        pay: ExportPayment,
-        ship_id: &str,
-        ship_number: &str,
-    ) -> ExportOrder {
-        let mut o = order(id, "2026-10-15T10:00:00Z", petrova(), vec![tape()], 1250.0);
-        o.version_1c = s(version);
-        o.delivery = Some(ExportDelivery { price: 250.0 });
-        o.traits = pairs(&[
-            ("Метод оплаты ИД", "3"),
-            ("Метод оплаты", "Безналичный расчёт"),
-            ("Заказ оплачен", "false"),
-            ("Сайт", "[s1] Трансопт"),
-        ]);
-        o.payments = vec![ExportPayment {
-            version_1c: s(version),
-            ..pay
-        }];
-        o.shipments = vec![ExportShipment {
-            id: s(ship_id),
-            number: s(ship_number),
+    fn shipment(id: &str, number: &str, version: &str) -> ExportShipment {
+        ExportShipment {
+            id: s(id),
+            number: s(number),
             date: at("2026-10-15T10:00:00Z"),
             sum: 1250.0,
             version_1c: s(version),
+            comment: String::new(),
             items: vec![tape()],
             delivery: Some(ExportDelivery { price: 250.0 }),
+            store: None,
             traits: ship_traits(),
+        }
+    }
+
+    /// Заказ 2.10+ с оплатой (платёжная система `ps` / `ps_name`) и отгрузкой.
+    fn with_documents(
+        id: i64,
+        version: &str,
+        (ps, ps_name): (&str, &str),
+        pay: ExportPayment,
+        ship: ExportShipment,
+    ) -> ExportOrder {
+        let mut o = order(id, "2026-10-15T10:00:00Z", petrova(), vec![tape()], 1250.0);
+        o.version_1c = s(version);
+        // От 2.10 доставка заказа не выводится — строка доставки берётся из отгрузки
+        o.delivery = Some(ExportDelivery { price: 999.0 });
+        o.traits = pairs(&[
+            ("Дата последнего разрешения по доставке", ""),
+            ("Способ доставки", "Курьер"),
+            ("Метод доставки ИД", "2"),
+            ("Метод оплаты", ps_name),
+            ("Метод оплаты ИД", ps),
+            ("Заказ оплачен", "false"),
+            ("Отменен", "false"),
+            ("Финальный статус", "false"),
+            ("Статус заказа", "[N] Принят"),
+            ("Статуса заказа ИД", "N"),
+            ("Дата изменения статуса", "2026-10-15T13:00:00"),
+            SITE,
+        ]);
+        o.payments = vec![ExportPayment {
+            version_1c: s(version),
+            traits: pay_traits(ps, ps_name),
+            ..pay
         }];
+        o.shipments = vec![ship];
         o
     }
 
     fn payment_shipment_210() -> ExportOrder {
-        let mut pay = payment("55", PayOperation::Cashless, &[]);
-        pay.traits = pay_traits("3", "Безналичный расчёт");
-        let mut o = with_documents(103, "5", pay, "shp-1c-77", "77");
+        let mut pay = payment("55", PayOperation::Cashless);
+        pay.comment = s("Счёт выставлен");
+        let mut ship = shipment("shp-1c-77", "77", "5");
+        ship.comment = s("Оставить у охраны");
+        ship.store = Some(store());
+        let mut o = with_documents(103, "5", ("3", "Безналичный расчёт"), pay, ship);
+        o.stores = vec![store()];
         o.removed_shipments = vec![RemovedShipment {
-            id: s("shp-1c-70"),
+            id: s("70"),
             date: at("2026-10-14T21:30:00Z"),
         }];
         o
     }
 
     fn container_31() -> ExportOrder {
-        let mut pay = payment("60", PayOperation::Acquiring, &[]);
+        let mut pay = payment("60", PayOperation::Acquiring);
         pay.date = at("2026-10-15T10:20:00Z");
-        pay.traits = pay_traits("4", "Банковская карта");
-        with_documents(104, "2", pay, "78", "78")
+        with_documents(
+            104,
+            "2",
+            ("4", "Банковская карта"),
+            pay,
+            shipment("78", "78", "2"),
+        )
     }
 
     fn canceled_guest() -> ExportOrder {
@@ -1069,10 +1231,11 @@ mod tests {
             "2026-10-14T20:59:59Z",
             a,
             vec![item(
+                5,
                 "c0ffee",
                 "cat-1",
                 "Скотч упаковочный",
-                ("796", "Штука"),
+                PIECE,
                 33.3,
                 3.0,
                 99.9,
@@ -1081,10 +1244,15 @@ mod tests {
         );
         o.traits = pairs(&[
             ("Заказ оплачен", "false"),
+            ("Доставка разрешена", "false"),
             ("Отменен", "true"),
+            ("Финальный статус", "false"),
+            ("Статус заказа", "[N] Принят"),
+            ("Статуса заказа ИД", "N"),
             ("Дата отмены заказа", "15.10.2026 09:00:00"),
             ("Причина отмены", "Передумал"),
-            ("Финальный статус", "false"),
+            ("Дата изменения статуса", "15.10.2026 09:00:00"),
+            SITE,
         ]);
         o
     }
@@ -1276,5 +1444,71 @@ mod tests {
             .unwrap();
         assert_eq!(unit.children[0].text, "796");
         assert_eq!(unit.children[1].text, "Штука");
+    }
+
+    fn order_goods(o: &ExportOrder, v: SchemaVersion) -> Vec<String> {
+        let root = tree(&decode(&render(std::slice::from_ref(o), v, generated())));
+        let doc = if v.container() {
+            &root.children[0].children[0]
+        } else {
+            &root.children[0]
+        };
+        let goods = doc.children.iter().find(|c| c.name == "Товары").unwrap();
+        goods
+            .children
+            .iter()
+            .map(|g| {
+                let price = g
+                    .children
+                    .iter()
+                    .find(|c| c.name == "ЦенаЗаЕдиницу")
+                    .unwrap();
+                format!("{}={}", g.children[0].text, price.text)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn order_delivery_lines_from_shipments_since_210() {
+        let mut o = container_31();
+        let mut second = o.shipments[0].clone();
+        second.delivery = Some(ExportDelivery { price: 100.0 });
+        let mut third = o.shipments[0].clone();
+        third.delivery = None;
+        o.shipments.extend([second, third]);
+        // От 2.10 — строка на каждую отгрузку с доставкой, доставка заказа не выводится
+        assert_eq!(
+            order_goods(&o, SchemaVersion(2.1)),
+            ["beef-tape=1000", "ORDER_DELIVERY=250", "ORDER_DELIVERY=100"]
+        );
+        // До 2.10 — доставка заказа
+        assert_eq!(
+            order_goods(&o, SchemaVersion(2.09)),
+            ["beef-tape=1000", "ORDER_DELIVERY=999"]
+        );
+    }
+
+    #[test]
+    fn basket_position_and_integer_unit_code() {
+        let mut o = canceled_guest();
+        o.items[0].basket_id = 1_234_567;
+        o.items[0].unit_code = s("006");
+        o.items[0].unit_name = s("Метр");
+        o.items[0].unit_symbol = s("м");
+        o.items[0].unit_intl = s("MTR");
+        let old = decode(&render(
+            std::slice::from_ref(&o),
+            SchemaVersion(2.05),
+            generated(),
+        ));
+        assert!(old.contains(
+            r#"<БазоваяЕдиница Код="6" НаименованиеПолное="Метр" МеждународноеСокращение="MTR">м</БазоваяЕдиница>"#
+        ));
+        assert!(old.contains(
+            "<Наименование>НомерПозицииКорзины</Наименование>\n\t\t\t\t\t\t<Значение>34567</Значение>"
+        ));
+        let new = decode(&render(&[o], SchemaVersion(2.08), generated()));
+        assert!(new.contains("<Код>6</Код>"));
+        assert!(new.contains("ДатаФормирования=\"2026-10-16T8:05:09\""));
     }
 }
