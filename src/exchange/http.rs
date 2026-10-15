@@ -58,6 +58,28 @@ async fn handle(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    // Запрос обрабатывается в отдельной задаче: если 1С оборвёт соединение, импорт всё равно
+    // закончится целиком (транзакция, уборка файлов, журнал), а не прервётся посередине.
+    match tokio::spawn(process(state, query, headers, body)).await {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::error!("обмен с 1С: обработчик запроса упал: {e}");
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                "failure\nВнутренняя ошибка обмена",
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn process(
+    state: AppState,
+    query: HashMap<String, String>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
     let started = Instant::now();
     let mode = query.get("mode").map(String::as_str).unwrap_or("");
     let filename = query.get("filename").map(String::as_str).unwrap_or("");
@@ -1374,6 +1396,78 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name), data).unwrap();
         s
+    }
+
+    /// Обработчик товаров, который ждёт разрешения продолжить.
+    struct Gate {
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl crate::bxapi::project::ImportHook for Gate {
+        fn after_item<'a>(
+            &'a self,
+            _conn: &'a mut sqlx::PgConnection,
+            _item_id: i64,
+            _goods: &'a cml::Goods,
+        ) -> crate::bxapi::project::BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                self.started.notify_one();
+                self.release.notified().await;
+                Ok(())
+            })
+        }
+    }
+
+    #[sqlx::test]
+    async fn import_finishes_when_client_disconnects(db: PgPool) {
+        use std::sync::Arc;
+        exchange_user(&db, "exch").await;
+        let gate = Arc::new(Gate {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let mut state = test_state(db.clone());
+        state.project = Arc::new(crate::bxapi::project::Project {
+            import_hook: Some(gate.clone()),
+            ..crate::bxapi::project::Project::default()
+        });
+        let c = Client::new(&state);
+        let token = login(&c, "exch").await;
+        upload(&c, &token, "g.xml", goods_xml(&["a"], false).as_bytes()).await;
+
+        let req = Request::builder()
+            .uri(format!("{BASE}&mode=import&filename=g.xml"))
+            .header(header::COOKIE, format!("{}={token}", session::COOKIE))
+            .body(Body::empty())
+            .unwrap();
+        let request = c.app.clone().oneshot(req);
+        tokio::select! {
+            _ = request => panic!("импорт не должен был закончиться до разрешения"),
+            _ = gate.started.notified() => {}
+        }
+        // 1С оборвала соединение: future запроса уничтожен, импорт должен доработать
+        gate.release.notify_one();
+        let mut logged = None;
+        for _ in 0..100 {
+            logged = sqlx::query_scalar::<_, String>(
+                "SELECT result FROM exchange_log WHERE mode = 'import'",
+            )
+            .fetch_optional(&db)
+            .await
+            .unwrap();
+            if logged.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(logged.as_deref(), Some("success"));
+        assert_eq!(active_items(&db).await, [("a".to_string(), true)]);
+        let st: serde_json::Value = sqlx::query_scalar("SELECT state FROM exchange_sessions")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(st["imported"], serde_json::json!(["g.xml"]));
     }
 
     #[sqlx::test]
