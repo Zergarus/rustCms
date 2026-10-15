@@ -10,7 +10,9 @@ use sqlx::PgConnection;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::cml::{Catalog, Classifier, Goods, Parsed, PropKind, Property};
+use super::cml::{
+    Catalog, Classifier, Goods, Offer, OfferPackage, Parsed, Price, PropKind, Property,
+};
 use super::settings::{Action, Settings};
 use crate::bxapi::project::ImportHook;
 use crate::collection::{Collection, is_valid_code, is_valid_slug, slugify};
@@ -251,6 +253,9 @@ async fn apply_inner(
     }
     if let Some(catalog) = &parsed.catalog {
         apply_goods(conn, ctx, &collection, catalog, &mut stats).await?;
+    }
+    if let Some(offers) = &parsed.offers {
+        apply_offers(conn, ctx, &collection, offers, &mut stats).await?;
     }
     Ok(stats)
 }
@@ -1405,6 +1410,458 @@ async fn write_goods(
     Ok(())
 }
 
+/// Предложения: цены, остатки, количество; `товар#характеристика` — торговые предложения.
+async fn apply_offers(
+    conn: &mut PgConnection,
+    ctx: &Ctx<'_>,
+    collection: &Collection,
+    package: &OfferPackage,
+    stats: &mut Stats,
+) -> Result<(), ApplyError> {
+    let mut price_types: HashMap<String, i64> = sqlx::query_as::<_, (String, i64)>(
+        "SELECT xml_id, id FROM catalog_price_types WHERE xml_id <> ''",
+    )
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .collect();
+    let mut stores: HashMap<String, i64> = sqlx::query_as::<_, (String, i64)>(
+        "SELECT xml_id, id FROM catalog_stores WHERE xml_id <> ''",
+    )
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .collect();
+    let mut sku: Option<SkuState> = None;
+    let mut carried_prices = false;
+
+    for offer in package.offers.iter().filter(|o| !o.id.is_empty()) {
+        if offer.deleted {
+            bump(&mut stats.skipped, "offers");
+            continue;
+        }
+        let item_id = match offer.id.split_once('#') {
+            None => {
+                let found: Option<i64> = sqlx::query_scalar(
+                    "SELECT id FROM collection_items WHERE collection_id = $1 AND xml_id = $2
+                     ORDER BY id LIMIT 1",
+                )
+                .bind(collection.id)
+                .bind(&offer.id)
+                .fetch_optional(&mut *conn)
+                .await?;
+                found
+            }
+            Some((parent_xml, _)) if ctx.settings.use_offers => {
+                write_sku_offer(conn, ctx, collection, &mut sku, parent_xml, offer, stats).await?
+            }
+            Some(_) => None,
+        };
+        let Some(item_id) = item_id else {
+            bump(&mut stats.skipped, "offers");
+            continue;
+        };
+
+        if let Some(prices) = &offer.prices {
+            // Последняя цена типа в предложении побеждает
+            let mut by_type: Vec<(&str, &Price)> = Vec::new();
+            for price in prices.iter().filter(|p| !p.type_id.is_empty()) {
+                match by_type.iter_mut().find(|(t, _)| *t == price.type_id) {
+                    Some(slot) => slot.1 = price,
+                    None => by_type.push((&price.type_id, price)),
+                }
+            }
+            for (type_xml, price) in by_type {
+                carried_prices = true;
+                let type_id = match price_types.get(type_xml) {
+                    Some(id) => *id,
+                    None => {
+                        let id = create_price_type(conn, type_xml).await?;
+                        price_types.insert(type_xml.to_string(), id);
+                        bump(&mut stats.created, "price_types");
+                        id
+                    }
+                };
+                write_price(conn, item_id, type_id, price, stats).await?;
+            }
+        }
+
+        match (&offer.rests, offer.quantity) {
+            (Some(rests), _) if !rests.is_empty() => {
+                let mut by_store: Vec<(&str, f64)> = Vec::new();
+                for (store_xml, amount) in rests.iter().filter(|(s, _)| !s.is_empty()) {
+                    match by_store.iter_mut().find(|(s, _)| s == store_xml) {
+                        Some(slot) => slot.1 += amount,
+                        None => by_store.push((store_xml, *amount)),
+                    }
+                }
+                for (store_xml, amount) in by_store {
+                    let store_id = match stores.get(store_xml) {
+                        Some(id) => *id,
+                        None => {
+                            let id: i64 = sqlx::query_scalar(
+                                "INSERT INTO catalog_stores (name, active, xml_id)
+                                 VALUES ($1, TRUE, $1) RETURNING id",
+                            )
+                            .bind(store_xml)
+                            .fetch_one(&mut *conn)
+                            .await?;
+                            stores.insert(store_xml.to_string(), id);
+                            bump(&mut stats.created, "stores");
+                            id
+                        }
+                    };
+                    write_amount(conn, item_id, store_id, amount, stats).await?;
+                }
+                let total: f64 = sqlx::query_scalar(
+                    "SELECT COALESCE(sum(amount), 0)::float8 FROM catalog_store_amounts
+                     WHERE item_id = $1",
+                )
+                .bind(item_id)
+                .fetch_one(&mut *conn)
+                .await?;
+                write_quantity(conn, item_id, total).await?;
+            }
+            // Склады не пришли: только общее количество (CommerceML 2.x)
+            (None, Some(quantity)) => write_quantity(conn, item_id, quantity).await?,
+            _ => {}
+        }
+    }
+
+    if carried_prices && ctx.settings.deactivate_without_price {
+        deactivate_without_price(conn, collection, stats).await?;
+    }
+    Ok(())
+}
+
+async fn create_price_type(conn: &mut PgConnection, xml_id: &str) -> Result<i64, ApplyError> {
+    let mut taken: HashSet<String> = sqlx::query_scalar("SELECT code FROM catalog_price_types")
+        .fetch_all(&mut *conn)
+        .await?
+        .into_iter()
+        .collect();
+    let base = slugify(xml_id);
+    let base = if is_valid_code(&base) {
+        base
+    } else {
+        "price".to_string()
+    };
+    let code = unique_code(&base, &mut taken);
+    Ok(sqlx::query_scalar(
+        "INSERT INTO catalog_price_types (code, name, is_base, sort, xml_id)
+         VALUES ($1, $2, FALSE, 500, $2) RETURNING id",
+    )
+    .bind(code)
+    .bind(xml_id)
+    .fetch_one(&mut *conn)
+    .await?)
+}
+
+/// Цена типа у записи: строки этого типа заменяются одной; неизменная не пишется.
+async fn write_price(
+    conn: &mut PgConnection,
+    item_id: i64,
+    type_id: i64,
+    price: &Price,
+    stats: &mut Stats,
+) -> Result<(), ApplyError> {
+    let currency = if price.currency.trim().is_empty() {
+        "RUB"
+    } else {
+        price.currency.trim()
+    };
+    let (count, same): (i64, bool) = sqlx::query_as(
+        "SELECT count(*), COALESCE(bool_and(price = round($3::float8::numeric, 2)
+                                            AND currency = $4
+                                            AND quantity_from IS NULL
+                                            AND quantity_to IS NULL), FALSE)
+         FROM catalog_prices WHERE item_id = $1 AND price_type_id = $2",
+    )
+    .bind(item_id)
+    .bind(type_id)
+    .bind(price.value)
+    .bind(currency)
+    .fetch_one(&mut *conn)
+    .await?;
+    if count == 1 && same {
+        return Ok(());
+    }
+    sqlx::query("DELETE FROM catalog_prices WHERE item_id = $1 AND price_type_id = $2")
+        .bind(item_id)
+        .bind(type_id)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query(
+        "INSERT INTO catalog_prices (item_id, price_type_id, price, currency)
+         VALUES ($1, $2, round($3::float8::numeric, 2), $4)",
+    )
+    .bind(item_id)
+    .bind(type_id)
+    .bind(price.value)
+    .bind(currency)
+    .execute(&mut *conn)
+    .await?;
+    bump(
+        if count == 0 {
+            &mut stats.created
+        } else {
+            &mut stats.updated
+        },
+        "prices",
+    );
+    Ok(())
+}
+
+async fn write_amount(
+    conn: &mut PgConnection,
+    item_id: i64,
+    store_id: i64,
+    amount: f64,
+    stats: &mut Stats,
+) -> Result<(), ApplyError> {
+    let changed = sqlx::query(
+        "INSERT INTO catalog_store_amounts (item_id, store_id, amount)
+         VALUES ($1, $2, round($3::float8::numeric, 2))
+         ON CONFLICT (item_id, store_id) DO UPDATE SET amount = EXCLUDED.amount
+         WHERE catalog_store_amounts.amount <> EXCLUDED.amount",
+    )
+    .bind(item_id)
+    .bind(store_id)
+    .bind(amount)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if changed > 0 {
+        bump(&mut stats.updated, "rests");
+    }
+    Ok(())
+}
+
+/// Общее количество записи; строка товарных данных создаётся при необходимости.
+async fn write_quantity(
+    conn: &mut PgConnection,
+    item_id: i64,
+    quantity: f64,
+) -> Result<(), ApplyError> {
+    sqlx::query(
+        "INSERT INTO catalog_products (item_id, quantity)
+         VALUES ($1, round($2::float8::numeric, 2))
+         ON CONFLICT (item_id) DO UPDATE SET quantity = EXCLUDED.quantity
+         WHERE catalog_products.quantity <> EXCLUDED.quantity",
+    )
+    .bind(item_id)
+    .bind(quantity)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// После пакета с ценами записи без единой цены становятся неактивными. У товара с
+/// предложениями считаются цены его предложений.
+async fn deactivate_without_price(
+    conn: &mut PgConnection,
+    collection: &Collection,
+    stats: &mut Stats,
+) -> Result<(), ApplyError> {
+    let done = sqlx::query(
+        "UPDATE collection_items i SET active = FALSE, updated_at = now()
+         WHERE i.active
+           AND i.collection_id IN (
+                 $1, COALESCE((SELECT id FROM collections WHERE product_collection_id = $1), 0))
+           AND NOT EXISTS (SELECT 1 FROM catalog_prices p WHERE p.item_id = i.id)
+           AND NOT EXISTS (SELECT 1 FROM collection_items o
+                           JOIN catalog_prices p ON p.item_id = o.id
+                           WHERE o.product_id = i.id)",
+    )
+    .bind(collection.id)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if done > 0 {
+        *stats.deactivated.entry("items").or_default() += done as u32;
+    }
+    Ok(())
+}
+
+/// Запись предложения: id, название, товар, код, значения полей, активность.
+type OfferRow = (
+    i64,
+    String,
+    Option<i64>,
+    String,
+    sqlx::types::Json<serde_json::Map<String, Value>>,
+    bool,
+);
+
+/// Коллекция предложений и поля характеристик, прочитанные один раз на пакет.
+struct SkuState {
+    collection: Collection,
+    state: GoodsState,
+}
+
+/// Предложение `товар#характеристика` → запись коллекции предложений. `None` — родитель
+/// неизвестен (предложение пропускается).
+async fn write_sku_offer(
+    conn: &mut PgConnection,
+    ctx: &Ctx<'_>,
+    products: &Collection,
+    sku: &mut Option<SkuState>,
+    parent_xml: &str,
+    offer: &Offer,
+    stats: &mut Stats,
+) -> Result<Option<i64>, ApplyError> {
+    let parent: Option<(i64, String)> = sqlx::query_as(
+        "SELECT id, name FROM collection_items WHERE collection_id = $1 AND xml_id = $2
+         ORDER BY id LIMIT 1",
+    )
+    .bind(products.id)
+    .bind(parent_xml)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((parent_id, parent_name)) = parent else {
+        return Ok(None);
+    };
+    if sku.is_none() {
+        let found: Option<Collection> =
+            sqlx::query_as("SELECT * FROM collections WHERE product_collection_id = $1")
+                .bind(products.id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        let collection = match found {
+            Some(c) => c,
+            None => {
+                let c = crate::collection::repo::create_offer_collection_in(conn, products).await?;
+                bump(&mut stats.created, "offer_collections");
+                c
+            }
+        };
+        let state = GoodsState::load(conn, collection.id).await?;
+        *sku = Some(SkuState { collection, state });
+    }
+    let SkuState { collection, state } = sku.as_mut().expect("задано выше");
+
+    let mut values: serde_json::Map<String, Value> = serde_json::Map::new();
+    let mut shown: Vec<&str> = Vec::new();
+    for (name, value) in &offer.characteristics {
+        let (name, value) = (name.trim(), value.trim());
+        if name.is_empty() || value.is_empty() {
+            continue;
+        }
+        let field = characteristic_field(conn, state, name).await?;
+        values.insert(field.code, Value::String(value.to_string()));
+        shown.push(value);
+    }
+    let name = if !offer.name.trim().is_empty() {
+        offer.name.trim().to_string()
+    } else if shown.is_empty() {
+        parent_name
+    } else {
+        format!("{} ({})", parent_name, shown.join(", "))
+    };
+
+    let existing: Option<OfferRow> = sqlx::query_as(
+        "SELECT id, name, product_id, code, field_values, active FROM collection_items
+             WHERE collection_id = $1 AND xml_id = $2 ORDER BY id LIMIT 1",
+    )
+    .bind(collection.id)
+    .bind(&offer.id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    match existing {
+        None => {
+            let code = if ctx.settings.translit_on_add {
+                unique_item_code(conn, collection.id, None, &name)
+                    .await?
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let id: i64 = sqlx::query_scalar(
+                "INSERT INTO collection_items
+                    (collection_id, code, xml_id, name, active, field_values, product_id)
+                 VALUES ($1, $2, $3, $4, TRUE, $5, $6) RETURNING id",
+            )
+            .bind(collection.id)
+            .bind(code)
+            .bind(&offer.id)
+            .bind(&name)
+            .bind(sqlx::types::Json(&values))
+            .bind(parent_id)
+            .fetch_one(&mut *conn)
+            .await?;
+            bump(&mut stats.created, "offers");
+            Ok(Some(id))
+        }
+        Some((id, old_name, old_parent, _, old_values, old_active)) => {
+            // Значения других полей предложения (админка) сохраняются
+            let mut merged = old_values.0.clone();
+            merged.extend(values);
+            if old_name != name
+                || old_parent != Some(parent_id)
+                || merged != old_values.0
+                || !old_active
+            {
+                sqlx::query(
+                    "UPDATE collection_items
+                     SET name = $2, product_id = $3, field_values = $4, active = TRUE,
+                         updated_at = now()
+                     WHERE id = $1",
+                )
+                .bind(id)
+                .bind(&name)
+                .bind(parent_id)
+                .bind(sqlx::types::Json(&merged))
+                .execute(&mut *conn)
+                .await?;
+                bump(&mut stats.updated, "offers");
+            }
+            Ok(Some(id))
+        }
+    }
+}
+
+/// Поле-характеристика коллекции предложений: строка с `offer_tree`, `xml_id` —
+/// `CML2_ATTR_` + транслит названия (повторные пакеты находят то же поле).
+async fn characteristic_field(
+    conn: &mut PgConnection,
+    state: &mut GoodsState,
+    name: &str,
+) -> Result<FieldInfo, ApplyError> {
+    let xml_id = format!("CML2_ATTR_{}", slugify(name));
+    if let Some(f) = state.fields.get(&xml_id) {
+        return Ok(f.clone());
+    }
+    let code = unique_code(
+        &field_code_base(name, state.fields.len() + 1),
+        &mut state.taken_codes,
+    );
+    let sort: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(max(sort), 0) + 10 FROM collection_fields WHERE collection_id = $1",
+    )
+    .bind(state.collection_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_fields (collection_id, code, name, kind, sort, offer_tree, xml_id)
+         VALUES ($1, $2, $3, 'string', $4, TRUE, $5) RETURNING id",
+    )
+    .bind(state.collection_id)
+    .bind(&code)
+    .bind(name)
+    .bind(sort)
+    .bind(&xml_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let info = FieldInfo {
+        id,
+        code,
+        kind: "string".into(),
+        multiple: false,
+    };
+    state.fields.insert(xml_id, info.clone());
+    Ok(info)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2384,5 +2841,347 @@ mod tests {
             .await
             .unwrap();
         assert!(st.updated.is_empty() && st.created.is_empty(), "{st:?}");
+    }
+
+    fn offers_file(bytes: &[u8]) -> Parsed {
+        cml::parse(bytes).unwrap()
+    }
+
+    fn prices_package() -> Parsed {
+        offers_file(include_bytes!("../../tests/fixtures/1c/prices.xml"))
+    }
+
+    fn rests_package() -> Parsed {
+        offers_file(include_bytes!("../../tests/fixtures/1c/rests.xml"))
+    }
+
+    #[sqlx::test]
+    async fn prices_and_rests_applied(db: PgPool) {
+        let settings = Settings::default();
+        let dirs = Dirs::new();
+        load_goods(&db, &settings, &dirs, &goods_package()).await;
+
+        let st = run_in(&db, &settings, &dirs, &prices_package())
+            .await
+            .unwrap();
+        // pt-2 в классификаторе нет: тип цены создаётся
+        assert_eq!(st.created.get("price_types"), Some(&1), "{st:?}");
+        assert_eq!(st.created.get("prices"), Some(&2), "{st:?}");
+        let prices: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT t.xml_id, p.price::text, p.currency FROM catalog_prices p
+             JOIN catalog_price_types t ON t.id = p.price_type_id
+             JOIN collection_items i ON i.id = p.item_id
+             WHERE i.xml_id = 'good-1' ORDER BY t.xml_id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            prices,
+            [
+                ("pt-1".into(), "6540.66".into(), "RUB".into()),
+                ("pt-2".into(), "80.00".into(), "USD".into())
+            ]
+        );
+        let name: String =
+            sqlx::query_scalar("SELECT name FROM catalog_price_types WHERE xml_id = 'pt-2'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(name, "pt-2");
+
+        let st = run_in(&db, &settings, &dirs, &rests_package())
+            .await
+            .unwrap();
+        // s-2 нового склада нет в классификаторе; good-2 (помечен на удаление) и good-3 неизвестны
+        assert_eq!(st.created.get("stores"), Some(&1), "{st:?}");
+        assert_eq!(st.skipped.get("offers"), Some(&2), "{st:?}");
+        let amounts: Vec<(String, String)> = sqlx::query_as(
+            "SELECT s.xml_id, a.amount::text FROM catalog_store_amounts a
+             JOIN catalog_stores s ON s.id = a.store_id
+             JOIN collection_items i ON i.id = a.item_id
+             WHERE i.xml_id = 'good-1' ORDER BY s.xml_id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            amounts,
+            [("s-1".into(), "6.00".into()), ("s-2".into(), "2.50".into())]
+        );
+        let qty: String = sqlx::query_scalar(
+            "SELECT c.quantity::text FROM catalog_products c
+             JOIN collection_items i ON i.id = c.item_id WHERE i.xml_id = 'good-1'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(qty, "8.50");
+
+        // Повтор ничего не пишет
+        for p in [prices_package(), rests_package()] {
+            let st = run_in(&db, &settings, &dirs, &p).await.unwrap();
+            assert!(st.created.is_empty() && st.updated.is_empty(), "{st:?}");
+        }
+
+        // Меняется цена одного типа; второй и типы вне пакета остаются
+        let mut changed = prices_package();
+        {
+            let offer = &mut changed.offers.as_mut().unwrap().offers[0];
+            let prices = offer.prices.as_mut().unwrap();
+            prices[0].value = 7000.0;
+            prices.truncate(1);
+        }
+        let st = run_in(&db, &settings, &dirs, &changed).await.unwrap();
+        assert_eq!(st.updated.get("prices"), Some(&1), "{st:?}");
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM catalog_prices p JOIN collection_items i ON i.id = p.item_id
+             WHERE i.xml_id = 'good-1'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(n, 2);
+        let p1: String = sqlx::query_scalar(
+            "SELECT p.price::text FROM catalog_prices p
+             JOIN catalog_price_types t ON t.id = p.price_type_id WHERE t.xml_id = 'pt-1'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(p1, "7000.00");
+
+        // Изменился остаток склада: пересчёт общего количества
+        let mut rests = rests_package();
+        rests.offers.as_mut().unwrap().offers[0]
+            .rests
+            .as_mut()
+            .unwrap()[0]
+            .1 = 1.0;
+        run_in(&db, &settings, &dirs, &rests).await.unwrap();
+        let qty: String = sqlx::query_scalar(
+            "SELECT c.quantity::text FROM catalog_products c
+             JOIN collection_items i ON i.id = c.item_id WHERE i.xml_id = 'good-1'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(qty, "3.50");
+    }
+
+    #[sqlx::test]
+    async fn quantity_without_rests_sets_only_quantity(db: PgPool) {
+        let settings = Settings::default();
+        let dirs = Dirs::new();
+        load_goods(&db, &settings, &dirs, &goods_package()).await;
+        let mut p = rests_package();
+        {
+            let offer = &mut p.offers.as_mut().unwrap().offers[0];
+            offer.rests = None;
+            offer.quantity = Some(12.0);
+        }
+        run_in(&db, &settings, &dirs, &p).await.unwrap();
+        let qty: String = sqlx::query_scalar(
+            "SELECT c.quantity::text FROM catalog_products c
+             JOIN collection_items i ON i.id = c.item_id WHERE i.xml_id = 'good-1'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(qty, "12.00");
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog_store_amounts")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    /// Классификатор и товары 2.x (`import.xml`), затем предложения (`offers.xml`).
+    async fn load_2x(db: &PgPool, settings: &Settings, dirs: &Dirs) -> Stats {
+        let import = offers_file(include_bytes!("../../tests/fixtures/1c/import.xml"));
+        run_in(db, settings, dirs, &import).await.unwrap();
+        let offers = offers_file(include_bytes!("../../tests/fixtures/1c/offers.xml"));
+        run_in(db, settings, dirs, &offers).await.unwrap()
+    }
+
+    #[sqlx::test]
+    async fn characteristic_offers_become_sku(db: PgPool) {
+        use sqlx::Row;
+        let settings = Settings {
+            use_offers: true,
+            ..Settings::default()
+        };
+        let dirs = Dirs::new();
+        let st = load_2x(&db, &settings, &dirs).await;
+        assert_eq!(st.created.get("offers"), Some(&1), "{st:?}");
+
+        let (product, products_cid): (i64, i64) = sqlx::query_as(
+            "SELECT id, collection_id FROM collection_items WHERE xml_id = 'g2-good'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let offers_cid: i64 =
+            sqlx::query_scalar("SELECT id FROM collections WHERE product_collection_id = $1")
+                .bind(products_cid)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let row = item_row(&db, "g2-good#sku-red-m").await;
+        assert_eq!(row.get::<i64, _>("collection_id"), offers_cid);
+        assert_eq!(row.get::<Option<i64>, _>("product_id"), Some(product));
+        assert_eq!(row.get::<String, _>("name"), "Футболка (красная, M)");
+        assert!(row.get::<bool, _>("active"));
+
+        // Поля характеристик: строки с offer_tree, значения в записи
+        let fields: Vec<(String, String, bool, String)> = sqlx::query_as(
+            "SELECT code, kind, offer_tree, xml_id FROM collection_fields
+             WHERE collection_id = $1 AND offer_tree ORDER BY code",
+        )
+        .bind(offers_cid)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            fields,
+            [
+                (
+                    "razmer".into(),
+                    "string".into(),
+                    true,
+                    "CML2_ATTR_razmer".into()
+                ),
+                (
+                    "tsvet".into(),
+                    "string".into(),
+                    true,
+                    "CML2_ATTR_tsvet".into()
+                ),
+            ]
+        );
+        let v = values(&row);
+        assert_eq!(v.get("tsvet"), Some(&serde_json::json!("красный")));
+        assert_eq!(v.get("razmer"), Some(&serde_json::json!("M")));
+
+        // Цена, склад и количество предложения; товар стал товаром с предложениями
+        let (price, cur): (String, String) = sqlx::query_as(
+            "SELECT price::text, currency FROM catalog_prices p
+             JOIN collection_items i ON i.id = p.item_id WHERE i.xml_id = 'g2-good#sku-red-m'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!((price.as_str(), cur.as_str()), ("999.50", "RUB"));
+        let qty: String = sqlx::query_scalar(
+            "SELECT c.quantity::text FROM catalog_products c
+             JOIN collection_items i ON i.id = c.item_id WHERE i.xml_id = 'g2-good#sku-red-m'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(qty, "4.00");
+        let ty: i16 = sqlx::query_scalar("SELECT type FROM catalog_products WHERE item_id = $1")
+            .bind(product)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(ty, 3);
+
+        // Повтор: ни записей, ни новой коллекции
+        let offers = offers_file(include_bytes!("../../tests/fixtures/1c/offers.xml"));
+        let st = run_in(&db, &settings, &dirs, &offers).await.unwrap();
+        assert!(st.created.is_empty() && st.updated.is_empty(), "{st:?}");
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM collections WHERE product_collection_id IS NOT NULL",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[sqlx::test]
+    async fn characteristic_offers_skipped_without_use_offers(db: PgPool) {
+        let settings = Settings::default();
+        let dirs = Dirs::new();
+        let st = load_2x(&db, &settings, &dirs).await;
+        assert_eq!(st.skipped.get("offers"), Some(&1), "{st:?}");
+        let n: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM collection_items WHERE xml_id LIKE '%#%')
+                  + (SELECT count(*) FROM collections WHERE product_collection_id IS NOT NULL)
+                  + (SELECT count(*) FROM catalog_prices)",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[sqlx::test]
+    async fn offers_for_unknown_goods_are_skipped(db: PgPool) {
+        let settings = Settings {
+            use_offers: true,
+            ..Settings::default()
+        };
+        let dirs = Dirs::new();
+        load_goods(&db, &settings, &dirs, &goods_package()).await;
+        let mut p = prices_package();
+        {
+            let offers = &mut p.offers.as_mut().unwrap().offers;
+            offers[0].id = "nope".into();
+            offers[1].id = "nope#x".into();
+        }
+        let st = run_in(&db, &settings, &dirs, &p).await.unwrap();
+        assert_eq!(st.skipped.get("offers"), Some(&2), "{st:?}");
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog_prices")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM collection_items WHERE xml_id IN ('nope', 'nope#x')",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[sqlx::test]
+    async fn goods_without_price_deactivated_when_enabled(db: PgPool) {
+        let active = |db: PgPool| async move {
+            sqlx::query_as::<_, (String, bool)>(
+                "SELECT xml_id, active FROM collection_items ORDER BY xml_id",
+            )
+            .fetch_all(&db)
+            .await
+            .unwrap()
+        };
+        let dirs = Dirs::new();
+        // Настройка выключена: все остаются активными
+        let off = Settings::default();
+        let mut goods = goods_package();
+        goods.catalog.as_mut().unwrap().goods[1].deleted = false;
+        load_goods(&db, &off, &dirs, &goods).await;
+        run_in(&db, &off, &dirs, &prices_package()).await.unwrap();
+        assert!(active(db.clone()).await.iter().all(|r| r.1));
+
+        let on = Settings {
+            deactivate_without_price: true,
+            ..Settings::default()
+        };
+        // Пакет остатков цен не несёт: ничего не меняется
+        run_in(&db, &on, &dirs, &rests_package()).await.unwrap();
+        assert!(active(db.clone()).await.iter().all(|r| r.1));
+
+        let st = run_in(&db, &on, &dirs, &prices_package()).await.unwrap();
+        assert_eq!(st.deactivated.get("items"), Some(&1), "{st:?}");
+        assert_eq!(
+            active(db.clone()).await,
+            [("good-1".to_string(), true), ("good-2".to_string(), false)]
+        );
+        // Повтор не считает уже неактивную
+        let st = run_in(&db, &on, &dirs, &prices_package()).await.unwrap();
+        assert!(st.deactivated.is_empty(), "{st:?}");
     }
 }

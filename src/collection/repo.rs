@@ -622,6 +622,16 @@ pub async fn create_offer_collection(
     product: &Collection,
 ) -> sqlx::Result<Collection> {
     let mut tx = db.begin().await?;
+    let created = create_offer_collection_in(&mut tx, product).await?;
+    tx.commit().await?;
+    Ok(created)
+}
+
+/// То же в уже открытой транзакции (например, обмен с 1С); откат за вызывающим.
+pub async fn create_offer_collection_in(
+    conn: &mut sqlx::PgConnection,
+    product: &Collection,
+) -> sqlx::Result<Collection> {
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO collections (code, name, api_enabled, sort, is_catalog)
          VALUES ($1, $2, $3, $4, TRUE) RETURNING id",
@@ -630,17 +640,15 @@ pub async fn create_offer_collection(
     .bind(format!("{} — предложения", product.name))
     .bind(product.api_enabled)
     .bind(product.sort)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await?;
-    ensure_link(&mut tx, product.id, id).await?;
-    let created = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+    ensure_link(&mut *conn, product.id, id).await?;
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLLECTION_COLS} FROM collections WHERE id = $1"
     )))
     .bind(id)
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(created)
+    .fetch_one(&mut *conn)
+    .await
 }
 
 /// Делает `offers_id` коллекцией предложений коллекции товаров `product_id`
