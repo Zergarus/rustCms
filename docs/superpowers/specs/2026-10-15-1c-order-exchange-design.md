@@ -73,8 +73,9 @@ CMS — универсальный шаблон под любой проект (
 - `users.xml_id TEXT NOT NULL DEFAULT ''` + уникальный индекс по непустому.
 - `person_types.domain CHAR(1) NOT NULL DEFAULT 'I'` (`I` — физлицо, `E` — юрлицо;
   `b_sale_bizval_persondomain`).
-- `exchange_order_map` — соответствие реквизитов: `person_type_id`, `code` (поле
-  контрагента или `REKV_<n>` — произвольный реквизит), `name` (для `REKV_*`),
+- `exchange_order_map` — соответствие реквизитов: `person_type_id`, `code` (код
+  Битрикса: `BUYER_PERSON_*` / `BUYER_COMPANY_*` или `1C_REKV_<n>` — произвольный реквизит),
+  `name` (для `1C_REKV_*`),
   `source` (`property` / `user` / `order` / `value`), `value` (id свойства, поле
   пользователя или заказа, константа). Аналог `b_sale_bizval` с потребителем «1C».
 - `exchange_log.kind TEXT NOT NULL DEFAULT 'catalog'` (`catalog` / `sale`).
