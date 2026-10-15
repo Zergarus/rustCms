@@ -15,6 +15,7 @@ lettre = { version = "0.11.23", default-features = false, features = ["builder",
 md-5 = "0.11.0"
 minijinja = { version = "2", features = ["loader"] }
 password-auth = "1.0"
+quick-xml = { version = "0.37", features = ["encoding"] }
 rand = "0.10"
 reqwest = { version = "0.13.5", default-features = false, features = ["form", "json", "rustls"] }
 rpassword = "7"
