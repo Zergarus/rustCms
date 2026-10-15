@@ -126,6 +126,17 @@ pub trait FormGuard: Send + Sync {
     ) -> BoxFuture<'a, Result<(), BxError>>;
 }
 
+/// Обработчик проекта при обмене с 1С: вызывается после записи (создания или изменения)
+/// каждого товара пакета, в той же транзакции, что и сам обмен. Ошибка отменяет весь пакет.
+pub trait ImportHook: Send + Sync {
+    fn after_item<'a>(
+        &'a self,
+        conn: &'a mut sqlx::PgConnection,
+        item_id: i64,
+        goods: &'a crate::exchange::cml::Goods,
+    ) -> BoxFuture<'a, anyhow::Result<()>>;
+}
+
 /// Выбор города (`bxapi.location`).
 pub struct LocationConfig {
     /// Типы местоположений в поиске (`CITY`, `VILLAGE`...).
@@ -254,6 +265,10 @@ pub struct Project {
     pub location: LocationConfig,
     pub forms: Vec<FormConfig>,
     pub form_guards: Vec<Arc<dyn FormGuard>>,
+    /// Обработчик товаров при обмене с 1С (`None` — ничего не делается).
+    // Подключается к обмену с 1С в следующей задаче плана.
+    #[allow(dead_code)]
+    pub import_hook: Option<Arc<dyn ImportHook>>,
     pub cart: CartConfig,
     pub order: OrderConfig,
     pub profile: ProfileConfig,
@@ -355,6 +370,7 @@ impl Default for Project {
             },
             forms: default_forms(),
             form_guards: Vec::new(),
+            import_hook: None,
             cart: CartConfig::default(),
             order: OrderConfig::default(),
             profile: ProfileConfig::default(),

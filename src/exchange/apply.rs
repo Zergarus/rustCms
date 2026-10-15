@@ -1,19 +1,30 @@
 //! Запись разобранной выгрузки в БД: классификатор, затем товары и предложения.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::Serialize;
 use sqlx::PgConnection;
 
-use super::cml::{Classifier, Parsed, PropKind, Property};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+use super::cml::{Catalog, Classifier, Goods, Parsed, PropKind, Property};
 use super::settings::{Action, Settings};
+use crate::bxapi::project::ImportHook;
 use crate::collection::{Collection, is_valid_code, is_valid_slug, slugify};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
     #[error("Ошибка базы данных: {0}")]
     Db(#[from] sqlx::Error),
+    #[error("Некорректные данные пакета: {0}")]
+    Invalid(String),
+    #[error("Ошибка работы с файлом: {0}")]
+    File(String),
+    #[error("Ошибка обработчика проекта: {0}")]
+    Hook(anyhow::Error),
 }
 
 pub struct Ctx<'a> {
@@ -21,6 +32,46 @@ pub struct Ctx<'a> {
     pub session_id: Option<i64>,
     pub session_dir: &'a Path,
     pub upload_dir: &'a Path,
+    /// Обработчик проекта (`Project::import_hook`).
+    pub hook: Option<&'a dyn ImportHook>,
+    /// Файлы, записанные на диск во время `apply`. Если транзакция откатывается, они
+    /// остаются сиротами; `apply` удаляет их сам при своей ошибке, а вызывающий — через
+    /// `discard_written`, если ошибка случилась уже после `apply` (например, при коммите).
+    written: Mutex<Vec<PathBuf>>,
+}
+
+impl<'a> Ctx<'a> {
+    pub fn new(
+        settings: &'a Settings,
+        session_id: Option<i64>,
+        session_dir: &'a Path,
+        upload_dir: &'a Path,
+    ) -> Self {
+        Ctx {
+            settings,
+            session_id,
+            session_dir,
+            upload_dir,
+            hook: None,
+            written: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn with_hook(mut self, hook: Option<&'a dyn ImportHook>) -> Self {
+        self.hook = hook;
+        self
+    }
+
+    /// Удаляет файлы, записанные на диск этим контекстом (вызывать, если транзакция не
+    /// закоммичена). Повторный вызов ничего не делает.
+    pub async fn discard_written(&self) {
+        let paths = std::mem::take(&mut *self.written.lock().expect("список файлов"));
+        for path in paths {
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                tracing::warn!(path = %path.display(), "обмен с 1С: не удалось убрать файл: {e}");
+            }
+        }
+    }
 }
 
 /// Счётчики по видам данных: `sections`, `fields`, `options`, `stores`, `price_types`,
@@ -175,6 +226,19 @@ pub async fn apply(
     ctx: &Ctx<'_>,
     parsed: &Parsed,
 ) -> Result<Stats, ApplyError> {
+    let result = apply_inner(conn, ctx, parsed).await;
+    if result.is_err() {
+        // Вызывающий откатит транзакцию, а файлы на диске откат не уберёт
+        ctx.discard_written().await;
+    }
+    result
+}
+
+async fn apply_inner(
+    conn: &mut PgConnection,
+    ctx: &Ctx<'_>,
+    parsed: &Parsed,
+) -> Result<Stats, ApplyError> {
     let mut stats = Stats::default();
     let Some(collection) = collection_for(conn, ctx.settings, parsed).await? else {
         return Ok(stats);
@@ -184,6 +248,9 @@ pub async fn apply(
         apply_fields(conn, &collection, classifier, &mut stats).await?;
         apply_stores(conn, classifier, &mut stats).await?;
         apply_price_types(conn, classifier, &mut stats).await?;
+    }
+    if let Some(catalog) = &parsed.catalog {
+        apply_goods(conn, ctx, &collection, catalog, &mut stats).await?;
     }
     Ok(stats)
 }
@@ -638,12 +705,712 @@ async fn apply_price_types(
     Ok(())
 }
 
+/// Системные поля CML2: `xml_id`, код, название, вид, множественное.
+type SystemField = (&'static str, &'static str, &'static str, &'static str, bool);
+
+const F_ARTICLE: SystemField = ("CML2_ARTICLE", "cml2_article", "Артикул", "string", false);
+const F_BAR_CODE: SystemField = (
+    "CML2_BAR_CODE",
+    "cml2_bar_code",
+    "Штрихкод",
+    "string",
+    false,
+);
+const F_MANUFACTURER: SystemField = (
+    "CML2_MANUFACTURER",
+    "cml2_manufacturer",
+    "Изготовитель",
+    "list",
+    false,
+);
+const F_TRAITS: SystemField = ("CML2_TRAITS", "cml2_traits", "Реквизиты", "string", true);
+const F_TAXES: SystemField = ("CML2_TAXES", "cml2_taxes", "Налоги", "string", true);
+const F_BASE_UNIT: SystemField = (
+    "CML2_BASE_UNIT",
+    "cml2_base_unit",
+    "Базовая единица",
+    "string",
+    false,
+);
+const F_PICTURES: SystemField = ("CML2_PICTURES", "cml2_pictures", "Картинки", "file", true);
+
+#[derive(Debug, Clone)]
+struct FieldInfo {
+    id: i64,
+    code: String,
+    kind: String,
+    multiple: bool,
+}
+
+/// Поля коллекции, варианты и разделы, прочитанные один раз на пакет.
+struct GoodsState {
+    collection_id: i64,
+    fields: HashMap<String, FieldInfo>,
+    taken_codes: HashSet<String>,
+    options: HashMap<(i64, String), i64>,
+    sections: HashMap<String, i64>,
+}
+
+impl GoodsState {
+    async fn load(conn: &mut PgConnection, collection_id: i64) -> Result<Self, ApplyError> {
+        let rows: Vec<(i64, String, String, bool, String)> = sqlx::query_as(
+            "SELECT id, code, kind, multiple, xml_id FROM collection_fields
+             WHERE collection_id = $1",
+        )
+        .bind(collection_id)
+        .fetch_all(&mut *conn)
+        .await?;
+        let mut fields = HashMap::new();
+        let mut taken_codes = HashSet::new();
+        for (id, code, kind, multiple, xml_id) in rows {
+            taken_codes.insert(code.clone());
+            if !xml_id.is_empty() {
+                fields.insert(
+                    xml_id,
+                    FieldInfo {
+                        id,
+                        code,
+                        kind,
+                        multiple,
+                    },
+                );
+            }
+        }
+        let sections: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT xml_id, id FROM collection_sections WHERE collection_id = $1 AND xml_id <> ''",
+        )
+        .bind(collection_id)
+        .fetch_all(&mut *conn)
+        .await?;
+        Ok(GoodsState {
+            collection_id,
+            fields,
+            taken_codes,
+            options: HashMap::new(),
+            sections: sections.into_iter().collect(),
+        })
+    }
+
+    /// Поле коллекции с `xml_id` системного поля; нет — создаётся.
+    async fn system_field(
+        &mut self,
+        conn: &mut PgConnection,
+        def: SystemField,
+    ) -> Result<FieldInfo, ApplyError> {
+        let (xml_id, code, name, kind, multiple) = def;
+        if let Some(f) = self.fields.get(xml_id) {
+            return Ok(f.clone());
+        }
+        let code = unique_code(code, &mut self.taken_codes);
+        let sort: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(max(sort), 0) + 10 FROM collection_fields WHERE collection_id = $1",
+        )
+        .bind(self.collection_id)
+        .fetch_one(&mut *conn)
+        .await?;
+        let (id,): (i64,) = sqlx::query_as(
+            "INSERT INTO collection_fields (collection_id, code, name, kind, sort, multiple, xml_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+        )
+        .bind(self.collection_id)
+        .bind(&code)
+        .bind(name)
+        .bind(kind)
+        .bind(sort)
+        .bind(multiple)
+        .bind(xml_id)
+        .fetch_one(&mut *conn)
+        .await?;
+        let info = FieldInfo {
+            id,
+            code,
+            kind: kind.to_string(),
+            multiple,
+        };
+        self.fields.insert(xml_id.to_string(), info.clone());
+        Ok(info)
+    }
+
+    /// Вариант списка по внешнему коду; неизвестный добавляется (`text` — подпись, если есть).
+    async fn option(
+        &mut self,
+        conn: &mut PgConnection,
+        field_id: i64,
+        xml_id: &str,
+        text: &str,
+    ) -> Result<i64, ApplyError> {
+        let xml_id = xml_id.trim();
+        let key = (field_id, xml_id.to_string());
+        if let Some(id) = self.options.get(&key) {
+            return Ok(*id);
+        }
+        let found: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM collection_field_options WHERE field_id = $1 AND xml_id = $2",
+        )
+        .bind(field_id)
+        .bind(xml_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let id = match found {
+            Some(id) => id,
+            None => {
+                let text = if text.trim().is_empty() { xml_id } else { text };
+                tracing::info!(
+                    field_id,
+                    xml_id,
+                    "обмен с 1С: новый вариант списка из товара"
+                );
+                ensure_option(conn, field_id, xml_id, text).await?
+            }
+        };
+        self.options.insert(key, id);
+        Ok(id)
+    }
+}
+
+/// Значение в поле: пусто — ключ убирается, множественное — массив, иначе первое.
+fn assign(values: &mut serde_json::Map<String, Value>, field: &FieldInfo, vals: Vec<Value>) {
+    if vals.is_empty() {
+        values.remove(&field.code);
+    } else if field.multiple {
+        values.insert(field.code.clone(), Value::Array(vals));
+    } else {
+        values.insert(
+            field.code.clone(),
+            vals.into_iter().next().expect("не пусто"),
+        );
+    }
+}
+
+/// Системное поле со строковыми значениями. Пустой набор не создаёт поле,
+/// а у существующего убирает значение.
+async fn assign_system(
+    conn: &mut PgConnection,
+    state: &mut GoodsState,
+    values: &mut serde_json::Map<String, Value>,
+    def: SystemField,
+    vals: Vec<Value>,
+) -> Result<(), ApplyError> {
+    if vals.is_empty() && !state.fields.contains_key(def.0) {
+        return Ok(());
+    }
+    let field = state.system_field(conn, def).await?;
+    assign(values, &field, vals);
+    Ok(())
+}
+
+fn parse_number(raw: &str) -> Option<Value> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .replace(',', ".");
+    if let Ok(i) = cleaned.parse::<i64>() {
+        return Some(Value::from(i));
+    }
+    let f: f64 = cleaned.parse().ok().filter(|f: &f64| f.is_finite())?;
+    if f.fract() == 0.0 && f.abs() < 9e15 {
+        Some(Value::from(f as i64))
+    } else {
+        Some(Value::from(f))
+    }
+}
+
+/// Значение свойства товара → значение поля; `None` — нет значения.
+async fn property_value(
+    conn: &mut PgConnection,
+    state: &mut GoodsState,
+    field: &FieldInfo,
+    raw: &str,
+) -> Result<Option<Value>, ApplyError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(match field.kind.as_str() {
+        "string" | "text" => Some(Value::String(raw.to_string())),
+        "number" => {
+            let n = parse_number(trimmed);
+            if n.is_none() {
+                tracing::warn!(field = %field.code, "обмен с 1С: «{trimmed}» не число, значение пропущено");
+            }
+            n
+        }
+        "boolean" => Some(Value::Bool(matches!(
+            trimmed.to_lowercase().as_str(),
+            "1" | "y" | "true" | "да"
+        ))),
+        "date" => match trimmed.get(..10) {
+            Some(d) if chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").is_ok() => {
+                Some(Value::String(d.to_string()))
+            }
+            _ => {
+                tracing::warn!(field = %field.code, "обмен с 1С: «{trimmed}» не дата, значение пропущено");
+                None
+            }
+        },
+        "list" => Some(Value::from(
+            state.option(conn, field.id, trimmed, trimmed).await?,
+        )),
+        kind => {
+            tracing::warn!(field = %field.code, "обмен с 1С: поле вида {kind} из пакета не заполняется");
+            None
+        }
+    })
+}
+
+/// Код записи: транслит названия, уникальный в коллекции (`код`, `код-2`, `код-3`…).
+/// Негодный транслит — `None`.
+async fn unique_item_code(
+    conn: &mut PgConnection,
+    collection_id: i64,
+    self_id: Option<i64>,
+    name: &str,
+) -> Result<Option<String>, ApplyError> {
+    let base = slugify(name);
+    if !is_valid_slug(&base) || base.len() > 200 {
+        return Ok(None);
+    }
+    let mut taken: HashSet<String> = sqlx::query_scalar(
+        "SELECT code FROM collection_items
+         WHERE collection_id = $1 AND id IS DISTINCT FROM $2
+           AND (code = $3 OR left(code, length($3) + 1) = $3 || '-')",
+    )
+    .bind(collection_id)
+    .bind(self_id)
+    .bind(&base)
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .collect();
+    let mut code = base.clone();
+    let mut n = 2;
+    while taken.contains(&code) {
+        code = format!("{base}-{n}");
+        n += 1;
+    }
+    taken.insert(code.clone());
+    Ok(Some(code))
+}
+
+fn content_type_of(name: &str) -> &'static str {
+    match Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
+        Some("pdf") => "application/pdf",
+        Some("txt") => "text/plain",
+        Some("csv") => "text/csv",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Файл из каталога сессии по относительному пути пакета. Совпал по sha256 с одним из
+/// `existing` — его id; нет файла в пакете — `None`; иначе новый файл. Путь вне каталога
+/// сессии — ошибка. Новые файлы запоминаются в `ctx` (см. `Ctx::discard_written`).
+pub async fn store_file(
+    conn: &mut PgConnection,
+    ctx: &Ctx<'_>,
+    rel_path: &str,
+    existing: &[i64],
+) -> Result<Option<i64>, ApplyError> {
+    Ok(store_file_inner(conn, ctx, rel_path, existing)
+        .await?
+        .map(|(id, _)| id))
+}
+
+/// Как `store_file`; второе значение — файл создан заново.
+async fn store_file_inner(
+    conn: &mut PgConnection,
+    ctx: &Ctx<'_>,
+    rel_path: &str,
+    existing: &[i64],
+) -> Result<Option<(i64, bool)>, ApplyError> {
+    let rel = Path::new(rel_path.trim());
+    if rel.as_os_str().is_empty()
+        || rel
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(ApplyError::Invalid(format!(
+            "недопустимый путь файла «{rel_path}»"
+        )));
+    }
+    let data = match tokio::fs::read(ctx.session_dir.join(rel)).await {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(ApplyError::File(format!("{rel_path}: {e}"))),
+    };
+    let hash = hex::encode(Sha256::digest(&data));
+    if !existing.is_empty() {
+        let rows: Vec<(i64, String, String)> =
+            sqlx::query_as("SELECT id, path, sha256 FROM files WHERE id = ANY($1) ORDER BY id")
+                .bind(existing)
+                .fetch_all(&mut *conn)
+                .await?;
+        for (id, path, sha) in rows {
+            let sha = if sha.is_empty() {
+                // Файл сохранён до появления хеша: считаем с диска и запоминаем
+                let Ok(bytes) = tokio::fs::read(ctx.upload_dir.join(&path)).await else {
+                    continue;
+                };
+                let sha = hex::encode(Sha256::digest(&bytes));
+                sqlx::query("UPDATE files SET sha256 = $2 WHERE id = $1")
+                    .bind(id)
+                    .bind(&sha)
+                    .execute(&mut *conn)
+                    .await?;
+                sha
+            } else {
+                sha
+            };
+            if sha == hash {
+                return Ok(Some((id, false)));
+            }
+        }
+    }
+    let name = rel
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    match crate::files::save_in(
+        conn,
+        ctx.upload_dir,
+        "iblock",
+        &name,
+        content_type_of(&name),
+        &data,
+    )
+    .await
+    {
+        Ok(record) => {
+            ctx.written
+                .lock()
+                .expect("список файлов")
+                .push(ctx.upload_dir.join(&record.path));
+            Ok(Some((record.id, true)))
+        }
+        Err(crate::files::SaveError::Rejected(msg)) => {
+            tracing::warn!("обмен с 1С: файл пропущен: {msg}");
+            Ok(None)
+        }
+        Err(crate::files::SaveError::Failed(e)) => Err(ApplyError::File(format!("{e:#}"))),
+    }
+}
+
+type ItemRow = (
+    i64,
+    String,
+    Option<i64>,
+    String,
+    String,
+    Option<i64>,
+    Option<i64>,
+    sqlx::types::Json<serde_json::Map<String, Value>>,
+    bool,
+);
+
+/// Товары → записи по `xml_id`. Неизменённая запись не пишется.
+async fn apply_goods(
+    conn: &mut PgConnection,
+    ctx: &Ctx<'_>,
+    collection: &Collection,
+    catalog: &Catalog,
+    stats: &mut Stats,
+) -> Result<(), ApplyError> {
+    let settings = ctx.settings;
+    let mut state = GoodsState::load(conn, collection.id).await?;
+    for goods in catalog.goods.iter().filter(|g| !g.id.is_empty()) {
+        let existing: Option<ItemRow> = sqlx::query_as(
+            "SELECT id, name, section_id, code, detail_text, preview_picture_id,
+                    detail_picture_id, field_values, active
+             FROM collection_items WHERE collection_id = $1 AND xml_id = $2
+             ORDER BY id LIMIT 1",
+        )
+        .bind(collection.id)
+        .bind(&goods.id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if goods.deleted {
+            match (settings.element_action, existing) {
+                (_, None) => {}
+                (Action::None, Some(_)) => bump(&mut stats.skipped, "items"),
+                (Action::Deactivate, Some((id, .., active))) => {
+                    if active {
+                        sqlx::query(
+                            "UPDATE collection_items SET active = FALSE, updated_at = now()
+                             WHERE id = $1",
+                        )
+                        .bind(id)
+                        .execute(&mut *conn)
+                        .await?;
+                        bump(&mut stats.deactivated, "items");
+                    }
+                }
+                (Action::Delete, Some((id, ..))) => {
+                    sqlx::query("DELETE FROM collection_items WHERE id = $1")
+                        .bind(id)
+                        .execute(&mut *conn)
+                        .await?;
+                    bump(&mut stats.deleted, "items");
+                }
+            }
+            continue;
+        }
+        write_goods(conn, ctx, collection, &mut state, goods, existing, stats).await?;
+    }
+    if let (Some(session), false) = (ctx.session_id, catalog.only_changes) {
+        for goods in catalog
+            .goods
+            .iter()
+            .filter(|g| !g.deleted && !g.id.is_empty())
+        {
+            sqlx::query(
+                "INSERT INTO exchange_seen (session_id, kind, xml_id)
+                 VALUES ($1, 'item', $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(session)
+            .bind(&goods.id)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn write_goods(
+    conn: &mut PgConnection,
+    ctx: &Ctx<'_>,
+    collection: &Collection,
+    state: &mut GoodsState,
+    goods: &Goods,
+    existing: Option<ItemRow>,
+    stats: &mut Stats,
+) -> Result<(), ApplyError> {
+    let settings = ctx.settings;
+    let (old_values, old_detail, old_preview) = match &existing {
+        Some(row) => (row.7.0.clone(), row.6, row.5),
+        None => (serde_json::Map::new(), None, None),
+    };
+    let mut values = old_values.clone();
+
+    // Системные поля
+    let text = |s: &str| -> Vec<Value> {
+        if s.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![Value::String(s.trim().to_string())]
+        }
+    };
+    assign_system(conn, state, &mut values, F_ARTICLE, text(&goods.article)).await?;
+    assign_system(conn, state, &mut values, F_BAR_CODE, text(&goods.barcode)).await?;
+    assign_system(
+        conn,
+        state,
+        &mut values,
+        F_BASE_UNIT,
+        text(&goods.base_unit),
+    )
+    .await?;
+    let pairs = |list: &[(String, String)]| -> Vec<Value> {
+        list.iter()
+            .filter(|(_, v)| !v.trim().is_empty())
+            .map(|(k, v)| Value::String(format!("{}: {}", k.trim(), v.trim())))
+            .collect()
+    };
+    assign_system(conn, state, &mut values, F_TRAITS, pairs(&goods.traits)).await?;
+    assign_system(conn, state, &mut values, F_TAXES, pairs(&goods.taxes)).await?;
+    let mut manufacturer = Vec::new();
+    if let Some((id, name)) = &goods.manufacturer
+        && !id.trim().is_empty()
+    {
+        let field = state.system_field(conn, F_MANUFACTURER).await?;
+        manufacturer.push(Value::from(state.option(conn, field.id, id, name).await?));
+    }
+    assign_system(conn, state, &mut values, F_MANUFACTURER, manufacturer).await?;
+
+    // Свойства
+    for (prop_id, raws) in &goods.properties {
+        let Some(field) = state.fields.get(prop_id.trim()).cloned() else {
+            tracing::warn!(property = %prop_id, "обмен с 1С: свойство товара {} неизвестно, пропущено", goods.id);
+            continue;
+        };
+        let mut vals = Vec::new();
+        for raw in raws {
+            if let Some(v) = property_value(conn, state, &field, raw).await?
+                && !vals.contains(&v)
+            {
+                vals.push(v);
+            }
+        }
+        assign(&mut values, &field, vals);
+    }
+
+    // Картинки: ячейка без файла в пакете сохраняет прежнее значение
+    let (mut detail, mut preview) = (old_detail, old_preview);
+    if !goods.pictures.is_empty() {
+        let field = state.system_field(conn, F_PICTURES).await?;
+        let current = old_values
+            .get(&field.code)
+            .map(crate::collection::fields::ids)
+            .unwrap_or_default();
+        let mut known = current.clone();
+        known.extend(old_detail);
+        known.extend(old_preview);
+        let mut resolved = Vec::new();
+        for (slot, path) in goods.pictures.iter().enumerate() {
+            let stored = store_file_inner(conn, ctx, path, &known).await?;
+            let id = match stored {
+                Some((id, created)) => {
+                    if created {
+                        bump(&mut stats.created, "files");
+                    }
+                    Some(id)
+                }
+                None => current.get(slot).copied(),
+            };
+            if let Some(id) = id {
+                resolved.push(id);
+            }
+        }
+        if let Some(first) = resolved.first().copied() {
+            detail = Some(first);
+            preview = Some(first);
+        }
+        assign(
+            &mut values,
+            &field,
+            resolved.into_iter().map(Value::from).collect(),
+        );
+    }
+
+    let section = goods
+        .groups
+        .first()
+        .and_then(|g| state.sections.get(g.trim()).copied())
+        .or(existing.as_ref().and_then(|r| r.2));
+
+    let (item_id, changed, created) = match existing {
+        None => {
+            let code = if settings.translit_on_add {
+                unique_item_code(conn, collection.id, None, &goods.name)
+                    .await?
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let (id,): (i64,) = sqlx::query_as(
+                "INSERT INTO collection_items
+                    (collection_id, section_id, code, xml_id, name, active, detail_text,
+                     preview_picture_id, detail_picture_id, field_values)
+                 VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8, $9) RETURNING id",
+            )
+            .bind(collection.id)
+            .bind(section)
+            .bind(code)
+            .bind(&goods.id)
+            .bind(&goods.name)
+            .bind(&goods.description)
+            .bind(preview)
+            .bind(detail)
+            .bind(sqlx::types::Json(&values))
+            .fetch_one(&mut *conn)
+            .await?;
+            bump(&mut stats.created, "items");
+            (id, true, true)
+        }
+        Some((id, name, old_section, old_code, old_text, ..)) => {
+            let code = if settings.translit_on_update {
+                unique_item_code(conn, collection.id, Some(id), &goods.name)
+                    .await?
+                    .unwrap_or_else(|| old_code.clone())
+            } else {
+                old_code.clone()
+            };
+            let same = name == goods.name
+                && old_section == section
+                && code == old_code
+                && old_text == goods.description
+                && old_preview == preview
+                && old_detail == detail
+                && old_values == values;
+            if !same {
+                sqlx::query(
+                    "UPDATE collection_items
+                     SET name = $2, section_id = $3, code = $4, detail_text = $5,
+                         preview_picture_id = $6, detail_picture_id = $7, field_values = $8,
+                         updated_at = now()
+                     WHERE id = $1",
+                )
+                .bind(id)
+                .bind(&goods.name)
+                .bind(section)
+                .bind(code)
+                .bind(&goods.description)
+                .bind(preview)
+                .bind(detail)
+                .bind(sqlx::types::Json(&values))
+                .execute(&mut *conn)
+                .await?;
+            }
+            (id, !same, false)
+        }
+    };
+
+    // Вес в граммах; строка товарных данных нужна каждой записи каталога
+    let weight = goods.weight_grams;
+    let row: Option<f64> =
+        sqlx::query_scalar("SELECT weight::float8 FROM catalog_products WHERE item_id = $1")
+            .bind(item_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let weight_changed = match (row, weight) {
+        (None, w) => {
+            sqlx::query("INSERT INTO catalog_products (item_id, weight) VALUES ($1, $2::float8)")
+                .bind(item_id)
+                .bind(w.unwrap_or(0.0))
+                .execute(&mut *conn)
+                .await?;
+            !created && w.is_some()
+        }
+        (Some(old), Some(w)) if (old - w).abs() > 0.0005 => {
+            sqlx::query("UPDATE catalog_products SET weight = $2::float8 WHERE item_id = $1")
+                .bind(item_id)
+                .bind(w)
+                .execute(&mut *conn)
+                .await?;
+            true
+        }
+        _ => false,
+    };
+    if !created && (changed || weight_changed) {
+        bump(&mut stats.updated, "items");
+    }
+    if (created || changed || weight_changed)
+        && let Some(hook) = ctx.hook
+    {
+        hook.after_item(conn, item_id, goods)
+            .await
+            .map_err(ApplyError::Hook)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::exchange::cml;
     use crate::exchange::settings::Action;
     use sqlx::PgPool;
+    use std::sync::Mutex;
 
     fn parsed(files: &[&[u8]]) -> Vec<Parsed> {
         files.iter().map(|f| cml::parse(f).unwrap()).collect()
@@ -660,12 +1427,7 @@ mod tests {
 
     async fn run(db: &PgPool, settings: &Settings, p: &Parsed) -> Stats {
         let dir = std::env::temp_dir();
-        let ctx = Ctx {
-            settings,
-            session_id: None,
-            session_dir: &dir,
-            upload_dir: &dir,
-        };
+        let ctx = Ctx::new(settings, None, &dir, &dir);
         let mut conn = db.acquire().await.unwrap();
         apply(&mut conn, &ctx, p).await.unwrap()
     }
@@ -962,12 +1724,7 @@ mod tests {
                 .unwrap();
         let settings = Settings::default();
         let dir = std::env::temp_dir();
-        let ctx = Ctx {
-            settings: &settings,
-            session_id: Some(sid),
-            session_dir: &dir,
-            upload_dir: &dir,
-        };
+        let ctx = Ctx::new(&settings, Some(sid), &dir, &dir);
         let mut p = package().remove(0);
         let mut conn = db.acquire().await.unwrap();
         // выгрузка только изменений ничего не отмечает
@@ -1049,5 +1806,550 @@ mod tests {
         full.classifier.as_mut().unwrap().only_changes = false;
         run(&db, &settings, &full).await;
         assert_eq!(state().await, (false, 20));
+    }
+
+    fn goods_package() -> Parsed {
+        cml::parse(include_bytes!("../../tests/fixtures/1c/goods.xml")).unwrap()
+    }
+
+    struct Dirs {
+        session: PathBuf,
+        upload: PathBuf,
+    }
+
+    impl Dirs {
+        fn new() -> Dirs {
+            let root = std::env::temp_dir().join(format!("cms-ex-{}", rand::random::<u64>()));
+            let d = Dirs {
+                session: root.join("session"),
+                upload: root.join("upload"),
+            };
+            std::fs::create_dir_all(&d.session).unwrap();
+            std::fs::create_dir_all(&d.upload).unwrap();
+            d
+        }
+
+        fn put(&self, rel: &str, bytes: &[u8]) {
+            let path = self.session.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+
+        fn disk_files(&self) -> usize {
+            fn walk(dir: &Path) -> usize {
+                std::fs::read_dir(dir)
+                    .map(|rd| {
+                        rd.flatten()
+                            .map(|e| {
+                                if e.path().is_dir() {
+                                    walk(&e.path())
+                                } else {
+                                    1
+                                }
+                            })
+                            .sum()
+                    })
+                    .unwrap_or(0)
+            }
+            walk(&self.upload)
+        }
+    }
+
+    async fn run_in(
+        db: &PgPool,
+        settings: &Settings,
+        dirs: &Dirs,
+        p: &Parsed,
+    ) -> Result<Stats, ApplyError> {
+        let ctx = Ctx::new(settings, None, &dirs.session, &dirs.upload);
+        let mut conn = db.acquire().await.unwrap();
+        apply(&mut conn, &ctx, p).await
+    }
+
+    /// Классификатор и затем товары.
+    async fn load_goods(db: &PgPool, settings: &Settings, dirs: &Dirs, goods: &Parsed) -> Stats {
+        for p in package() {
+            run_in(db, settings, dirs, &p).await.unwrap();
+        }
+        run_in(db, settings, dirs, goods).await.unwrap()
+    }
+
+    async fn item_row(db: &PgPool, xml_id: &str) -> sqlx::postgres::PgRow {
+        sqlx::query(
+            "SELECT i.*, (SELECT xml_id FROM collection_sections WHERE id = i.section_id) AS sec
+             FROM collection_items i WHERE xml_id = $1",
+        )
+        .bind(xml_id)
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    fn values(row: &sqlx::postgres::PgRow) -> serde_json::Map<String, serde_json::Value> {
+        use sqlx::Row;
+        row.get::<sqlx::types::Json<serde_json::Map<String, serde_json::Value>>, _>("field_values")
+            .0
+    }
+
+    #[sqlx::test]
+    async fn goods_create_update_with_fields(db: PgPool) {
+        use sqlx::Row;
+        let settings = Settings::default();
+        let dirs = Dirs::new();
+        let st = load_goods(&db, &settings, &dirs, &goods_package()).await;
+        assert_eq!(st.created.get("items"), Some(&1), "{st:?}");
+
+        let row = item_row(&db, "good-1").await;
+        assert_eq!(row.get::<String, _>("name"), "Ремкомплект тестовый");
+        assert_eq!(row.get::<String, _>("code"), "remkomplekt-testovyy");
+        assert_eq!(
+            row.get::<Option<String>, _>("sec").as_deref(),
+            Some("g-child")
+        );
+        assert!(row.get::<bool, _>("active"));
+        assert!(
+            row.get::<String, _>("detail_text")
+                .starts_with("Первая строка")
+        );
+        let v = values(&row);
+        assert_eq!(v["cml2_article"], "ART-100");
+        assert_eq!(v["cml2_bar_code"], "4600000000017");
+        assert_eq!(v["cml2_base_unit"], "796");
+        assert_eq!(v["cml2_taxes"], serde_json::json!(["НДС: 20"]));
+        assert_eq!(v["cml2_traits"][0], "ВидНоменклатуры: Запчасти");
+        assert_eq!(v["cml2_traits"][1], "Вес: 1,25");
+        assert_eq!(v["cml2_traits"].as_array().unwrap().len(), 2);
+        // справочник → id варианта; пустое число и неизвестные поля пропущены
+        let opt: i64 = sqlx::query_scalar(
+            "SELECT o.id FROM collection_field_options o JOIN collection_fields f ON f.id = o.field_id
+             WHERE f.xml_id = 'p-dir' AND o.xml_id = 'v-1'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(v["primenimost"], opt);
+        assert!(!v.contains_key("diametr"));
+        // изготовитель — вариант системного списка
+        let m: String =
+            sqlx::query_scalar("SELECT o.value FROM collection_field_options o WHERE o.id = $1")
+                .bind(v["cml2_manufacturer"].as_i64().unwrap())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(m, "ACDelco");
+        let w: f64 =
+            sqlx::query_scalar("SELECT weight::float8 FROM catalog_products WHERE item_id = $1")
+                .bind(row.get::<i64, _>("id"))
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(w, 1250.0);
+        // помеченный на удаление и неизвестный не создаётся при действии N
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM collection_items")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+
+        // Обновление: название и артикул; код без транслита при обновлении не меняется
+        let mut changed = goods_package();
+        {
+            let g = &mut changed.catalog.as_mut().unwrap().goods[0];
+            g.name = "Ремкомплект новый".into();
+            g.article = "ART-200".into();
+            g.groups = vec!["g-root2".into()];
+        }
+        let st = run_in(&db, &settings, &dirs, &changed).await.unwrap();
+        assert_eq!(st.updated.get("items"), Some(&1), "{st:?}");
+        let row = item_row(&db, "good-1").await;
+        assert_eq!(row.get::<String, _>("name"), "Ремкомплект новый");
+        assert_eq!(row.get::<String, _>("code"), "remkomplekt-testovyy");
+        assert_eq!(
+            row.get::<Option<String>, _>("sec").as_deref(),
+            Some("g-root2")
+        );
+        assert_eq!(values(&row)["cml2_article"], "ART-200");
+
+        // При включённом транслите при обновлении код следует за названием
+        let on = Settings {
+            translit_on_update: true,
+            ..Settings::default()
+        };
+        run_in(&db, &on, &dirs, &changed).await.unwrap();
+        let code: String =
+            sqlx::query_scalar("SELECT code FROM collection_items WHERE xml_id = 'good-1'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(code, "remkomplekt-novyy");
+    }
+
+    #[sqlx::test]
+    async fn item_codes_are_unique_in_collection(db: PgPool) {
+        let dirs = Dirs::new();
+        let mut p = goods_package();
+        {
+            let goods = &mut p.catalog.as_mut().unwrap().goods;
+            goods[1].deleted = false;
+            goods[1].name = goods[0].name.clone();
+        }
+        load_goods(&db, &Settings::default(), &dirs, &p).await;
+        let codes: Vec<String> =
+            sqlx::query_scalar("SELECT code FROM collection_items ORDER BY xml_id")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(codes, ["remkomplekt-testovyy", "remkomplekt-testovyy-2"]);
+    }
+
+    #[sqlx::test]
+    async fn pictures_are_deduplicated_by_sha256(db: PgPool) {
+        use sqlx::Row;
+        let dirs = Dirs::new();
+        dirs.put("import_files/aa/good-1_a.jpeg", b"AAAA");
+        dirs.put("import_files/aa/good-1_b.jpeg", b"BBBB");
+        let settings = Settings::default();
+        let st = load_goods(&db, &settings, &dirs, &goods_package()).await;
+        assert_eq!(st.created.get("files"), Some(&2), "{st:?}");
+        let row = item_row(&db, "good-1").await;
+        let pics = values(&row)["cml2_pictures"].clone();
+        let ids = pics.as_array().unwrap().clone();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(
+            row.get::<Option<i64>, _>("detail_picture_id"),
+            ids[0].as_i64()
+        );
+        assert_eq!(
+            row.get::<Option<i64>, _>("preview_picture_id"),
+            ids[0].as_i64()
+        );
+        assert_eq!(dirs.disk_files(), 2);
+
+        // Те же байты под другими именами — те же file_id, файлов не больше
+        let dirs2 = Dirs {
+            session: dirs.session.clone(),
+            upload: dirs.upload.clone(),
+        };
+        dirs2.put("import_files/zz/renamed_1.jpeg", b"AAAA");
+        dirs2.put("import_files/zz/renamed_2.jpeg", b"BBBB");
+        let mut again = goods_package();
+        again.catalog.as_mut().unwrap().goods[0].pictures = vec![
+            "import_files/zz/renamed_1.jpeg".into(),
+            "import_files/zz/renamed_2.jpeg".into(),
+        ];
+        let st = run_in(&db, &settings, &dirs, &again).await.unwrap();
+        assert!(!st.created.contains_key("files"), "{st:?}");
+        let row = item_row(&db, "good-1").await;
+        assert_eq!(values(&row)["cml2_pictures"], pics);
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM files")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(dirs.disk_files(), 2);
+
+        // Файл заменён другими байтами — новый file_id, у второй картинки прежний
+        dirs.put("import_files/zz/renamed_1.jpeg", b"CCCC");
+        run_in(&db, &settings, &dirs, &again).await.unwrap();
+        let row = item_row(&db, "good-1").await;
+        let now = values(&row)["cml2_pictures"].as_array().unwrap().clone();
+        assert_ne!(now[0], ids[0]);
+        assert_eq!(now[1], ids[1]);
+
+        // Нет файла в пакете — значение ячейки не трогается
+        let mut missing = again.clone();
+        missing.catalog.as_mut().unwrap().goods[0].pictures = vec![
+            "import_files/none/gone.jpeg".into(),
+            "import_files/zz/renamed_2.jpeg".into(),
+        ];
+        run_in(&db, &settings, &dirs, &missing).await.unwrap();
+        let row = item_row(&db, "good-1").await;
+        assert_eq!(values(&row)["cml2_pictures"], serde_json::json!(now));
+        assert_eq!(
+            row.get::<Option<i64>, _>("detail_picture_id"),
+            now[0].as_i64()
+        );
+    }
+
+    #[sqlx::test]
+    async fn store_file_matches_existing_by_hash(db: PgPool) {
+        let dirs = Dirs::new();
+        dirs.put("import_files/a.png", b"PNG1");
+        let settings = Settings::default();
+        let ctx = Ctx::new(&settings, None, &dirs.session, &dirs.upload);
+        let mut conn = db.acquire().await.unwrap();
+        let first = store_file(&mut conn, &ctx, "import_files/a.png", &[])
+            .await
+            .unwrap()
+            .unwrap();
+        // у старой записи sha256 пуст: считается с диска и дописывается
+        sqlx::query("UPDATE files SET sha256 = '' WHERE id = $1")
+            .bind(first)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let again = store_file(&mut conn, &ctx, "import_files/a.png", &[first])
+            .await
+            .unwrap();
+        assert_eq!(again, Some(first));
+        let sha: String = sqlx::query_scalar("SELECT sha256 FROM files WHERE id = $1")
+            .bind(first)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(sha.len(), 64);
+        // нет файла — None; путь за пределами каталога сессии — ошибка
+        assert_eq!(
+            store_file(&mut conn, &ctx, "import_files/none.png", &[])
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            store_file(&mut conn, &ctx, "../outside.png", &[])
+                .await
+                .is_err()
+        );
+    }
+
+    #[sqlx::test]
+    async fn deleted_goods_follow_element_action(db: PgPool) {
+        let dirs = Dirs::new();
+        let with = |action| Settings {
+            element_action: action,
+            ..Settings::default()
+        };
+        let mut live = goods_package();
+        live.catalog.as_mut().unwrap().goods[1].deleted = false;
+        load_goods(&db, &with(Action::None), &dirs, &live).await;
+        let state = || async {
+            sqlx::query_as::<_, (i64, i64)>(
+                "SELECT count(*), count(*) FILTER (WHERE active) FROM collection_items
+                 WHERE xml_id = 'good-2'",
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        assert_eq!(state().await, (1, 1));
+        let gone = goods_package();
+        let st = run_in(&db, &with(Action::None), &dirs, &gone)
+            .await
+            .unwrap();
+        assert_eq!(state().await, (1, 1));
+        assert_eq!(st.skipped.get("items"), Some(&1), "{st:?}");
+        let st = run_in(&db, &with(Action::Deactivate), &dirs, &gone)
+            .await
+            .unwrap();
+        assert_eq!(state().await, (1, 0));
+        assert_eq!(st.deactivated.get("items"), Some(&1), "{st:?}");
+        // повтор деактивации ничего не меняет
+        let st = run_in(&db, &with(Action::Deactivate), &dirs, &gone)
+            .await
+            .unwrap();
+        assert!(st.deactivated.is_empty(), "{st:?}");
+        let st = run_in(&db, &with(Action::Delete), &dirs, &gone)
+            .await
+            .unwrap();
+        assert_eq!(state().await, (0, 0));
+        assert_eq!(st.deleted.get("items"), Some(&1), "{st:?}");
+    }
+
+    #[sqlx::test]
+    async fn repeat_package_is_noop(db: PgPool) {
+        let dirs = Dirs::new();
+        dirs.put("import_files/aa/good-1_a.jpeg", b"AAAA");
+        dirs.put("import_files/aa/good-1_b.jpeg", b"BBBB");
+        let settings = Settings::default();
+        load_goods(&db, &settings, &dirs, &goods_package()).await;
+        sqlx::query("UPDATE collection_items SET updated_at = '2020-01-01'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let count = |sql: &'static str| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(sql)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap()
+            }
+        };
+        let (f, o) = (
+            count("SELECT count(*) FROM files").await,
+            count("SELECT count(*) FROM collection_field_options").await,
+        );
+        let st = run_in(&db, &settings, &dirs, &goods_package())
+            .await
+            .unwrap();
+        assert!(st.created.is_empty() && st.updated.is_empty(), "{st:?}");
+        assert_eq!(st.skipped.get("items"), None, "{st:?}");
+        assert_eq!(count("SELECT count(*) FROM files").await, f);
+        assert_eq!(
+            count("SELECT count(*) FROM collection_field_options").await,
+            o
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM collection_items WHERE updated_at > '2021-01-01'").await,
+            0
+        );
+        assert_eq!(dirs.disk_files(), 2);
+    }
+
+    #[sqlx::test]
+    async fn existing_field_with_cml2_xml_id_is_reused(db: PgPool) {
+        let dirs = Dirs::new();
+        dirs.put("import_files/aa/good-1_a.jpeg", b"AAAA");
+        let settings = Settings::default();
+        for p in package() {
+            run_in(&db, &settings, &dirs, &p).await.unwrap();
+        }
+        let cid = collection_id(&db).await;
+        sqlx::query(
+            "INSERT INTO collection_fields (collection_id, code, name, kind, multiple, xml_id)
+             VALUES ($1, 'more_photo', 'Фото', 'file', TRUE, 'CML2_PICTURES')",
+        )
+        .bind(cid)
+        .execute(&db)
+        .await
+        .unwrap();
+        run_in(&db, &settings, &dirs, &goods_package())
+            .await
+            .unwrap();
+        let v = values(&item_row(&db, "good-1").await);
+        assert_eq!(v["more_photo"].as_array().unwrap().len(), 1);
+        assert!(!v.contains_key("cml2_pictures"));
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM collection_fields WHERE code = 'cml2_pictures'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[sqlx::test]
+    async fn unknown_directory_value_is_added_and_trimmed(db: PgPool) {
+        let dirs = Dirs::new();
+        let mut p = goods_package();
+        p.catalog.as_mut().unwrap().goods[0].properties =
+            vec![("p-dir".into(), vec!["  v-2\n".into()])];
+        load_goods(&db, &Settings::default(), &dirs, &p).await;
+        let v2: i64 =
+            sqlx::query_scalar("SELECT id FROM collection_field_options WHERE xml_id = 'v-2'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(values(&item_row(&db, "good-1").await)["primenimost"], v2);
+        p.catalog.as_mut().unwrap().goods[0].properties =
+            vec![("p-dir".into(), vec!["v-new".into()])];
+        run_in(&db, &Settings::default(), &dirs, &p).await.unwrap();
+        let (id, value): (i64, String) =
+            sqlx::query_as("SELECT id, value FROM collection_field_options WHERE xml_id = 'v-new'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(value, "v-new");
+        assert_eq!(values(&item_row(&db, "good-1").await)["primenimost"], id);
+    }
+
+    struct Hook {
+        fail_on: Option<&'static str>,
+        seen: Mutex<Vec<String>>,
+    }
+
+    impl ImportHook for Hook {
+        fn after_item<'a>(
+            &'a self,
+            _conn: &'a mut PgConnection,
+            _item_id: i64,
+            goods: &'a Goods,
+        ) -> crate::bxapi::project::BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                if self.fail_on == Some(goods.id.as_str()) {
+                    anyhow::bail!("отказ");
+                }
+                self.seen.lock().unwrap().push(goods.id.clone());
+                Ok(())
+            })
+        }
+    }
+
+    #[sqlx::test]
+    async fn hook_runs_after_write_and_failure_leaves_no_files(db: PgPool) {
+        let dirs = Dirs::new();
+        dirs.put("import_files/aa/good-1_a.jpeg", b"AAAA");
+        dirs.put("import_files/aa/good-1_b.jpeg", b"BBBB");
+        let settings = Settings::default();
+        for p in package() {
+            run_in(&db, &settings, &dirs, &p).await.unwrap();
+        }
+        let ok = Hook {
+            fail_on: None,
+            seen: Mutex::new(Vec::new()),
+        };
+        // хук получает только созданные и изменённые товары
+        let mut two = goods_package();
+        two.catalog.as_mut().unwrap().goods[1].deleted = false;
+        let ctx = Ctx::new(&settings, None, &dirs.session, &dirs.upload).with_hook(Some(&ok));
+        // первый товар падает: файлы, записанные до отказа, убираются, транзакция откатывается
+        let bad = Hook {
+            fail_on: Some("good-2"),
+            seen: Mutex::new(Vec::new()),
+        };
+        let failing = Ctx::new(&settings, None, &dirs.session, &dirs.upload).with_hook(Some(&bad));
+        let mut tx = db.begin().await.unwrap();
+        let err = apply(&mut tx, &failing, &two).await.unwrap_err();
+        assert!(matches!(err, ApplyError::Hook(_)), "{err}");
+        tx.rollback().await.unwrap();
+        assert_eq!(dirs.disk_files(), 0);
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM collection_items")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+
+        let mut conn = db.acquire().await.unwrap();
+        apply(&mut conn, &ctx, &two).await.unwrap();
+        assert_eq!(*ok.seen.lock().unwrap(), ["good-1", "good-2"]);
+        assert_eq!(dirs.disk_files(), 2);
+        apply(&mut conn, &ctx, &two).await.unwrap();
+        assert_eq!(ok.seen.lock().unwrap().len(), 2);
+
+        // Ошибка уже после apply (например, при коммите): вызывающий убирает файлы сам
+        dirs.put("import_files/aa/good-1_a.jpeg", b"NEW1");
+        dirs.put("import_files/aa/good-1_b.jpeg", b"NEW2");
+        let late = Ctx::new(&settings, None, &dirs.session, &dirs.upload);
+        let mut tx = db.begin().await.unwrap();
+        apply(&mut tx, &late, &two).await.unwrap();
+        assert_eq!(dirs.disk_files(), 4);
+        tx.rollback().await.unwrap();
+        late.discard_written().await;
+        assert_eq!(dirs.disk_files(), 2);
+    }
+
+    #[sqlx::test]
+    async fn full_export_records_seen_items(db: PgPool) {
+        let (sid,): (i64,) =
+            sqlx::query_as("INSERT INTO exchange_sessions (token_hash) VALUES ('h') RETURNING id")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let dirs = Dirs::new();
+        let settings = Settings::default();
+        for p in package() {
+            run_in(&db, &settings, &dirs, &p).await.unwrap();
+        }
+        let ctx = Ctx::new(&settings, Some(sid), &dirs.session, &dirs.upload);
+        let mut conn = db.acquire().await.unwrap();
+        apply(&mut conn, &ctx, &goods_package()).await.unwrap();
+        let seen: Vec<String> = sqlx::query_scalar(
+            "SELECT xml_id FROM exchange_seen WHERE kind = 'item' ORDER BY xml_id",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .unwrap();
+        // удалённый в 1С товар «виденным» не считается
+        assert_eq!(seen, ["good-1"]);
     }
 }
