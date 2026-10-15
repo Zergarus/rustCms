@@ -17,8 +17,11 @@ pub enum SessionError {
     BadPath(String),
     #[error("Ошибка работы с файлом: {0}")]
     Io(String),
-    #[error("Некорректный архив: {0}")]
+    /// Недогруженный (загрузка ещё идёт) или повреждённый архив; детали - в журнале сервера.
+    #[error("Архив не дочитан или повреждён")]
     Zip(String),
+    #[error("Размер части файла превышает допустимый ({0} байт)")]
+    TooLarge(u64),
     #[error("Архив превышает допустимый размер или число записей")]
     Limit,
     #[error("Ошибка базы данных: {0}")]
@@ -132,8 +135,27 @@ pub fn safe_rel_path(name: &str) -> Option<PathBuf> {
     Some(out)
 }
 
-/// Дописывает `bytes` к файлу `filename` в каталоге сессии.
+/// Дописывает `bytes` к файлу `filename` (для тестов; протокол пишет потоком, см. `append_body`).
+#[cfg(test)]
 pub async fn append(dir: &Path, filename: &str, bytes: &[u8]) -> Result<(), SessionError> {
+    append_body(
+        dir,
+        filename,
+        u64::MAX,
+        axum::body::Body::from(bytes.to_vec()),
+    )
+    .await
+}
+
+/// Дописывает тело запроса потоком; сверх `limit` байт - отказ, уже записанная часть
+/// этого запроса убирается (файл возвращается к прежнему размеру).
+pub async fn append_body(
+    dir: &Path,
+    filename: &str,
+    limit: u64,
+    body: axum::body::Body,
+) -> Result<(), SessionError> {
+    use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
     let rel = safe_rel_path(filename).ok_or_else(|| SessionError::BadPath(filename.into()))?;
     let path = dir.join(rel);
@@ -141,19 +163,46 @@ pub async fn append(dir: &Path, filename: &str, bytes: &[u8]) -> Result<(), Sess
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(io)?;
     }
+    let before = tokio::fs::metadata(&path).await.map(|m| m.len()).ok();
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .await
         .map_err(io)?;
-    file.write_all(bytes).await.map_err(io)?;
-    file.flush().await.map_err(io)
+    let mut total: u64 = 0;
+    let mut stream = body.into_data_stream();
+    let result: Result<(), SessionError> = async {
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| SessionError::Io(e.to_string()))?;
+            total += chunk.len() as u64;
+            if total > limit {
+                return Err(SessionError::TooLarge(limit));
+            }
+            file.write_all(&chunk).await.map_err(io)?;
+        }
+        file.flush().await.map_err(io)
+    }
+    .await;
+    if result.is_err() {
+        drop(file);
+        match before {
+            Some(len) => {
+                if let Ok(f) = tokio::fs::OpenOptions::new().write(true).open(&path).await {
+                    let _ = f.set_len(len).await;
+                }
+            }
+            None => {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
+    }
+    result
 }
 
 /// Распаковывает все `*.zip` из корня каталога сессии в него же и удаляет архивы.
 /// Лимиты действуют на все архивы вызова вместе. При ошибке записанные файлы убираются,
-/// архивы остаются (кроме битого, который удаляется). Блокирующая: вызывать через `spawn_blocking`.
+/// архивы остаются. Блокирующая: вызывать через `spawn_blocking`.
 pub fn unpack_zips(dir: &Path, limits: Limits) -> Result<(), SessionError> {
     let io = |e: std::io::Error| SessionError::Io(e.to_string());
     let mut zips: Vec<PathBuf> = match std::fs::read_dir(dir) {
@@ -176,9 +225,9 @@ pub fn unpack_zips(dir: &Path, limits: Limits) -> Result<(), SessionError> {
             for path in written {
                 let _ = std::fs::remove_file(path);
             }
-            // Битый архив бесполезен, а повторная загрузка дописалась бы к его обрывку
-            if matches!(e, SessionError::Zip(_)) {
-                let _ = std::fs::remove_file(zip);
+            // Недогруженный архив не удаляем: следующая часть дописывается к нему
+            if let SessionError::Zip(detail) = &e {
+                tracing::warn!(zip = %zip.display(), "обмен с 1С: архив не открыт: {detail}");
             }
             return Err(e);
         }
@@ -391,6 +440,7 @@ mod tests {
             unpack_zips(&d, Limits::default()),
             Err(SessionError::Zip(_))
         ));
+        assert!(d.join("a.zip").exists(), "недогруженный архив остаётся");
     }
 
     #[sqlx::test]

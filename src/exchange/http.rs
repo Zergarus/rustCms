@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use axum::{
     Router,
-    body::Bytes,
-    extract::{DefaultBodyLimit, Query, State},
+    body::Body,
+    extract::{Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
@@ -22,14 +22,10 @@ use super::session::{self, Limits, Session};
 use super::settings::{Action, Settings};
 use crate::{access, state::AppState};
 
-/// Запас на тело запроса `file`; настоящий предел — `file_limit` из настроек.
-const BODY_LIMIT: usize = 1 << 30;
-
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/bitrix/admin/1c_exchange.php", get(handle).post(handle))
         .route("/api/1c/exchange", get(handle).post(handle))
-        .layer(DefaultBodyLimit::max(BODY_LIMIT))
 }
 
 /// Успешный ответ: полный текст тела и счётчики для журнала.
@@ -60,7 +56,7 @@ async fn handle(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     let started = Instant::now();
     let mode = query.get("mode").map(String::as_str).unwrap_or("");
@@ -72,34 +68,56 @@ async fn handle(
         mode,
         &query,
         &headers,
-        &body,
+        body,
         &mut session,
         &mut set_cookie,
     )
     .await;
-    if matches!(mode, "import" | "deactivate" | "complete") {
-        let (result, stats, error) = match &reply {
-            Ok(o) => ("success", o.stats.clone(), String::new()),
-            Err(e) => ("failure", Value::Object(Default::default()), e.clone()),
-        };
-        let session: &Option<Session> = &session;
-        let user_id = session.as_ref().and_then(|s| s.user_id);
-        let logged = sqlx::query(
-            "INSERT INTO exchange_log (user_id, mode, filename, result, stats, error, duration_ms)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    if let (Some(session), Err(e)) = (&session, &reply)
+        && mode == "import"
+    {
+        // Файл с ошибкой блокирует деактивацию, пока он не загрузится успешно
+        let marked = sqlx::query(
+            "UPDATE exchange_sessions
+             SET state = jsonb_set(state, '{failed}',
+                     (COALESCE(state->'failed', '[]'::jsonb) - $2::text) || to_jsonb($2::text))
+             WHERE id = $1",
         )
-        .bind(user_id)
-        .bind(mode)
-        .bind(filename)
-        .bind(result)
-        .bind(stats)
-        .bind(error)
-        .bind(started.elapsed().as_millis().min(i32::MAX as u128) as i32)
+        .bind(session.id)
+        .bind(truncate(filename, 255))
         .execute(&state.db)
         .await;
-        if let Err(e) = logged {
-            tracing::warn!("обмен с 1С: не записан журнал: {e}");
+        if let Err(err) = marked {
+            tracing::warn!("обмен с 1С: не отмечена ошибка импорта: {err}");
         }
+        tracing::warn!(session = session.id, "обмен с 1С: import «{filename}»: {e}");
+    }
+    match (&session, &reply) {
+        // Журнал пишется только для проверенной сессии
+        (Some(session), _) if matches!(mode, "import" | "deactivate" | "complete") => {
+            let (result, stats, error) = match &reply {
+                Ok(o) => ("success", o.stats.clone(), String::new()),
+                Err(e) => ("failure", Value::Object(Default::default()), e.clone()),
+            };
+            let logged = sqlx::query(
+                "INSERT INTO exchange_log (user_id, mode, filename, result, stats, error, duration_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(session.user_id)
+            .bind(mode)
+            .bind(truncate(filename, 255))
+            .bind(result)
+            .bind(stats)
+            .bind(truncate(&error, 2000))
+            .bind(started.elapsed().as_millis().min(i32::MAX as u128) as i32)
+            .execute(&state.db)
+            .await;
+            if let Err(e) = logged {
+                tracing::warn!("обмен с 1С: не записан журнал: {e}");
+            }
+        }
+        (None, Err(e)) => tracing::warn!(mode, "обмен с 1С: отказ до входа: {e}"),
+        _ => {}
     }
     let text = match reply {
         Ok(o) => o.body,
@@ -120,12 +138,16 @@ async fn handle(
     response
 }
 
+fn truncate(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
+}
+
 async fn dispatch(
     state: &AppState,
     mode: &str,
     query: &HashMap<String, String>,
     headers: &HeaderMap,
-    body: &Bytes,
+    body: Body,
     session_out: &mut Option<Session>,
     set_cookie: &mut Option<String>,
 ) -> Reply {
@@ -148,10 +170,11 @@ async fn dispatch(
         .await
         .map_err(db_err)?
         .ok_or("Сессия обмена не найдена, выполните checkauth")?;
-    let session = session_out.insert(session);
     if session.expired {
         return Err("Сессия обмена истекла".into());
     }
+    authorize(state, session.user_id).await?;
+    let session = session_out.insert(session);
     let filename = || {
         query
             .get("filename")
@@ -161,11 +184,31 @@ async fn dispatch(
     };
     match mode {
         "init" => init(state, session, &token).await,
-        "file" => file(state, session, filename()?, body).await,
+        "file" => file(state, session, filename()?, headers, body).await,
         "import" => import_file(state, session, filename()?, Limits::default(), None).await,
         "deactivate" => deactivate(state, session).await,
         "complete" => complete(state, session).await,
         other => Err(format!("Неизвестный режим «{other}»")),
+    }
+}
+
+/// Пользователь сессии всё ещё существует, активен и имеет право на обмен.
+async fn authorize(state: &AppState, user_id: Option<i64>) -> Result<(), String> {
+    let user_id = user_id.ok_or(DENIED)?;
+    let user: Option<crate::auth::User> =
+        sqlx::query_as("SELECT id, login, email, is_admin, active FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(db_err)?;
+    let user = user.filter(|u| u.active).ok_or(DENIED)?;
+    let access = access::Access::load(&state.db, user)
+        .await
+        .map_err(db_err)?;
+    if access.can(access::EXCHANGE_1C) {
+        Ok(())
+    } else {
+        Err(DENIED.into())
     }
 }
 
@@ -233,16 +276,23 @@ async fn init(state: &AppState, session: &Session, token: &str) -> Reply {
     )))
 }
 
-async fn file(state: &AppState, session: &Session, filename: &str, body: &Bytes) -> Reply {
+async fn file(
+    state: &AppState,
+    session: &Session,
+    filename: &str,
+    headers: &HeaderMap,
+    body: Body,
+) -> Reply {
     let settings = Settings::load(&state.db).await.map_err(db_err)?;
-    if body.len() as u64 > settings.file_limit {
-        return Err(format!(
-            "Размер части файла превышает допустимый ({} байт)",
-            settings.file_limit
-        ));
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if declared.is_some_and(|n| n > settings.file_limit) {
+        return Err(session::SessionError::TooLarge(settings.file_limit).to_string());
     }
     let dir = session::dir(&state.config.upload_dir, session);
-    session::append(&dir, filename, body)
+    session::append_body(&dir, filename, settings.file_limit, body)
         .await
         .map_err(|e| e.to_string())?;
     Ok(Outcome::text("success"))
@@ -330,8 +380,10 @@ pub(crate) async fn import_file(
         }
         sqlx::query(
             "UPDATE exchange_sessions
-             SET state = jsonb_set(state, '{imported}',
-                                   COALESCE(state->'imported', '[]'::jsonb) || to_jsonb($2::text))
+             SET state = jsonb_set(
+                     jsonb_set(state, '{imported}',
+                               COALESCE(state->'imported', '[]'::jsonb) || to_jsonb($2::text)),
+                     '{failed}', COALESCE(state->'failed', '[]'::jsonb) - $2::text)
              WHERE id = $1",
         )
         .bind(session.id)
@@ -357,8 +409,25 @@ pub(crate) async fn import_file(
 }
 
 /// Деактивация пропавшего по настройкам, если сессия видела полную выгрузку.
-async fn deactivate_now(state: &AppState, session: &Session) -> Result<Stats, String> {
+const SKIPPED_NOTE: &str = "деактивация пропущена: были ошибки импорта";
+
+/// Деактивация пропавшего по настройкам. Если в сессии были неудачные импорты, пакет
+/// неполон и «пропавшее» может оказаться просто невыгруженным - тогда ничего не трогаем.
+async fn deactivate_now(state: &AppState, session: &Session) -> Reply {
     let settings = Settings::load(&state.db).await.map_err(db_err)?;
+    let has_failures = session.state["failed"]
+        .as_array()
+        .is_some_and(|f| !f.is_empty());
+    if has_failures {
+        let would_act =
+            settings.element_action != Action::None || settings.section_action != Action::None;
+        if would_act {
+            return Ok(Outcome {
+                body: format!("success\n{SKIPPED_NOTE}"),
+                stats: serde_json::json!({ "note": SKIPPED_NOTE }),
+            });
+        }
+    }
     let mut tx = state.db.begin().await.map_err(db_err)?;
     let stats = apply::deactivate_missing(&mut tx, &settings, session.id)
         .await
@@ -371,24 +440,23 @@ async fn deactivate_now(state: &AppState, session: &Session) -> Result<Stats, St
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
-    Ok(stats)
-}
-
-async fn deactivate(state: &AppState, session: &Session) -> Reply {
-    let stats = deactivate_now(state, session).await?;
     Ok(Outcome {
         body: "success".into(),
         stats: serde_json::to_value(&stats).unwrap_or_default(),
     })
 }
 
+async fn deactivate(state: &AppState, session: &Session) -> Reply {
+    deactivate_now(state, session).await
+}
+
 async fn complete(state: &AppState, session: &Session) -> Reply {
-    let mut stats = Value::Object(Default::default());
+    let mut outcome = Outcome::text("success");
     let deactivated = session.state["deactivated"].as_bool().unwrap_or(false);
     if !deactivated {
         let settings = Settings::load(&state.db).await.map_err(db_err)?;
         if settings.element_action != Action::None || settings.section_action != Action::None {
-            stats = serde_json::to_value(deactivate_now(state, session).await?).unwrap_or_default();
+            outcome = deactivate_now(state, session).await?;
         }
     }
     let dir = session::dir(&state.config.upload_dir, session);
@@ -402,10 +470,7 @@ async fn complete(state: &AppState, session: &Session) -> Reply {
         .execute(&state.db)
         .await
         .map_err(db_err)?;
-    Ok(Outcome {
-        body: "success".into(),
-        stats,
-    })
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -774,7 +839,7 @@ mod tests {
         let token = login(&c, "exch").await;
         upload(&c, &token, "broken.zip", b"PK\x03\x04 definitely not a zip").await;
         let r = c.get(&token, "mode=import&filename=goods.xml").await;
-        assert!(r.starts_with("failure\n"), "{r}");
+        assert_eq!(r, "failure\nАрхив не дочитан или повреждён");
         // и сам пакет с мусором вместо XML
         upload(&c, &token, "junk.xml", b"\x00\x01 not xml").await;
         let r = c.get(&token, "mode=import&filename=junk.xml").await;
@@ -791,10 +856,16 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(failed, 2);
-        // сессия жива: нормальный файл после этого загружается
-        upload(&c, &token, "ok.xml", goods_xml(&["g1"], false).as_bytes()).await;
-        let r = c.get(&token, "mode=import&filename=ok.xml").await;
-        assert!(r.starts_with("success"), "{r}");
+        // недогруженный архив не удаляется
+        assert!(
+            state
+                .config
+                .upload_dir
+                .join("1c_exchange")
+                .read_dir()
+                .unwrap()
+                .any(|d| d.unwrap().path().join("broken.zip").exists())
+        );
     }
 
     #[sqlx::test]
@@ -817,6 +888,7 @@ mod tests {
         let r = c.get(&t2, "mode=import&filename=only1.xml").await;
         assert!(r.starts_with("failure"), "{r}");
         // seen разных сессий не смешиваются
+        let t3 = login(&c, "two").await;
         Settings {
             element_action: Action::Deactivate,
             ..Settings::default()
@@ -836,13 +908,13 @@ mod tests {
                 .await
                 .starts_with("success")
         );
-        upload(&c, &t2, "full.xml", goods_xml(&["g1"], true).as_bytes()).await;
+        upload(&c, &t3, "full.xml", goods_xml(&["g1"], true).as_bytes()).await;
         assert!(
-            c.get(&t2, "mode=import&filename=full.xml")
+            c.get(&t3, "mode=import&filename=full.xml")
                 .await
                 .starts_with("success")
         );
-        assert_eq!(c.get(&t2, "mode=deactivate").await, "success");
+        assert_eq!(c.get(&t3, "mode=deactivate").await, "success");
         assert_eq!(
             active_items(&db).await,
             [("g1".to_string(), true), ("g2".to_string(), false)]
@@ -1070,5 +1142,298 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored_files(&state.config.upload_dir), 2);
+    }
+
+    fn counting_body(
+        chunks: usize,
+        size: usize,
+        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Body {
+        use futures_util::StreamExt;
+        Body::from_stream(futures_util::stream::iter(0..chunks).map(move |_| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![b'x'; size]))
+        }))
+    }
+
+    impl Client {
+        async fn post_body(&self, cookie: Option<&str>, query: &str, body: Body) -> String {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri(format!("{BASE}&{query}"));
+            if let Some(c) = cookie {
+                req = req.header(header::COOKIE, format!("{}={c}", session::COOKIE));
+            }
+            let res = self
+                .app
+                .clone()
+                .oneshot(req.body(body).unwrap())
+                .await
+                .unwrap();
+            String::from_utf8(
+                to_bytes(res.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap()
+        }
+    }
+
+    fn exchange_files(state: &AppState) -> usize {
+        let base = state.config.upload_dir.join("1c_exchange");
+        fn walk(d: &std::path::Path) -> usize {
+            std::fs::read_dir(d)
+                .map(|rd| {
+                    rd.filter_map(Result::ok)
+                        .map(|e| {
+                            if e.path().is_dir() {
+                                walk(&e.path())
+                            } else {
+                                1
+                            }
+                        })
+                        .sum()
+                })
+                .unwrap_or(0)
+        }
+        walk(&base)
+    }
+
+    #[sqlx::test]
+    async fn file_body_is_not_read_without_session(db: PgPool) {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        exchange_user(&db, "exch").await;
+        let state = test_state(db.clone());
+        let c = Client::new(&state);
+        for cookie in [None, Some("bogus")] {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let body = counting_body(64, 1 << 20, counter.clone());
+            let r = c.post_body(cookie, "mode=file&filename=x.bin", body).await;
+            assert!(r.starts_with("failure"), "{r}");
+            assert_eq!(counter.load(Ordering::SeqCst), 0, "тело прочитано до входа");
+        }
+        // другие режимы тело тоже не читают
+        let token = login(&c, "exch").await;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let body = counting_body(64, 1 << 20, counter.clone());
+        let r = c.post_body(Some(&token), "mode=init", body).await;
+        assert!(r.starts_with("zip="), "{r}");
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        assert_eq!(exchange_files(&state), 0);
+    }
+
+    #[sqlx::test]
+    async fn file_over_limit_fails_and_removes_partial(db: PgPool) {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        exchange_user(&db, "exch").await;
+        Settings {
+            file_limit: 10,
+            ..Settings::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+        let state = test_state(db.clone());
+        let c = Client::new(&state);
+        let token = login(&c, "exch").await;
+        assert_eq!(
+            c.post(&token, "mode=file&filename=a.bin", b"12345".to_vec())
+                .await,
+            "success"
+        );
+        let counter = Arc::new(AtomicUsize::new(0));
+        let body = counting_body(64, 8, counter.clone());
+        let r = c
+            .post_body(Some(&token), "mode=file&filename=a.bin", body)
+            .await;
+        assert!(r.starts_with("failure"), "{r}");
+        assert!(counter.load(Ordering::SeqCst) <= 3, "читали дальше лимита");
+        let dir = state.config.upload_dir.join("1c_exchange");
+        let file = std::fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("a.bin");
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"12345",
+            "частичная запись убрана"
+        );
+        // новый файл целиком сверх лимита не остаётся
+        let r = c
+            .post(&token, "mode=file&filename=b.bin", vec![b'x'; 11])
+            .await;
+        assert!(r.starts_with("failure"), "{r}");
+        assert!(!file.with_file_name("b.bin").exists());
+    }
+
+    #[sqlx::test]
+    async fn pre_auth_requests_are_not_logged(db: PgPool) {
+        exchange_user(&db, "exch").await;
+        let c = Client::new(&test_state(db.clone()));
+        for cookie in [None, Some("bogus")] {
+            for q in [
+                "mode=import&filename=a.xml",
+                "mode=deactivate",
+                "mode=complete",
+            ] {
+                let r = c
+                    .raw("GET", &format!("{BASE}&{q}"), cookie, None, vec![])
+                    .await;
+                assert!(r.starts_with("failure"), "{r}");
+            }
+        }
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM exchange_log")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        // с сессией длинные имя и текст ошибки обрезаются
+        let token = login(&c, "exch").await;
+        let long = "a".repeat(400);
+        let r = c
+            .get(&token, &format!("mode=import&filename={long}.xml"))
+            .await;
+        assert!(r.starts_with("failure"), "{r}");
+        let (f, e): (String, String) = sqlx::query_as("SELECT filename, error FROM exchange_log")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(f.chars().count(), 255);
+        assert!(e.chars().count() <= 2000);
+    }
+
+    #[sqlx::test]
+    async fn truncated_zip_waits_for_the_rest(db: PgPool) {
+        exchange_user(&db, "exch").await;
+        let c = Client::new(&test_state(db.clone()));
+        let token = login(&c, "exch").await;
+        let ids: Vec<String> = (0..300).map(|i| format!("g-{:x}", i * 7919 + 13)).collect();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let xml = goods_xml(&refs, false);
+        let zip = make_zip(&[("g.xml", xml.as_bytes())]);
+        let (first, rest) = zip.split_at(zip.len() / 2);
+        upload(&c, &token, "ex.zip", first).await;
+        let r = c.get(&token, "mode=import&filename=g.xml").await;
+        assert_eq!(r, "failure\nАрхив не дочитан или повреждён");
+        upload(&c, &token, "ex.zip", rest).await;
+        let r = c.get(&token, "mode=import&filename=g.xml").await;
+        assert!(r.starts_with("success"), "{r}");
+        assert_eq!(active_items(&db).await.len(), 300);
+    }
+
+    #[sqlx::test]
+    async fn revoked_access_rejects_session(db: PgPool) {
+        exchange_user(&db, "exch").await;
+        exchange_user(&db, "gone").await;
+        crate::auth::create_user(&db, "root", "password123".into(), true)
+            .await
+            .unwrap();
+        let c = Client::new(&test_state(db.clone()));
+        let t = login(&c, "exch").await;
+        let t_gone = login(&c, "gone").await;
+        let t_root = login(&c, "root").await;
+        upload(&c, &t, "a.xml", goods_xml(&["a"], false).as_bytes()).await;
+        sqlx::query("DELETE FROM group_permissions")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET active = FALSE WHERE login = 'gone'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let denied = "failure\nДоступ запрещён";
+        for tok in [&t, &t_gone] {
+            assert_eq!(c.get(tok, "mode=init").await, denied);
+            assert_eq!(
+                c.post(tok, "mode=file&filename=b.xml", b"x".to_vec()).await,
+                denied
+            );
+            assert_eq!(c.get(tok, "mode=import&filename=a.xml").await, denied);
+        }
+        assert_eq!(active_items(&db).await, []);
+        assert!(c.get(&t_root, "mode=init").await.starts_with("zip="));
+    }
+
+    #[sqlx::test]
+    async fn failed_import_blocks_deactivation(db: PgPool) {
+        exchange_user(&db, "exch").await;
+        Settings {
+            element_action: Action::Deactivate,
+            ..Settings::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+        let c = Client::new(&test_state(db.clone()));
+        let t = login(&c, "exch").await;
+        upload(
+            &c,
+            &t,
+            "g.xml",
+            goods_xml(&["a", "b", "c"], true).as_bytes(),
+        )
+        .await;
+        assert!(
+            c.get(&t, "mode=import&filename=g.xml")
+                .await
+                .starts_with("success")
+        );
+        assert_eq!(c.get(&t, "mode=complete").await, "success");
+
+        let note = "success\nдеактивация пропущена: были ошибки импорта";
+        for finish in ["deactivate", "complete"] {
+            let t = login(&c, "exch").await;
+            upload(&c, &t, "g.xml", goods_xml(&["a"], true).as_bytes()).await;
+            assert!(
+                c.get(&t, "mode=import&filename=g.xml")
+                    .await
+                    .starts_with("success")
+            );
+            upload(&c, &t, "bad.xml", b"\x00 not xml").await;
+            assert!(
+                c.get(&t, "mode=import&filename=bad.xml")
+                    .await
+                    .starts_with("failure")
+            );
+            assert_eq!(c.get(&t, &format!("mode={finish}")).await, note);
+            assert!(active_items(&db).await.iter().all(|i| i.1), "{finish}");
+            let stats: serde_json::Value = sqlx::query_scalar(
+                "SELECT stats FROM exchange_log WHERE mode = $1 ORDER BY id DESC LIMIT 1",
+            )
+            .bind(finish)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            assert!(stats["note"].as_str().unwrap().contains("пропущена"));
+        }
+
+        // ошибка снимается, когда тот же файл потом загрузился
+        let t = login(&c, "exch").await;
+        assert!(
+            c.get(&t, "mode=import&filename=late.xml")
+                .await
+                .starts_with("failure")
+        );
+        upload(&c, &t, "late.xml", goods_xml(&["a"], true).as_bytes()).await;
+        assert!(
+            c.get(&t, "mode=import&filename=late.xml")
+                .await
+                .starts_with("success")
+        );
+        assert_eq!(c.get(&t, "mode=deactivate").await, "success");
+        assert_eq!(
+            active_items(&db).await,
+            [("a".into(), true), ("b".into(), false), ("c".into(), false)]
+        );
     }
 }
