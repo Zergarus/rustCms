@@ -877,15 +877,27 @@ impl GoodsState {
         })
     }
 
-    /// Поле коллекции с `xml_id` системного поля; нет — создаётся.
+    /// Поле коллекции с `xml_id` системного поля; нет — создаётся. Существующее поле
+    /// другого вида (например, строка вместо списка) не заполняется: `None`.
     async fn system_field(
         &mut self,
         conn: &mut PgConnection,
         def: SystemField,
-    ) -> Result<FieldInfo, ApplyError> {
+    ) -> Result<Option<FieldInfo>, ApplyError> {
         let (xml_id, code, name, kind, multiple) = def;
         if let Some(f) = self.fields.get(xml_id) {
-            return Ok(f.clone());
+            let fits = f.kind == kind || (kind == "string" && f.kind == "text");
+            if fits {
+                return Ok(Some(f.clone()));
+            }
+            if self.warned.insert(f.id) {
+                tracing::warn!(
+                    field = %f.code,
+                    "обмен с 1С: поле {xml_id} вида {} вместо {kind}, не заполняется",
+                    f.kind
+                );
+            }
+            return Ok(None);
         }
         let code = unique_code(code, &mut self.taken_codes);
         let sort: i32 = sqlx::query_scalar(
@@ -914,7 +926,7 @@ impl GoodsState {
             multiple,
         };
         self.fields.insert(xml_id.to_string(), info.clone());
-        Ok(info)
+        Ok(Some(info))
     }
 
     /// Вариант списка по внешнему коду; неизвестный добавляется (`text` — подпись, если есть).
@@ -980,8 +992,9 @@ async fn assign_system(
     if vals.is_empty() && !state.fields.contains_key(def.0) {
         return Ok(());
     }
-    let field = state.system_field(conn, def).await?;
-    assign(values, &field, vals);
+    if let Some(field) = state.system_field(conn, def).await? {
+        assign(values, &field, vals);
+    }
     Ok(())
 }
 
@@ -1328,8 +1341,9 @@ async fn write_goods(
     if let Some((id, name)) = &goods.manufacturer
         && !id.trim().is_empty()
     {
-        let field = state.system_field(conn, F_MANUFACTURER).await?;
-        manufacturer.push(Value::from(state.option(conn, field.id, id, name).await?));
+        if let Some(field) = state.system_field(conn, F_MANUFACTURER).await? {
+            manufacturer.push(Value::from(state.option(conn, field.id, id, name).await?));
+        }
     }
     assign_system(conn, state, &mut values, F_MANUFACTURER, manufacturer).await?;
 
@@ -1361,8 +1375,12 @@ async fn write_goods(
 
     // Картинки: ячейка без файла в пакете сохраняет прежнее значение
     let (mut detail, mut preview) = (old_detail, old_preview);
-    if !goods.pictures.is_empty() {
-        let field = state.system_field(conn, F_PICTURES).await?;
+    let pictures_field = if goods.pictures.is_empty() {
+        None
+    } else {
+        state.system_field(conn, F_PICTURES).await?
+    };
+    if let Some(field) = pictures_field {
         let current = old_values
             .get(&field.code)
             .map(crate::collection::fields::ids)
@@ -2900,6 +2918,47 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[sqlx::test]
+    async fn system_field_of_wrong_kind_is_not_written(db: PgPool) {
+        let dirs = Dirs::new();
+        dirs.put("import_files/aa/good-1_a.jpeg", b"AAAA");
+        let settings = Settings::default();
+        for p in package() {
+            run_in(&db, &settings, &dirs, &p).await.unwrap();
+        }
+        let cid = collection_id(&db).await;
+        for (code, xml_id) in [("maker", "CML2_MANUFACTURER"), ("photos", "CML2_PICTURES")] {
+            sqlx::query(
+                "INSERT INTO collection_fields (collection_id, code, name, kind, xml_id)
+                 VALUES ($1, $2, $2, 'string', $3)",
+            )
+            .bind(cid)
+            .bind(code)
+            .bind(xml_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        run_in(&db, &settings, &dirs, &goods_package())
+            .await
+            .unwrap();
+        let v = values(&item_row(&db, "good-1").await);
+        assert!(!v.contains_key("maker"), "{v:?}");
+        assert!(!v.contains_key("photos"), "{v:?}");
+        assert_eq!(v["cml2_article"], "ART-100");
+        let (opts, files, fields): (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM collection_field_options o
+                     JOIN collection_fields f ON f.id = o.field_id WHERE f.code = 'maker'),
+                    (SELECT count(*) FROM files),
+                    (SELECT count(*) FROM collection_fields
+                     WHERE code IN ('cml2_manufacturer', 'cml2_pictures'))",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!((opts, files, fields), (0, 0, 0));
     }
 
     #[sqlx::test]
