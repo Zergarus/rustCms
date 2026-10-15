@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-use crate::test_support::{admin_cookie, content_fixture, test_state};
+use crate::test_support::{admin_cookie, content_fixture, test_state, user_cookie};
 
 const ORIGIN: &str = "http://127.0.0.1:3000";
 
@@ -2593,4 +2593,112 @@ async fn admin_cannot_add_sku_parent_to_order(db: PgPool) {
     // предложение активного товара добавить можно
     let (status, html) = post_form(&app, &path, &cookie, &form(offer)).await;
     assert!(status.is_redirection(), "{html}");
+}
+
+#[sqlx::test]
+async fn exchange_settings_page(db: PgPool) {
+    use crate::exchange::settings::{Action, Settings};
+    let cookie = admin_cookie(&db).await;
+    let app = app(&db);
+    let catalog: i64 = sqlx::query_scalar(
+        "INSERT INTO collections (code, name, is_catalog) VALUES ('goods', 'Товары каталога', TRUE) RETURNING id",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO collections (code, name) VALUES ('news', 'Новости обычные')")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO exchange_log (mode, filename, result, stats, error, duration_ms)
+         VALUES ('file', 'import.xml', 'failure', '{\"created\":{\"items\":3,\"sections\":1}}', 'Ошибка ХYZ', 5)",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let (status, html) = get(&app, "/admin/exchange", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    for n in [
+        "Обмен с 1С",
+        "Товары каталога",
+        "не выбрана",
+        "import.xml",
+        "Ошибка ХYZ",
+        "создано: items 3, sections 1",
+    ] {
+        assert!(html.contains(n), "нет «{n}»");
+    }
+    assert!(!html.contains("Новости обычные"));
+    assert!(!html.contains("нфоблок"));
+
+    let body = format!(
+        "default_collection={catalog}&section_action=A&element_action=D&translit_on_update=on\
+         &use_offers=on&interval_secs=45&file_limit_mb=100"
+    );
+    let (status, loc) = post_form_location(&app, "/admin/exchange", &cookie, &body).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{loc}");
+    let s = Settings::load(&db).await.unwrap();
+    assert_eq!(s.default_collection_id, Some(catalog));
+    assert_eq!(s.section_action, Action::Deactivate);
+    assert_eq!(s.element_action, Action::Delete);
+    assert!(!s.translit_on_add && s.translit_on_update && s.use_offers);
+    assert!(!s.deactivate_without_price && !s.use_zip);
+    assert_eq!((s.interval_secs, s.file_limit), (45, 100 * 1024 * 1024));
+
+    // некорректный ввод: форма с ошибкой, ничего не сохранено
+    for bad in [
+        "interval_secs=0&file_limit_mb=10",
+        "interval_secs=30&file_limit_mb=0",
+    ] {
+        let (status, html) = post_form(&app, "/admin/exchange", &cookie, bad).await;
+        assert_eq!(status, StatusCode::OK, "{bad}");
+        assert!(html.contains("class=\"alert"), "{bad}: {html}");
+    }
+    assert_eq!(Settings::load(&db).await.unwrap().interval_secs, 45);
+
+    // права: без exchange.1c страница закрыта, меню без пункта
+    let (uid, other) = user_cookie(&db, "plain", false).await;
+    let group: i64 =
+        sqlx::query_scalar("INSERT INTO groups (code, name) VALUES ('g1', 'Г') RETURNING id")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    for perm in ["admin.access"] {
+        sqlx::query("INSERT INTO group_permissions (group_id, permission) VALUES ($1, $2)")
+            .bind(group)
+            .bind(perm)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(uid)
+        .bind(group)
+        .execute(&db)
+        .await
+        .unwrap();
+    let (status, _) = get(&app, "/admin/exchange", &other).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = post_form(
+        &app,
+        "/admin/exchange",
+        &other,
+        "interval_secs=30&file_limit_mb=1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, home) = get(&app, "/admin", &other).await;
+    assert!(!home.contains("Обмен с 1С"));
+    sqlx::query("INSERT INTO group_permissions (group_id, permission) VALUES ($1, 'exchange.1c')")
+        .bind(group)
+        .execute(&db)
+        .await
+        .unwrap();
+    let (status, _) = get(&app, "/admin/exchange", &other).await;
+    assert_eq!(status, StatusCode::OK);
+    let (st, home) = get(&app, "/admin", &other).await;
+    assert_eq!(st, StatusCode::OK, "{home}");
+    assert!(home.contains("Обмен с 1С"), "{home}");
 }

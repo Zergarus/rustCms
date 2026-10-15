@@ -2,6 +2,7 @@
 
 mod auth_pages;
 mod collections;
+mod exchange;
 mod groups;
 mod items;
 mod sections;
@@ -209,6 +210,7 @@ pub fn router(state: AppState) -> Router<AppState> {
             "/shop/settings",
             get(shop::settings::form).post(shop::settings::save),
         )
+        .route("/exchange", get(exchange::form).post(exchange::save))
         .route("/users", get(users::list).post(users::create))
         .route("/users/new", get(users::new_form))
         .route("/users/{id}", get(users::edit_form).post(users::update))

@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% set section = "exchange" %}
+{% block title %}Обмен с 1С{% endblock %}
+{% block content %}
+<h1>Обмен с 1С</h1>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<form class="card form" method="post" action="/admin/exchange">
+  <label>Коллекция по умолчанию
+    <select name="default_collection">
+      <option value="">— не выбрана —</option>
+      {% for c in collections %}
+      <option value="{{ c.id }}" {% if c.id == default_collection %}selected{% endif %}>{{ c.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Разделы, которых нет в выгрузке
+    <select name="section_action">
+      {% for a in [("N", "ничего"), ("A", "деактивировать"), ("D", "удалить")] %}
+      <option value="{{ a[0] }}" {% if a[0] == section_action %}selected{% endif %}>{{ a[1] }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Записи, которых нет в выгрузке
+    <select name="element_action">
+      {% for a in [("N", "ничего"), ("A", "деактивировать"), ("D", "удалить")] %}
+      <option value="{{ a[0] }}" {% if a[0] == element_action %}selected{% endif %}>{{ a[1] }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="check"><input type="checkbox" name="translit_on_add" {% if translit_on_add %}checked{% endif %}> Создавать код транслитом при добавлении</label>
+  <label class="check"><input type="checkbox" name="translit_on_update" {% if translit_on_update %}checked{% endif %}> Обновлять код транслитом при обновлении</label>
+  <label class="check"><input type="checkbox" name="use_offers" {% if use_offers %}checked{% endif %}> Загружать торговые предложения</label>
+  <label class="check"><input type="checkbox" name="deactivate_without_price" {% if deactivate_without_price %}checked{% endif %}> Деактивировать записи без цены</label>
+  <label class="check"><input type="checkbox" name="use_zip" {% if use_zip %}checked{% endif %}> Принимать файлы в zip-архиве</label>
+  <label>Интервал шага, секунд (1–3600)
+    <input type="number" name="interval_secs" min="1" max="3600" value="{{ interval_secs }}">
+  </label>
+  <label>Лимит размера части файла, МБ
+    <input type="number" name="file_limit_mb" min="1" value="{{ file_limit_mb }}">
+  </label>
+  <div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
+</form>
+
+<h2>Журнал обмена</h2>
+{% if log %}
+<table class="table">
+  <thead><tr><th>Время</th><th>Режим</th><th>Файл</th><th>Итог</th><th>Счётчики</th><th>Ошибка</th></tr></thead>
+  <tbody>
+  {% for r in log %}
+  <tr>
+    <td class="muted">{{ r.created_at }}</td>
+    <td>{{ r.mode }}</td>
+    <td>{{ r.filename }}</td>
+    <td>{{ r.result }}</td>
+    <td>{{ r.summary }}</td>
+    <td>{{ r.error }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">Обменов ещё не было.</p>
+{% endif %}
+{% endblock %}
