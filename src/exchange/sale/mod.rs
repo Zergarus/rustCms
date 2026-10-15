@@ -3,6 +3,7 @@
 // Метку и настройки подключают следующие задачи плана обмена заказами.
 #![allow(dead_code)]
 
+pub mod document;
 pub mod settings;
 
 use sqlx::PgConnection;

@@ -351,6 +351,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dotenvy",
+ "encoding_rs",
  "futures-util",
  "hex",
  "image",
