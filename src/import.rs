@@ -326,17 +326,22 @@ const EXCHANGE_OPTIONS: &[(&str, &str)] = &[
     ("deactivate_1c_no_price", "deactivate_without_price"),
 ];
 
-/// Внешний код в Битриксе не обязан быть уникальным, у нас — обязан: повтор становится пустым.
+/// Внешний код в Битриксе не обязан быть уникальным, у нас — обязан: повтор становится пустым
+/// (с предупреждением в журнале). Пробелы по краям отбрасываются, как и в обмене с 1С.
 fn unique_xml_id<K: std::hash::Hash + Eq + Clone>(
     scope: K,
     xml_id: String,
     seen: &mut HashSet<(K, String)>,
 ) -> String {
-    if xml_id.is_empty() || !seen.insert((scope, xml_id.clone())) {
-        String::new()
-    } else {
-        xml_id
+    let xml_id = xml_id.trim();
+    if xml_id.is_empty() {
+        return String::new();
     }
+    if !seen.insert((scope, xml_id.to_string())) {
+        tracing::warn!(xml_id, "перенос из Битрикса: повторный внешний код очищен");
+        return String::new();
+    }
+    xml_id.to_string()
 }
 
 /// Цена: (элемент, тип цены, цена, валюта, количество от, до).
@@ -3173,6 +3178,18 @@ mod tests {
         .unwrap();
         // 5 — группа сопоставлена; 6 — группы нет в CMS: не открываем всем, а выключаем
         assert_eq!(rows, vec![(5, true, 1), (6, false, 0), (7, true, 0)]);
+    }
+
+    #[test]
+    fn unique_xml_id_trims_and_blanks_duplicates() {
+        let mut seen = HashSet::new();
+        assert_eq!(unique_xml_id(1, " abc ".into(), &mut seen), "abc");
+        // тот же код с пробелами — повтор
+        assert_eq!(unique_xml_id(1, "abc\t".into(), &mut seen), "");
+        // в другой области — свой
+        assert_eq!(unique_xml_id(2, "abc".into(), &mut seen), "abc");
+        assert_eq!(unique_xml_id(1, "   ".into(), &mut seen), "");
+        assert_eq!(unique_xml_id(1, String::new(), &mut seen), "");
     }
 
     #[test]

@@ -167,7 +167,6 @@ mod tests {
     async fn saved_file_has_sha256(db: PgPool) {
         let dir = std::env::temp_dir().join(format!("cms-files-{}", rand::random::<u64>()));
         let data = b"hello 1c";
-        // sha256("hello 1c")
         let expected = hex::encode(sha2::Sha256::digest(data));
 
         let rec = save(&db, &dir, "t", "a.txt", "text/plain", data)
@@ -180,6 +179,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored, expected);
+
+        // контрольное значение: sha256("abc") — известный дайджест, а не пересчёт тем же кодом
+        let abc = save(&db, &dir, "t", "abc.txt", "text/plain", b"abc")
+            .await
+            .unwrap();
+        assert_eq!(
+            abc.sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
 
         let mut conn = db.acquire().await.unwrap();
         let rec2 = save_in(&mut conn, &dir, "t", "b.txt", "text/plain", b"other")
