@@ -1539,7 +1539,7 @@ async fn apply_offers(
 
     for offer in package.offers.iter().filter(|o| !o.id.is_empty()) {
         if offer.deleted {
-            bump(&mut stats.skipped, "offers");
+            delete_sku_offer(conn, ctx.settings, collection, offer, stats).await?;
             continue;
         }
         let item_id = match offer.id.split_once('#') {
@@ -1636,6 +1636,54 @@ async fn apply_offers(
 
     if carried_prices && ctx.settings.deactivate_without_price {
         deactivate_without_price(conn, &in_package, &priced, stats).await?;
+    }
+    Ok(())
+}
+
+/// Предложение помечено на удаление: запись торгового предложения (по полному `Ид`)
+/// деактивируется или удаляется по действию для записей. Простое предложение (без `#`)
+/// пропускается — товаром управляет пакет товаров.
+async fn delete_sku_offer(
+    conn: &mut PgConnection,
+    settings: &Settings,
+    products: &Collection,
+    offer: &Offer,
+    stats: &mut Stats,
+) -> Result<(), ApplyError> {
+    let found: Option<(i64, bool)> = if offer.id.contains('#') {
+        sqlx::query_as(
+            "SELECT i.id, i.active FROM collection_items i
+             JOIN collections c ON c.id = i.collection_id
+             WHERE c.product_collection_id = $1 AND i.xml_id = $2
+             ORDER BY i.id LIMIT 1",
+        )
+        .bind(products.id)
+        .bind(&offer.id)
+        .fetch_optional(&mut *conn)
+        .await?
+    } else {
+        None
+    };
+    match (settings.element_action, found) {
+        (_, None) | (Action::None, Some(_)) => bump(&mut stats.skipped, "offers"),
+        (Action::Deactivate, Some((id, active))) => {
+            if active {
+                sqlx::query(
+                    "UPDATE collection_items SET active = FALSE, updated_at = now() WHERE id = $1",
+                )
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+                bump(&mut stats.deactivated, "offers");
+            }
+        }
+        (Action::Delete, Some((id, _))) => {
+            sqlx::query("DELETE FROM collection_items WHERE id = $1")
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+            bump(&mut stats.deleted, "offers");
+        }
     }
     Ok(())
 }
@@ -3319,6 +3367,54 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[sqlx::test]
+    async fn deleted_sku_offer_follows_element_action(db: PgPool) {
+        let with = |action| Settings {
+            use_offers: true,
+            element_action: action,
+            ..Settings::default()
+        };
+        let dirs = Dirs::new();
+        load_2x(&db, &with(Action::None), &dirs).await;
+        let mut gone = offers_file(include_bytes!("../../tests/fixtures/1c/offers.xml"));
+        gone.offers.as_mut().unwrap().offers[0].deleted = true;
+        let state = || async {
+            sqlx::query_as::<_, (i64, i64)>(
+                "SELECT count(*), count(*) FILTER (WHERE active) FROM collection_items
+                 WHERE xml_id = 'g2-good#sku-red-m'",
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        assert_eq!(state().await, (1, 1));
+        let st = run_in(&db, &with(Action::None), &dirs, &gone)
+            .await
+            .unwrap();
+        assert_eq!(state().await, (1, 1));
+        assert_eq!(st.skipped.get("offers"), Some(&1), "{st:?}");
+        let st = run_in(&db, &with(Action::Deactivate), &dirs, &gone)
+            .await
+            .unwrap();
+        assert_eq!(state().await, (1, 0));
+        assert_eq!(st.deactivated.get("offers"), Some(&1), "{st:?}");
+        let st = run_in(&db, &with(Action::Deactivate), &dirs, &gone)
+            .await
+            .unwrap();
+        assert!(st.deactivated.is_empty(), "{st:?}");
+        let st = run_in(&db, &with(Action::Delete), &dirs, &gone)
+            .await
+            .unwrap();
+        assert_eq!(state().await, (0, 0));
+        assert_eq!(st.deleted.get("offers"), Some(&1), "{st:?}");
+        // цены и остатки удалённого предложения не пишутся
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog_prices")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     #[sqlx::test]
