@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod document;
+pub mod parse;
 pub mod select;
 pub mod settings;
 

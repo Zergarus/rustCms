@@ -186,7 +186,10 @@ pub fn parse(data: &[u8]) -> Result<Parsed, CmlError> {
     Ok(st.out)
 }
 
-fn element(e: &BytesStart, decoder: Decoder) -> Result<(String, Vec<(String, String)>), CmlError> {
+pub(crate) fn element(
+    e: &BytesStart,
+    decoder: Decoder,
+) -> Result<(String, Vec<(String, String)>), CmlError> {
     let xml = |m: String| CmlError::Xml(m);
     let name = decoder
         .decode(e.local_name().as_ref())
@@ -215,14 +218,14 @@ fn attr<'a>(attrs: &'a [(String, String)], key: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-fn flag(s: &str) -> bool {
+pub(crate) fn flag(s: &str) -> bool {
     let s = s.trim();
     s.eq_ignore_ascii_case("true") || s == "1" || s.eq_ignore_ascii_case("да")
 }
 
 /// Число из 1С: пробелы (в том числе неразрывные) отбрасываются, запятая — десятичный разделитель;
 /// пустая строка — `None`, нечисловое и не конечное значение — ошибка.
-fn number(s: &str) -> Result<Option<f64>, CmlError> {
+pub(crate) fn number(s: &str) -> Result<Option<f64>, CmlError> {
     let cleaned: String = s
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '\u{a0}' && *c != '\u{202f}')

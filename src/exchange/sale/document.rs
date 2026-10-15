@@ -394,7 +394,7 @@ fn removed_shipment_document(x: &mut Xml, o: &ExportOrder, r: &RemovedShipment) 
 }
 
 /// Части адреса: (суффикс поля контрагента, `Тип` адресного поля) в порядке `ExportContragents`.
-const ADDRESS_PARTS: &[(&str, &str)] = &[
+pub(super) const ADDRESS_PARTS: &[(&str, &str)] = &[
     ("INDEX", "Почтовый индекс"),
     ("COUNTRY", "Страна"),
     ("REGION", "Регион"),
