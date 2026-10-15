@@ -836,6 +836,8 @@ struct GoodsState {
     sections: HashMap<String, i64>,
     /// Поля, о которых уже предупредили в этом пакете.
     warned: HashSet<i64>,
+    /// Варианты изготовителя, подпись которых уже сверена в этом пакете.
+    labelled: HashSet<i64>,
 }
 
 impl GoodsState {
@@ -876,6 +878,7 @@ impl GoodsState {
             options: HashMap::new(),
             sections: sections.into_iter().collect(),
             warned: HashSet::new(),
+            labelled: HashSet::new(),
         })
     }
 
@@ -1344,7 +1347,23 @@ async fn write_goods(
         && !id.trim().is_empty()
     {
         if let Some(field) = state.system_field(conn, F_MANUFACTURER).await? {
-            manufacturer.push(Value::from(state.option(conn, field.id, id, name).await?));
+            let option = state.option(conn, field.id, id, name).await?;
+            // Название изготовителя в 1С поменялось — подпись варианта следует за ним
+            let label = name.trim();
+            if !label.is_empty() && state.labelled.insert(option) {
+                let n = sqlx::query(
+                    "UPDATE collection_field_options SET value = $2 WHERE id = $1 AND value <> $2",
+                )
+                .bind(option)
+                .bind(label)
+                .execute(&mut *conn)
+                .await?
+                .rows_affected();
+                if n > 0 {
+                    bump(&mut stats.updated, "options");
+                }
+            }
+            manufacturer.push(Value::from(option));
         }
     }
     assign_system(conn, state, &mut values, F_MANUFACTURER, manufacturer).await?;
@@ -1397,12 +1416,19 @@ async fn write_goods(
                 Some((id, created)) => {
                     if created {
                         bump(&mut stats.created, "files");
+                        // Та же картинка дальше в этой записи найдётся по sha256
+                        known.push(id);
                     }
                     Some(id)
                 }
-                None => current.get(slot).copied(),
+                None => {
+                    bump(&mut stats.skipped, "files");
+                    current.get(slot).copied()
+                }
             };
-            if let Some(id) = id {
+            if let Some(id) = id
+                && !resolved.contains(&id)
+            {
                 resolved.push(id);
             }
         }
@@ -2793,6 +2819,56 @@ mod tests {
             row.get::<Option<i64>, _>("detail_picture_id"),
             now[0].as_i64()
         );
+    }
+
+    #[sqlx::test]
+    async fn same_picture_twice_in_record_is_stored_once(db: PgPool) {
+        let dirs = Dirs::new();
+        dirs.put("import_files/aa/good-1_a.jpeg", b"SAME");
+        dirs.put("import_files/aa/good-1_b.jpeg", b"SAME");
+        let st = load_goods(&db, &Settings::default(), &dirs, &goods_package()).await;
+        assert_eq!(st.created.get("files"), Some(&1), "{st:?}");
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM files")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(dirs.disk_files(), 1);
+        let pics = values(&item_row(&db, "good-1").await)["cml2_pictures"].clone();
+        assert_eq!(pics.as_array().unwrap().len(), 1, "{pics}");
+    }
+
+    #[sqlx::test]
+    async fn missing_pictures_are_counted_as_skipped(db: PgPool) {
+        let dirs = Dirs::new();
+        dirs.put("import_files/aa/good-1_a.jpeg", b"AAAA");
+        let st = load_goods(&db, &Settings::default(), &dirs, &goods_package()).await;
+        assert_eq!(st.created.get("files"), Some(&1), "{st:?}");
+        assert_eq!(st.skipped.get("files"), Some(&1), "{st:?}");
+    }
+
+    #[sqlx::test]
+    async fn manufacturer_label_follows_package(db: PgPool) {
+        let dirs = Dirs::new();
+        let settings = Settings::default();
+        load_goods(&db, &settings, &dirs, &goods_package()).await;
+        let mut p = goods_package();
+        p.catalog.as_mut().unwrap().goods[0].manufacturer =
+            Some(("m-1".into(), "AC Delco Inc".into()));
+        let st = run_in(&db, &settings, &dirs, &p).await.unwrap();
+        assert_eq!(st.updated.get("options"), Some(&1), "{st:?}");
+        let labels: Vec<String> = sqlx::query_scalar(
+            "SELECT o.value FROM collection_field_options o
+             JOIN collection_fields f ON f.id = o.field_id WHERE f.xml_id = 'CML2_MANUFACTURER'",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(labels, ["AC Delco Inc"]);
+        // без названия подпись не стирается
+        p.catalog.as_mut().unwrap().goods[0].manufacturer = Some(("m-1".into(), " ".into()));
+        let st = run_in(&db, &settings, &dirs, &p).await.unwrap();
+        assert!(!st.updated.contains_key("options"), "{st:?}");
     }
 
     #[sqlx::test]
