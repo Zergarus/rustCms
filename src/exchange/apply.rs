@@ -288,7 +288,14 @@ async fn apply_sections(
                 bump(&mut stats.created, "sections");
             }
             Some((id, name, parent, active, old_sort)) => {
-                if name == group.name && parent == parent_id && active && old_sort == sort {
+                // Активность и порядок, выставленные в админке, обмен не перезаписывает:
+                // порядок берётся из пакета только при полной выгрузке.
+                let new_sort = if classifier.only_changes {
+                    old_sort
+                } else {
+                    sort
+                };
+                if name == group.name && parent == parent_id && old_sort == new_sort {
                     continue;
                 }
                 if parent != parent_id {
@@ -302,20 +309,20 @@ async fn apply_sections(
                 };
                 sqlx::query(
                     "UPDATE collection_sections
-                     SET name = $2, parent_id = $3, active = TRUE, sort = $4,
+                     SET name = $2, parent_id = $3, sort = $4,
                          code = COALESCE($5, code), updated_at = now()
                      WHERE id = $1",
                 )
                 .bind(id)
                 .bind(&group.name)
                 .bind(parent_id)
-                .bind(sort)
+                .bind(new_sort)
                 .bind(code)
                 .execute(&mut *conn)
                 .await?;
                 known.insert(
                     group.id.clone(),
-                    (id, group.name.clone(), parent_id, true, sort),
+                    (id, group.name.clone(), parent_id, active, new_sort),
                 );
                 bump(&mut stats.updated, "sections");
             }
@@ -413,17 +420,15 @@ async fn apply_fields(
                 id
             }
             Some((id, name, old_kind, multiple)) => {
-                // Вид меняется только между скалярными; список и обратно не превращаем,
-                // чтобы не испортить сохранённые значения. Строковое `text` остаётся.
-                let scalar = |k: &str| matches!(k, "string" | "text" | "number" | "date");
-                let new_kind = if old_kind == kind
-                    || (old_kind == "text" && kind == "string")
-                    || !(scalar(&old_kind) && scalar(kind))
-                {
-                    old_kind.clone()
-                } else {
-                    kind.to_string()
-                };
+                // Вид существующего поля не меняется: значения записей типизированы,
+                // и никто их не конвертирует. `text` для строки допустим.
+                if old_kind != kind && !(old_kind == "text" && kind == "string") {
+                    tracing::warn!(
+                        field_id = id,
+                        xml_id = %prop.id,
+                        "обмен с 1С: вид свойства в пакете ({kind}) отличается от поля ({old_kind}), поле не меняется"
+                    );
+                }
                 if multiple != prop.multiple {
                     tracing::warn!(
                         field_id = id,
@@ -431,11 +436,10 @@ async fn apply_fields(
                         "обмен с 1С: множественность свойства в пакете отличается от поля, поле не меняется"
                     );
                 }
-                if name != prop.name || new_kind != old_kind {
-                    sqlx::query("UPDATE collection_fields SET name = $2, kind = $3 WHERE id = $1")
+                if name != prop.name {
+                    sqlx::query("UPDATE collection_fields SET name = $2 WHERE id = $1")
                         .bind(id)
                         .bind(&prop.name)
-                        .bind(&new_kind)
                         .execute(&mut *conn)
                         .await?;
                     bump(&mut stats.updated, "fields");
@@ -982,5 +986,68 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(seen, ["g-child", "g-child2", "g-root", "g-root2"]);
+    }
+
+    #[sqlx::test]
+    async fn existing_field_kind_is_never_changed(db: PgPool) {
+        let settings = Settings::default();
+        let mut first = package().remove(1);
+        run(&db, &settings, &first).await;
+        sqlx::query("UPDATE collection_fields SET kind = 'string' WHERE xml_id = 'p-num'")
+            .execute(&db)
+            .await
+            .unwrap();
+        // p-num в пакете — Число, p-date — Дата; делаем p-dir строкой в пакете
+        first.classifier.as_mut().unwrap().properties[0].kind = cml::PropKind::String;
+        let st = run(&db, &settings, &first).await;
+        let kinds: Vec<(String, String)> =
+            sqlx::query_as("SELECT xml_id, kind FROM collection_fields ORDER BY xml_id")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            kinds,
+            [
+                ("p-date".into(), "date".into()),
+                ("p-dir".into(), "list".into()),
+                ("p-num".into(), "string".into())
+            ]
+        );
+        assert!(st.updated.is_empty(), "{st:?}");
+    }
+
+    #[sqlx::test]
+    async fn admin_state_of_sections_survives_exchange(db: PgPool) {
+        let settings = Settings::default();
+        let p = package().remove(0);
+        run(&db, &settings, &p).await;
+        sqlx::query(
+            "UPDATE collection_sections SET active = FALSE, sort = 777 WHERE xml_id = 'g-child'",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let state = || async {
+            sqlx::query_as::<_, (bool, i32)>(
+                "SELECT active, sort FROM collection_sections WHERE xml_id = 'g-child'",
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        // тот же пакет (только изменения): ничего не трогается
+        let st = run(&db, &settings, &p).await;
+        assert_eq!(state().await, (false, 777));
+        assert!(st.updated.is_empty(), "{st:?}");
+        // изменилось название: обновляется оно, активность и порядок остаются
+        let mut renamed = p.clone();
+        renamed.classifier.as_mut().unwrap().groups[1].name = "Масла 2".into();
+        run(&db, &settings, &renamed).await;
+        assert_eq!(state().await, (false, 777));
+        // полная выгрузка выставляет порядок, активность по-прежнему не трогает
+        let mut full = p.clone();
+        full.classifier.as_mut().unwrap().only_changes = false;
+        run(&db, &settings, &full).await;
+        assert_eq!(state().await, (false, 20));
     }
 }
