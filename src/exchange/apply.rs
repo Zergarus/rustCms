@@ -1859,7 +1859,8 @@ async fn write_quantity(
     Ok(())
 }
 
-/// После пакета с ценами: запись пакета, получившая цену, снова активна; запись пакета
+/// После пакета с ценами: запись пакета, получившая цену, снова активна (предложение —
+/// вместе со своим товаром); запись пакета
 /// без единой цены неактивна. Записи вне пакета не трогаются. У товара с предложениями
 /// считаются цены его предложений.
 async fn deactivate_without_price(
@@ -1868,9 +1869,13 @@ async fn deactivate_without_price(
     priced: &[i64],
     stats: &mut Stats,
 ) -> Result<(), ApplyError> {
+    // Получившее цену предложение возвращает в продажу и свой товар
     let reactivated = sqlx::query(
         "UPDATE collection_items SET active = TRUE, updated_at = now()
-         WHERE id = ANY($1) AND NOT active",
+         WHERE NOT active
+           AND (id = ANY($1)
+                OR id IN (SELECT product_id FROM collection_items
+                          WHERE id = ANY($1) AND product_id IS NOT NULL))",
     )
     .bind(priced)
     .execute(&mut *conn)
@@ -3674,6 +3679,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[sqlx::test]
+    async fn priced_offer_reactivates_its_product(db: PgPool) {
+        let settings = Settings {
+            use_offers: true,
+            deactivate_without_price: true,
+            ..Settings::default()
+        };
+        let dirs = Dirs::new();
+        load_2x(&db, &settings, &dirs).await;
+        sqlx::query("UPDATE collection_items SET active = FALSE WHERE xml_id = 'g2-good'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let offers = offers_file(include_bytes!("../../tests/fixtures/1c/offers.xml"));
+        let st = run_in(&db, &settings, &dirs, &offers).await.unwrap();
+        let active: bool =
+            sqlx::query_scalar("SELECT active FROM collection_items WHERE xml_id = 'g2-good'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(active, "{st:?}");
+        assert_eq!(st.updated.get("items"), Some(&1), "{st:?}");
     }
 
     #[sqlx::test]
