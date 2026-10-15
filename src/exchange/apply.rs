@@ -674,7 +674,8 @@ pub async fn ensure_option(
     Ok(id)
 }
 
-/// Склады: по `xml_id`; удалённый в 1С склад деактивируется, а новым не создаётся.
+/// Склады: по `xml_id`; удалённый в 1С склад деактивируется (новым не создаётся),
+/// вернувшийся без пометки — снова активен.
 async fn apply_stores(
     conn: &mut PgConnection,
     classifier: &Classifier,
@@ -706,9 +707,10 @@ async fn apply_stores(
                 bump(&mut stats.deactivated, "stores");
             }
             (Some(_), true) => {}
-            (Some((id, name, _)), false) => {
-                if name != store.name {
-                    sqlx::query("UPDATE catalog_stores SET name = $2 WHERE id = $1")
+            (Some((id, name, active)), false) => {
+                // Удалённый в 1С и вернувшийся склад снова активен: складами управляет 1С
+                if name != store.name || !active {
+                    sqlx::query("UPDATE catalog_stores SET name = $2, active = TRUE WHERE id = $1")
                         .bind(id)
                         .bind(&store.name)
                         .execute(&mut *conn)
@@ -2343,6 +2345,36 @@ mod tests {
         let st = run(&db, &base(Action::Delete), &deleted).await;
         assert_eq!(count(db.clone()).await, (0, 0));
         assert_eq!(st.deleted.get("sections"), Some(&1));
+    }
+
+    #[sqlx::test]
+    async fn deleted_store_is_deactivated_and_comes_back(db: PgPool) {
+        let settings = Settings::default();
+        let stores = package().remove(2);
+        run(&db, &settings, &stores).await;
+        let state = || async {
+            sqlx::query_as::<_, (String, bool)>(
+                "SELECT xml_id, active FROM catalog_stores ORDER BY xml_id",
+            )
+            .fetch_all(&db)
+            .await
+            .unwrap()
+        };
+        // s-2 помечен на удаление и новым не создаётся
+        assert_eq!(state().await, [("s-1".to_string(), true)]);
+        let mut gone = stores.clone();
+        for s in &mut gone.classifier.as_mut().unwrap().stores {
+            s.deleted = true;
+        }
+        let st = run(&db, &settings, &gone).await;
+        assert_eq!(st.deactivated.get("stores"), Some(&1), "{st:?}");
+        assert_eq!(state().await, [("s-1".to_string(), false)]);
+        // снова пришёл без пометки — активен (складами управляет 1С)
+        let st = run(&db, &settings, &stores).await;
+        assert_eq!(st.updated.get("stores"), Some(&1), "{st:?}");
+        assert_eq!(state().await, [("s-1".to_string(), true)]);
+        let st = run(&db, &settings, &stores).await;
+        assert!(st.updated.is_empty(), "{st:?}");
     }
 
     #[sqlx::test]
