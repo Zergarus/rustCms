@@ -23,8 +23,7 @@ use super::settings::{Action, Settings};
 use crate::{access, state::AppState};
 
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/api/1c/exchange", get(handle).post(handle))
+    Router::new().route("/api/1c/exchange", get(handle).post(handle))
 }
 
 /// Успешный ответ: полный текст тела и счётчики для журнала.

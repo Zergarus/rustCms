@@ -2940,7 +2940,12 @@ async fn write_sale(tx: &mut sqlx::PgConnection, sale: &Sale) -> anyhow::Result<
             .bind(&scope)
             .execute(&mut *tx)
             .await?;
-        let properties: HashSet<i64> = properties.iter().copied().collect();
+        let properties: Vec<(i64, i64, &str)> = sale
+            .properties
+            .iter()
+            .filter(|p| person_types.contains(&p.person_type_id))
+            .map(|p| (p.id, p.person_type_id, p.code.as_str()))
+            .collect();
         for e in order_map(sale, &person_types, &properties) {
             sqlx::query(
                 "INSERT INTO exchange_order_map (person_type_id, code, name, source, value)
@@ -2960,13 +2965,14 @@ async fn write_sale(tx: &mut sqlx::PgConnection, sale: &Sale) -> anyhow::Result<
 
 /// Соответствие реквизитов для 1С из `b_sale_bizval`, с приоритетом как у
 /// `BusinessValue::getMapping`: «1C» типа → «1C» для всех → «COMMON» типа → «COMMON» для всех.
-/// Тип плательщика 0 — для всех: строка типа пишется, только если она важнее строки типа 0.
-/// Свойства — перенесённые (id сохраняются), поля пользователя и заказа — свои имена;
-/// чего у нас нет, пропускается с предупреждением.
+/// Тип плательщика 0 — для всех: строка типа пишется, только если её значение отличается от
+/// строки типа 0 (свойство по коду всегда раскладывается по типам). Свойства — см.
+/// [`property_value`], поля пользователя и заказа — свои имена; чего у нас нет, пропускается
+/// с предупреждением.
 fn order_map(
     sale: &Sale,
     person_types: &HashSet<i64>,
-    properties: &HashSet<i64>,
+    properties: &[(i64, i64, &str)],
 ) -> Vec<crate::exchange::sale::settings::MapEntry> {
     use crate::exchange::sale::settings::{CONTRAGENT_CODES, MapEntry, MapSource};
     // (1С?, тип плательщика, наш код) → (название, поставщик, значение)
@@ -3005,34 +3011,12 @@ fn order_map(
             (name, r.provider.as_str(), r.value.as_str()),
         );
     }
-    let mut keys: Vec<(i64, String)> = rows
-        .keys()
-        .filter(|(_, pt, _)| *pt == 0 || person_types.contains(pt))
-        .map(|(_, pt, code)| (*pt, code.clone()))
-        .collect();
-    keys.sort();
-    keys.dedup();
-    let mut out = Vec::new();
-    for (pt, code) in keys {
-        let exact = rows.get(&(true, pt, code.clone()));
-        let picked = match exact {
-            Some(row) => row,
-            // «1C» для всех важнее «COMMON» типа — её даст строка типа 0
-            None if pt != 0 && rows.contains_key(&(true, 0, code.clone())) => continue,
-            None => match rows.get(&(false, pt, code.clone())) {
-                Some(row) => row,
-                None => continue,
-            },
-        };
-        let (name, provider, value) = picked;
-        let mapped = match *provider {
-            "PROPERTY" => value
-                .trim()
-                .parse::<i64>()
-                .ok()
-                .filter(|id| properties.contains(id))
-                .map(|id| (MapSource::Property, id.to_string())),
-            "USER" => match *value {
+    // Значение строки для типа плательщика `pt` (0 — для всех); `None` — не выражается
+    let convert = |pt: i64, provider: &str, value: &str| -> Option<(MapSource, String)> {
+        let value = value.trim();
+        match provider {
+            "PROPERTY" => property_value(pt, value, properties).map(|v| (MapSource::Property, v)),
+            "USER" => match value {
                 "EMAIL" => Some("email"),
                 "LOGIN" => Some("login"),
                 "NAME" => Some("name"),
@@ -3042,7 +3026,7 @@ fn order_map(
                 _ => None,
             }
             .map(|f| (MapSource::User, f.to_string())),
-            "ORDER" => match *value {
+            "ORDER" => match value {
                 "ID" => Some("id"),
                 "ACCOUNT_NUMBER" => Some("account_number"),
                 "USER_DESCRIPTION" => Some("user_comment"),
@@ -3052,26 +3036,98 @@ fn order_map(
             .map(|f| (MapSource::Order, f.to_string())),
             "VALUE" | "INPUT" => Some((MapSource::Value, value.to_string())),
             _ => None,
-        };
-        let Some((source, value)) = mapped else {
-            tracing::warn!(
-                code,
-                person_type = pt,
-                provider,
-                value,
-                "перенос из Битрикса: соответствие реквизита для 1С не перенесено"
-            );
-            continue;
-        };
-        out.push(MapEntry {
-            person_type_id: pt,
+        }
+    };
+    let warn = |pt: i64, code: &str, provider: &str, value: &str| {
+        tracing::warn!(
             code,
-            name: name.clone(),
-            source,
+            person_type = pt,
+            provider,
             value,
-        });
+            "перенос из Битрикса: соответствие реквизита для 1С не перенесено"
+        );
+    };
+    let mut codes: Vec<&String> = rows.keys().map(|(_, _, code)| code).collect();
+    codes.sort();
+    codes.dedup();
+    let mut types: Vec<i64> = person_types.iter().copied().collect();
+    types.sort();
+    let mut out = Vec::new();
+    for code in codes {
+        let get = |is_1c: bool, pt: i64| rows.get(&(is_1c, pt, code.clone()));
+        // Строка для всех типов: «1C» для всех → «COMMON» для всех
+        let common = get(true, 0).or_else(|| get(false, 0));
+        // Свойство по коду без типа плательщика не найти — такая строка раскладывается по типам
+        let common_value = common.and_then(|(_, provider, value)| convert(0, provider, value));
+        // Свойство без значения для всех ещё разложится по типам — предупредят они
+        if let (Some((_, provider, value)), None) = (common, &common_value)
+            && *provider != "PROPERTY"
+        {
+            warn(0, code, provider, value);
+        }
+        if let (Some((name, _, _)), Some((source, value))) = (common, &common_value) {
+            out.push(MapEntry {
+                person_type_id: 0,
+                code: code.clone(),
+                name: name.clone(),
+                source: *source,
+                value: value.clone(),
+            });
+        }
+        for &pt in &types {
+            let Some((from, (name, provider, value))) =
+                [(true, pt), (true, 0), (false, pt), (false, 0)]
+                    .into_iter()
+                    .find_map(|(is_1c, from)| get(is_1c, from).map(|row| (from, row)))
+            else {
+                continue;
+            };
+            let Some(mapped) = convert(pt, provider, value) else {
+                // Строку для всех не свойства уже отметили выше
+                if from != 0 || *provider == "PROPERTY" {
+                    warn(pt, code, provider, value);
+                }
+                continue;
+            };
+            // Совпадает со строкой для всех — своя не нужна
+            if common_value.as_ref() == Some(&mapped) {
+                continue;
+            }
+            out.push(MapEntry {
+                person_type_id: pt,
+                code: code.clone(),
+                name: name.clone(),
+                source: mapped.0,
+                value: mapped.1,
+            });
+        }
     }
+    out.sort_by(|a, b| (a.person_type_id, &a.code).cmp(&(b.person_type_id, &b.code)));
     out
+}
+
+/// Значение `PROPERTY` из `b_sale_bizval` (`$parseId` в `lib/businessvalue.php`):
+/// id свойства, `<id>_CITY|_COUNTRY|_REGION` (часть свойства-местоположения) или код свойства
+/// в типе плательщика `pt` (для типа 0 код не разрешается). Id свойств при переносе сохраняются,
+/// поэтому карта id — множество перенесённых свойств.
+fn property_value(pt: i64, value: &str, properties: &[(i64, i64, &str)]) -> Option<String> {
+    let exists = |id: i64| properties.iter().any(|(p, _, _)| *p == id);
+    if let Ok(id) = value.parse::<i64>() {
+        return exists(id).then(|| id.to_string());
+    }
+    if let Some((id, part)) = value.split_once('_')
+        && let Ok(id) = id.parse::<i64>()
+        && matches!(part, "CITY" | "COUNTRY" | "REGION")
+    {
+        return exists(id).then(|| format!("{id}_{part}"));
+    }
+    if pt == 0 || value.is_empty() {
+        return None;
+    }
+    properties
+        .iter()
+        .find(|(_, t, code)| *t == pt && *code == value)
+        .map(|(id, _, _)| id.to_string())
 }
 
 /// Торговые предложения: связь коллекций, `product_id` предложений (родительский товар),
@@ -3848,7 +3904,20 @@ mod tests {
             active: true,
             multiple: false,
         };
-        sale.properties = vec![prop(7, 1), prop(9, 2)];
+        let coded = |id: i64, person_type_id: i64, code: &str| SalePropertyRow {
+            code: code.into(),
+            ..prop(id, person_type_id)
+        };
+        sale.properties = vec![
+            prop(7, 1),
+            prop(9, 2),
+            SalePropertyRow {
+                kind: "location",
+                ..prop(8, 1)
+            },
+            coded(10, 1, "ZIP"),
+            coded(11, 2, "ZIP"),
+        ];
         let bv = |code: &str, consumer: &str, pt: i64, provider: &str, value: &str| BizvalRow {
             code: code.into(),
             consumer: consumer.into(),
@@ -3873,6 +3942,14 @@ mod tests {
             bv("BUYER_PERSON_NAME_FIRST", "1C", 3, "USER", "NAME"),
             bv("PAYMENT_ID", "COMMON", 0, "PAYMENT", "ID"),
             bv("BUYER_PERSON_INN", "1C", 1, "USER", "UF_INN"),
+            // Часть свойства-местоположения; местоположение не перенесено
+            bv("BUYER_PERSON_CITY", "1C", 1, "PROPERTY", "8_CITY"),
+            bv("BUYER_PERSON_REGION", "1C", 1, "PROPERTY", "998_REGION"),
+            // Свойство по коду: для всех типов раскладывается по типам, у типа — своё,
+            // кода нет — пропуск
+            bv("BUYER_PERSON_ZIP", "1C", 0, "PROPERTY", "ZIP"),
+            bv("BUYER_COMPANY_OKPO", "1C", 2, "PROPERTY", "P9"),
+            bv("BUYER_COMPANY_BANK_BIK", "1C", 2, "PROPERTY", "NOPE"),
             // Произвольные реквизиты
             bv("1C_REKV_2_1", "1C", 2, "INPUT", "Сайт"),
             bv("1C_REKV_2_2", "1C", 2, "ORDER", "ACCOUNT_NUMBER"),
@@ -3940,6 +4017,7 @@ mod tests {
             vec![
                 e(0, "BUYER_PERSON_EMAIL", "", MapSource::User, "email"),
                 e(0, "BUYER_PERSON_PHONE", "", MapSource::Value, "+7"),
+                e(1, "BUYER_PERSON_CITY", "", MapSource::Property, "8_CITY"),
                 e(1, "BUYER_PERSON_EMAIL", "", MapSource::Property, "7"),
                 e(
                     1,
@@ -3948,6 +4026,7 @@ mod tests {
                     MapSource::User,
                     "last_name"
                 ),
+                e(1, "BUYER_PERSON_ZIP", "", MapSource::Property, "10"),
                 e(2, "1C_REKV_1", "Канал продаж", MapSource::Value, "Сайт"),
                 e(
                     2,
@@ -3964,6 +4043,8 @@ mod tests {
                     MapSource::Order,
                     "user_comment"
                 ),
+                e(2, "BUYER_COMPANY_OKPO", "", MapSource::Property, "9"),
+                e(2, "BUYER_PERSON_ZIP", "", MapSource::Property, "11"),
             ]
         );
 

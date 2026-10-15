@@ -393,6 +393,10 @@ pub struct MapEntry {
     /// Название произвольного реквизита `1C_REKV_*`.
     pub name: String,
     pub source: MapSource,
+    /// [`MapSource::Property`]: id свойства заказа (`"7"`) или часть свойства-местоположения
+    /// `"<id>_CITY"` / `"<id>_COUNTRY"` / `"<id>_REGION"` (как `PROVIDER_VALUE` у Битрикса);
+    /// [`MapSource::User`] / [`MapSource::Order`]: имя поля из [`USER_FIELDS`] / [`ORDER_FIELDS`];
+    /// [`MapSource::Value`]: константа.
     pub value: String,
 }
 
