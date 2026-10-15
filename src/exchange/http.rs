@@ -24,7 +24,6 @@ use crate::{access, state::AppState};
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/bitrix/admin/1c_exchange.php", get(handle).post(handle))
         .route("/api/1c/exchange", get(handle).post(handle))
 }
 
@@ -770,13 +769,13 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn bitrix_address_and_sessid_param(db: PgPool) {
+    async fn sessid_param(db: PgPool) {
         exchange_user(&db, "exch").await;
         let c = Client::new(&test_state(db.clone()));
         let r = c
             .raw(
                 "GET",
-                "/bitrix/admin/1c_exchange.php?type=catalog&mode=checkauth",
+                "/api/1c/exchange?type=catalog&mode=checkauth",
                 None,
                 Some(&basic("exch", "password123")),
                 vec![],
@@ -786,13 +785,27 @@ mod tests {
         let init = c
             .raw(
                 "GET",
-                &format!("/bitrix/admin/1c_exchange.php?type=catalog&mode=init&sessid={token}"),
+                &format!("/api/1c/exchange?type=catalog&mode=init&sessid={token}"),
                 None,
                 None,
                 vec![],
             )
             .await;
         assert!(init.starts_with("zip=yes"), "{init}");
+    }
+
+    #[sqlx::test]
+    async fn bitrix_address_not_served(db: PgPool) {
+        let res = crate::app(test_state(db))
+            .oneshot(
+                Request::builder()
+                    .uri("/bitrix/admin/1c_exchange.php?type=catalog&mode=checkauth")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     #[sqlx::test]
