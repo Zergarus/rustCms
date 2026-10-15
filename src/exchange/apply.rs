@@ -1381,26 +1381,25 @@ async fn write_goods(
     let mut manufacturer = Vec::new();
     if let Some((id, name)) = &goods.manufacturer
         && !id.trim().is_empty()
+        && let Some(field) = state.system_field(conn, F_MANUFACTURER).await?
     {
-        if let Some(field) = state.system_field(conn, F_MANUFACTURER).await? {
-            let option = state.option(conn, field.id, id, name).await?;
-            // Название изготовителя в 1С поменялось — подпись варианта следует за ним
-            let label = name.trim();
-            if !label.is_empty() && state.labelled.insert(option) {
-                let n = sqlx::query(
-                    "UPDATE collection_field_options SET value = $2 WHERE id = $1 AND value <> $2",
-                )
-                .bind(option)
-                .bind(label)
-                .execute(&mut *conn)
-                .await?
-                .rows_affected();
-                if n > 0 {
-                    bump(&mut stats.updated, "options");
-                }
+        let option = state.option(conn, field.id, id, name).await?;
+        // Название изготовителя в 1С поменялось — подпись варианта следует за ним
+        let label = name.trim();
+        if !label.is_empty() && state.labelled.insert(option) {
+            let n = sqlx::query(
+                "UPDATE collection_field_options SET value = $2 WHERE id = $1 AND value <> $2",
+            )
+            .bind(option)
+            .bind(label)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected();
+            if n > 0 {
+                bump(&mut stats.updated, "options");
             }
-            manufacturer.push(Value::from(option));
         }
+        manufacturer.push(Value::from(option));
     }
     assign_system(conn, state, &mut values, F_MANUFACTURER, manufacturer).await?;
 
