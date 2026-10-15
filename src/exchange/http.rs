@@ -865,9 +865,10 @@ mod tests {
         upload(&c, &token, "broken.zip", b"PK\x03\x04 definitely not a zip").await;
         let r = c.get(&token, "mode=import&filename=goods.xml").await;
         assert_eq!(r, "failure\nАрхив не дочитан или повреждён");
-        // и сам пакет с мусором вместо XML
-        upload(&c, &token, "junk.xml", b"\x00\x01 not xml").await;
-        let r = c.get(&token, "mode=import&filename=junk.xml").await;
+        // и сам пакет с мусором вместо XML — в новой сессии, без битого архива
+        let token2 = login(&c, "exch").await;
+        upload(&c, &token2, "junk.xml", b"\x00\x01 not xml").await;
+        let r = c.get(&token2, "mode=import&filename=junk.xml").await;
         assert!(r.starts_with("failure\n"), "{r}");
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM collections")
             .fetch_one(&db)

@@ -1161,12 +1161,11 @@ fn content_type_of(name: &str) -> &'static str {
     }
 }
 
-// Используется следующими задачами плана обмена (админка, проектные обработчики).
-#[allow(dead_code)]
 /// Файл из каталога сессии по относительному пути пакета. Совпал по sha256 с одним из
 /// `existing` — его id; нет файла в пакете — `None`; иначе новый файл. Путь вне каталога
 /// сессии — ошибка. Новые файлы запоминаются в `ctx` (см. `Ctx::discard_written`).
-pub async fn store_file(
+#[cfg(test)]
+async fn store_file(
     conn: &mut PgConnection,
     ctx: &Ctx<'_>,
     rel_path: &str,
@@ -2163,9 +2162,8 @@ mod tests {
     #[sqlx::test]
     async fn classifier_creates_and_updates(db: PgPool) {
         let settings = Settings::default();
-        let mut created = Stats::default();
         for p in package() {
-            created = run(&db, &settings, &p).await;
+            run(&db, &settings, &p).await;
         }
         let cid = collection_id(&db).await;
         let (name, code, is_catalog): (String, String, bool) =
@@ -2250,7 +2248,6 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(pts, [("pt-1".into(), "Розничный".into(), false)]);
-        let _ = created;
 
         // Повтор: ничего не создаётся и не обновляется
         for p in package() {
