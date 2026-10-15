@@ -832,6 +832,8 @@ struct GoodsState {
     taken_codes: HashSet<String>,
     options: HashMap<(i64, String), i64>,
     sections: HashMap<String, i64>,
+    /// Поля, о которых уже предупредили в этом пакете.
+    warned: HashSet<i64>,
 }
 
 impl GoodsState {
@@ -871,6 +873,7 @@ impl GoodsState {
             taken_codes,
             options: HashMap::new(),
             sections: sections.into_iter().collect(),
+            warned: HashSet::new(),
         })
     }
 
@@ -999,46 +1002,54 @@ fn parse_number(raw: &str) -> Option<Value> {
     }
 }
 
-/// Значение свойства товара → значение поля; `None` — нет значения.
+/// Значение свойства товара для поля.
+enum PropValue {
+    /// Значение поля.
+    Set(Value),
+    /// Пустое значение в пакете.
+    Empty,
+    /// Значение не разобрано: прежнее значение поля сохраняется.
+    Keep,
+}
+
+/// Поле этого вида обмен заполнять не умеет; его значение не трогается.
+fn fillable_kind(kind: &str) -> bool {
+    matches!(kind, "string" | "text" | "number" | "date" | "list")
+}
+
+/// Значение свойства товара → значение поля.
 async fn property_value(
     conn: &mut PgConnection,
     state: &mut GoodsState,
     field: &FieldInfo,
     raw: &str,
-) -> Result<Option<Value>, ApplyError> {
+) -> Result<PropValue, ApplyError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Ok(None);
+        return Ok(PropValue::Empty);
     }
     Ok(match field.kind.as_str() {
-        "string" | "text" => Some(Value::String(raw.to_string())),
-        "number" => {
-            let n = parse_number(trimmed);
-            if n.is_none() {
-                tracing::warn!(field = %field.code, "обмен с 1С: «{trimmed}» не число, значение пропущено");
-            }
-            n
-        }
-        "boolean" => Some(Value::Bool(matches!(
-            trimmed.to_lowercase().as_str(),
-            "1" | "y" | "true" | "да"
-        ))),
-        "date" => match trimmed.get(..10) {
-            Some(d) if chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").is_ok() => {
-                Some(Value::String(d.to_string()))
-            }
-            _ => {
-                tracing::warn!(field = %field.code, "обмен с 1С: «{trimmed}» не дата, значение пропущено");
-                None
+        "string" | "text" => PropValue::Set(Value::String(raw.to_string())),
+        "number" => match parse_number(trimmed) {
+            Some(n) => PropValue::Set(n),
+            None => {
+                tracing::warn!(field = %field.code, "обмен с 1С: «{trimmed}» не число, прежнее значение сохранено");
+                PropValue::Keep
             }
         },
-        "list" => Some(Value::from(
+        "date" => match trimmed.get(..10) {
+            Some(d) if chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").is_ok() => {
+                PropValue::Set(Value::String(d.to_string()))
+            }
+            _ => {
+                tracing::warn!(field = %field.code, "обмен с 1С: «{trimmed}» не дата, прежнее значение сохранено");
+                PropValue::Keep
+            }
+        },
+        "list" => PropValue::Set(Value::from(
             state.option(conn, field.id, trimmed, trimmed).await?,
         )),
-        kind => {
-            tracing::warn!(field = %field.code, "обмен с 1С: поле вида {kind} из пакета не заполняется");
-            None
-        }
+        _ => PropValue::Keep,
     })
 }
 
@@ -1328,15 +1339,24 @@ async fn write_goods(
             tracing::warn!(property = %prop_id, "обмен с 1С: свойство товара {} неизвестно, пропущено", goods.id);
             continue;
         };
+        if !fillable_kind(&field.kind) {
+            if state.warned.insert(field.id) {
+                tracing::warn!(field = %field.code, kind = %field.kind, "обмен с 1С: поле этого вида из пакета не заполняется, значение не меняется");
+            }
+            continue;
+        }
         let mut vals = Vec::new();
+        let mut keep = false;
         for raw in raws {
-            if let Some(v) = property_value(conn, state, &field, raw).await?
-                && !vals.contains(&v)
-            {
-                vals.push(v);
+            match property_value(conn, state, &field, raw).await? {
+                PropValue::Set(v) if !vals.contains(&v) => vals.push(v),
+                PropValue::Keep => keep = true,
+                _ => {}
             }
         }
-        assign(&mut values, &field, vals);
+        if !keep {
+            assign(&mut values, &field, vals);
+        }
     }
 
     // Картинки: ячейка без файла в пакете сохраняет прежнее значение
@@ -2857,6 +2877,59 @@ mod tests {
                 .unwrap();
         assert_eq!(value, "v-new");
         assert_eq!(values(&item_row(&db, "good-1").await)["primenimost"], id);
+    }
+
+    #[sqlx::test]
+    async fn unfillable_values_keep_stored_value(db: PgPool) {
+        let dirs = Dirs::new();
+        let settings = Settings::default();
+        load_goods(&db, &settings, &dirs, &goods_package()).await;
+        let cid = collection_id(&db).await;
+        for (code, kind) in [("link", "element"), ("doc", "file"), ("flag", "boolean")] {
+            sqlx::query(
+                "INSERT INTO collection_fields (collection_id, code, name, kind, xml_id)
+                 VALUES ($1, $2, $2, $3, $4)",
+            )
+            .bind(cid)
+            .bind(code)
+            .bind(kind)
+            .bind(format!("p-{code}"))
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        let stored = serde_json::json!({
+            "link": 5, "doc": 7, "flag": true, "diametr": 12, "data_vypuska": "2020-01-02"
+        });
+        sqlx::query(
+            "UPDATE collection_items SET field_values = field_values || $1 WHERE xml_id = 'good-1'",
+        )
+        .bind(&stored)
+        .execute(&db)
+        .await
+        .unwrap();
+        let mut p = goods_package();
+        p.catalog.as_mut().unwrap().goods[0].properties = vec![
+            ("p-link".into(), vec!["other-good".into()]),
+            ("p-doc".into(), vec!["import_files/x.pdf".into()]),
+            ("p-flag".into(), vec!["false".into()]),
+            ("p-num".into(), vec!["не число".into()]),
+            ("p-date".into(), vec!["когда-то".into()]),
+        ];
+        run_in(&db, &settings, &dirs, &p).await.unwrap();
+        let v = values(&item_row(&db, "good-1").await);
+        for key in ["link", "doc", "flag", "diametr", "data_vypuska"] {
+            assert_eq!(v.get(key), stored.get(key), "{key}");
+        }
+        // корректное значение по-прежнему записывается, пустое — убирает значение
+        p.catalog.as_mut().unwrap().goods[0].properties = vec![
+            ("p-num".into(), vec!["15,5".into()]),
+            ("p-date".into(), vec![String::new()]),
+        ];
+        run_in(&db, &settings, &dirs, &p).await.unwrap();
+        let v = values(&item_row(&db, "good-1").await);
+        assert_eq!(v["diametr"], serde_json::json!(15.5));
+        assert!(!v.contains_key("data_vypuska"));
     }
 
     struct Hook {
