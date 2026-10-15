@@ -251,8 +251,18 @@ fn time(dt: DateTime<Utc>) -> String {
     site_time(dt).format("%H:%M:%S").to_string()
 }
 
+/// Дата в значении реквизита (`getFormatDate`): до 2.10 — `d.m.Y H:i:s`, от 2.10 — `Y-m-d\TH:i:s`.
+pub fn trait_date(dt: DateTime<Utc>, v: SchemaVersion) -> String {
+    let format = if v.documents() {
+        "%Y-%m-%dT%H:%M:%S"
+    } else {
+        "%d.%m.%Y %H:%M:%S"
+    };
+    site_time(dt).format(format).to_string()
+}
+
 /// Число, как его печатает PHP: без лишних нулей (`1500`, `33.3`), с точностью до 4 знаков.
-fn num(v: f64) -> String {
+pub fn num(v: f64) -> String {
     let r = (v * 10_000.0).round() / 10_000.0;
     if r == 0.0 { "0".into() } else { r.to_string() }
 }

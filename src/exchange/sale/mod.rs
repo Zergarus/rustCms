@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod document;
+pub mod select;
 pub mod settings;
 
 use sqlx::PgConnection;

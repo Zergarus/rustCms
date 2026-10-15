@@ -137,6 +137,16 @@ pub trait ImportHook: Send + Sync {
     ) -> BoxFuture<'a, anyhow::Result<()>>;
 }
 
+/// Реквизиты проекта в документе заказа при выгрузке в 1С: дописываются в конец
+/// `ЗначенияРеквизитов` заказа (как обработчики событий выгрузки Битрикса).
+pub trait OrderExportHook: Send + Sync {
+    fn traits<'a>(
+        &'a self,
+        conn: &'a mut sqlx::PgConnection,
+        order_id: i64,
+    ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>>;
+}
+
 /// Выбор города (`bxapi.location`).
 pub struct LocationConfig {
     /// Типы местоположений в поиске (`CITY`, `VILLAGE`...).
@@ -267,6 +277,10 @@ pub struct Project {
     pub form_guards: Vec<Arc<dyn FormGuard>>,
     /// Обработчик товаров при обмене с 1С (`None` — ничего не делается).
     pub import_hook: Option<Arc<dyn ImportHook>>,
+    /// Реквизиты заказа при выгрузке в 1С (`None` — только реквизиты модуля).
+    // Читает протокол обмена заказами (подключается следующей задачей плана)
+    #[allow(dead_code)]
+    pub order_export_hook: Option<Arc<dyn OrderExportHook>>,
     pub cart: CartConfig,
     pub order: OrderConfig,
     pub profile: ProfileConfig,
@@ -369,6 +383,7 @@ impl Default for Project {
             forms: default_forms(),
             form_guards: Vec::new(),
             import_hook: None,
+            order_export_hook: None,
             cart: CartConfig::default(),
             order: OrderConfig::default(),
             profile: ProfileConfig::default(),
