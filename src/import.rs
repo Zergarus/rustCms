@@ -180,6 +180,24 @@ struct Sale {
     pay_systems: Vec<PaySystemRow>,
     /// (свойство, 'P' | 'D', id платёжки или доставки)
     relations: Vec<(i64, String, i64)>,
+    /// `b_sale_bizval_persondomain`: (тип плательщика, 'I' | 'E').
+    domains: Vec<(i64, String)>,
+    /// `b_sale_bizval` потребителей «1C» и «COMMON».
+    bizval: Vec<BizvalRow>,
+    /// `b_sale_bizval_code_1c`: (тип плательщика, номер, название) произвольных реквизитов.
+    rekv_names: Vec<(i64, i64, String)>,
+    /// Таблицы соответствий есть в Битриксе: соответствия CMS перезаписываются.
+    bizval_loaded: bool,
+}
+
+/// Строка `b_sale_bizval`.
+struct BizvalRow {
+    code: String,
+    consumer: String,
+    /// 0 — для всех типов плательщика.
+    person_type_id: i64,
+    provider: String,
+    value: String,
 }
 
 struct SalePropertyRow {
@@ -243,6 +261,8 @@ struct UserRow {
     extra: Map<String, Value>,
     /// Группы Битрикса, в которых состоит пользователь.
     groups: Vec<i64>,
+    /// `b_user.XML_ID` — Ид контрагента в обмене заказами с 1С.
+    xml_id: String,
 }
 
 /// Группа пользователей Битрикса: (id, код, название, описание, сортировка).
@@ -325,6 +345,108 @@ const EXCHANGE_OPTIONS: &[(&str, &str)] = &[
     ("1C_USE_ZIP", "use_zip"),
     ("deactivate_1c_no_price", "deactivate_without_price"),
 ];
+
+/// Как переносится опция обмена заказами из `sale` Битрикса.
+#[derive(Clone, Copy)]
+enum SaleOption {
+    /// Y/N; у Битрикса включено только `Y`.
+    Flag,
+    /// Значение как есть (код статуса, id, текст).
+    Text,
+}
+
+/// Опции обмена заказами в `sale` Битрикса → настройки `sale_*` модуля `exchange`.
+/// `1C_INTERVAL`, `1C_FILE_SIZE_LIMIT`, `1C_SALE_USE_ZIP` не переносятся: они общие с каталогом.
+const SALE_EXCHANGE_OPTIONS: &[(&str, &str, SaleOption)] = &[
+    (
+        "1C_EXPORT_PAYED_ORDERS",
+        "sale_export_paid",
+        SaleOption::Flag,
+    ),
+    (
+        "1C_EXPORT_ALLOW_DELIVERY_ORDERS",
+        "sale_export_allow_delivery",
+        SaleOption::Flag,
+    ),
+    (
+        "1C_EXPORT_FINAL_ORDERS",
+        "sale_export_from_status",
+        SaleOption::Text,
+    ),
+    (
+        "1C_REPLACE_CURRENCY",
+        "sale_replace_currency",
+        SaleOption::Text,
+    ),
+    (
+        "1C_SALE_ACCOUNT_NUMBER_SHOP_PREFIX",
+        "sale_number_prefix",
+        SaleOption::Text,
+    ),
+    (
+        "1C_CHANGE_STATUS_FROM_1C",
+        "sale_change_status",
+        SaleOption::Flag,
+    ),
+    (
+        "1C_FINAL_STATUS_ON_DELIVERY",
+        "sale_final_status_on_delivery",
+        SaleOption::Text,
+    ),
+    (
+        "1C_IMPORT_UPDATE_BASKET_QUANTITY",
+        "sale_update_basket_quantity",
+        SaleOption::Flag,
+    ),
+    (
+        "1C_IMPORT_NEW_ORDERS",
+        "sale_import_new_orders",
+        SaleOption::Flag,
+    ),
+    (
+        "1C_IMPORT_NEW_PAYMENT",
+        "sale_import_new_payments",
+        SaleOption::Flag,
+    ),
+    (
+        "1C_IMPORT_NEW_SHIPMENT",
+        "sale_import_new_shipments",
+        SaleOption::Flag,
+    ),
+    (
+        "1C_IMPORT_NEW_ORDER_NEW_SHIPMENT",
+        "sale_new_order_new_shipment",
+        SaleOption::Flag,
+    ),
+    (
+        "1C_IMPORT_DEFAULT_PS",
+        "sale_default_ps_cash",
+        SaleOption::Text,
+    ),
+    (
+        "1C_IMPORT_DEFAULT_PS_B",
+        "sale_default_ps_cashless",
+        SaleOption::Text,
+    ),
+    (
+        "1C_IMPORT_DEFAULT_PS_A",
+        "sale_default_ps_acquiring",
+        SaleOption::Text,
+    ),
+    (
+        "1C_IMPORT_DEFAULT_PS_ORDER_PAID",
+        "sale_default_ps_order_paid",
+        SaleOption::Text,
+    ),
+    (
+        "1C_IMPORT_DEFAULT_SHIPMENT_SERVICE",
+        "sale_default_delivery",
+        SaleOption::Text,
+    ),
+];
+
+/// Метка подтверждённой выгрузки заказов: `last_export_time_committed_<страница>` (unix-время).
+const SALE_LAST_EXPORT_PREFIX: &str = "last_export_time_committed_";
 
 /// Внешний код в Битриксе не обязан быть уникальным, у нас — обязан: повтор становится пустым
 /// (с предупреждением в журнале). Пробелы по краям отбрасываются, как и в обмене с 1С.
@@ -1039,7 +1161,7 @@ async fn read_users(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
                 CAST(IFNULL(PASSWORD, '') AS CHAR), CAST(ACTIVE AS CHAR),
                 CAST(IFNULL(SECOND_NAME, '') AS CHAR), CAST(IFNULL(PERSONAL_PHONE, '') AS CHAR),
                 CAST(IFNULL(PERSONAL_CITY, '') AS CHAR), CAST(IFNULL(WORK_POSITION, '') AS CHAR),
-                CAST(IFNULL(PERSONAL_PHOTO, 0) AS SIGNED)
+                CAST(IFNULL(PERSONAL_PHOTO, 0) AS SIGNED), CAST(IFNULL(XML_ID, '') AS CHAR)
          FROM b_user ORDER BY ID",
     )
     .fetch_all(my)
@@ -1077,6 +1199,7 @@ async fn read_users(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
             photo_id: id_col(&row, 11),
             extra: uf.get(&bitrix_id).cloned().unwrap_or_default(),
             groups: memberships.remove(&bitrix_id).unwrap_or_default(),
+            xml_id: str_col(&row, 12),
         });
     }
 
@@ -1458,6 +1581,23 @@ async fn read_mail(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
                 .push((module.to_string(), name.to_string(), value));
         }
     }
+    for row in sqlx::query(
+        "SELECT CAST(NAME AS CHAR), CAST(IFNULL(VALUE, '') AS CHAR) FROM b_option
+         WHERE MODULE_ID = 'sale' AND SITE_ID IS NULL
+           AND (NAME LIKE '1C\\_%' OR NAME LIKE 'last\\_export\\_time\\_committed\\_%')",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        let name = str_col(&row, 0);
+        if name.starts_with(SALE_LAST_EXPORT_PREFIX)
+            || SALE_EXCHANGE_OPTIONS
+                .iter()
+                .any(|(from, _, _)| *from == name)
+        {
+            data.options.push(("sale".into(), name, str_col(&row, 1)));
+        }
+    }
     Ok(())
 }
 
@@ -1485,7 +1625,29 @@ async fn write_mail(tx: &mut sqlx::PgConnection, data: &Data) -> anyhow::Result<
         .execute(&mut *tx)
         .await?;
     }
+    let mut last_export: Option<i64> = None;
     for (module, name, value) in &data.options {
+        if module == "sale" {
+            if name.starts_with(SALE_LAST_EXPORT_PREFIX) {
+                if let Ok(t) = value.trim().parse::<i64>() {
+                    last_export = last_export.max(Some(t));
+                }
+                continue;
+            }
+            // Обмен заказами: настройки `sale_*` модуля `exchange`, прочее не переносится
+            let Some((_, to, kind)) = SALE_EXCHANGE_OPTIONS
+                .iter()
+                .find(|(from, _, _)| from == name)
+            else {
+                continue;
+            };
+            let value = match kind {
+                SaleOption::Flag => if value.trim() == "Y" { "Y" } else { "N" }.to_string(),
+                SaleOption::Text => value.clone(),
+            };
+            put_option(tx, "exchange", to, &value).await?;
+            continue;
+        }
         // Опции обмена с 1С переезжают в настройки модуля `exchange`
         let exchange = (module == "catalog")
             .then(|| EXCHANGE_OPTIONS.iter().find(|(from, _)| from == name))
@@ -1494,16 +1656,35 @@ async fn write_mail(tx: &mut sqlx::PgConnection, data: &Data) -> anyhow::Result<
             Some((_, to)) => ("exchange", *to),
             None => (module.as_str(), name.as_str()),
         };
-        sqlx::query(
-            "INSERT INTO options (module, name, value) VALUES ($1, $2, $3)
-             ON CONFLICT (module, name) DO UPDATE SET value = EXCLUDED.value",
+        put_option(tx, module, name, value).await?;
+    }
+    if let Some(at) = last_export.and_then(|t| DateTime::<Utc>::from_timestamp(t, 0)) {
+        put_option(
+            tx,
+            "exchange",
+            "sale_last_export_committed",
+            &at.to_rfc3339(),
         )
-        .bind(module)
-        .bind(name)
-        .bind(value)
-        .execute(&mut *tx)
         .await?;
     }
+    Ok(())
+}
+
+async fn put_option(
+    tx: &mut sqlx::PgConnection,
+    module: &str,
+    name: &str,
+    value: &str,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO options (module, name, value) VALUES ($1, $2, $3)
+         ON CONFLICT (module, name) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind(module)
+    .bind(name)
+    .bind(value)
+    .execute(&mut *tx)
+    .await?;
     Ok(())
 }
 
@@ -1568,11 +1749,43 @@ async fn write_users(
     if !skipped.is_empty() {
         tracing::warn!(logins = ?skipped, "пользователи Битрикса пропущены: логин уже занят в CMS");
     }
+    // Ид контрагента уникален; занятый пользователем CMS не из Битрикса — пропускается
+    let foreign: HashSet<String> = sqlx::query_scalar(
+        "SELECT xml_id FROM users
+         WHERE xml_id <> '' AND (external_id IS NULL OR NOT external_id = ANY($1))",
+    )
+    .bind(
+        users
+            .iter()
+            .map(|u| format!("bitrix:{}", u.bitrix_id))
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .collect();
+    let mut seen = HashSet::new();
+    let xml_ids: HashMap<i64, String> = users
+        .iter()
+        .map(|u| {
+            let xml_id = unique_xml_id((), u.xml_id.clone(), &mut seen);
+            if foreign.contains(&xml_id) {
+                tracing::warn!(
+                    xml_id,
+                    login = u.login,
+                    "перенос из Битрикса: Ид контрагента уже занят"
+                );
+                return (u.bitrix_id, String::new());
+            }
+            (u.bitrix_id, xml_id)
+        })
+        .collect();
     let mut map = HashMap::new();
     for chunk in users.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
             "INSERT INTO users (login, email, name, last_name, password_hash, is_admin, active,
-                                external_id, second_name, phone, city, work_position, photo_id, extra) ",
+                                external_id, second_name, phone, city, work_position, photo_id, extra,
+                                xml_id) ",
         );
         qb.push_values(chunk, |mut b, u| {
             b.push_bind(&u.login)
@@ -1588,7 +1801,8 @@ async fn write_users(
                 .push_bind(&u.city)
                 .push_bind(&u.work_position)
                 .push_bind(u.photo_id.filter(|id| file_ids.contains(id)))
-                .push_bind(sqlx::types::Json(&u.extra));
+                .push_bind(sqlx::types::Json(&u.extra))
+                .push_bind(&xml_ids[&u.bitrix_id]);
         });
         // Уже вошедший через CMS хранит argon2 — его не затираем старым хешем
         qb.push(
@@ -1598,6 +1812,8 @@ async fn write_users(
                 second_name = EXCLUDED.second_name, phone = EXCLUDED.phone, city = EXCLUDED.city,
                 work_position = EXCLUDED.work_position, photo_id = EXCLUDED.photo_id,
                 extra = users.extra || EXCLUDED.extra,
+                -- Ид контрагента, выданный обменом с 1С, пустым из Битрикса не затирается
+                xml_id = CASE WHEN EXCLUDED.xml_id = '' THEN users.xml_id ELSE EXCLUDED.xml_id END,
                 password_hash = CASE WHEN users.password_hash LIKE '$argon2%'
                                      THEN users.password_hash ELSE EXCLUDED.password_hash END
               RETURNING id, external_id",
@@ -2358,6 +2574,52 @@ async fn read_sale(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
         }
     }
 
+    if mysql_table_exists(my, "b_sale_bizval_persondomain").await? {
+        for row in sqlx::query(
+            "SELECT CAST(PERSON_TYPE_ID AS SIGNED), CAST(DOMAIN AS CHAR)
+             FROM b_sale_bizval_persondomain ORDER BY PERSON_TYPE_ID",
+        )
+        .fetch_all(my)
+        .await?
+        {
+            if let Some(person_type) = int_col(&row, 0) {
+                sale.domains.push((person_type, str_col(&row, 1)));
+            }
+        }
+    }
+    if mysql_table_exists(my, "b_sale_bizval").await? {
+        sale.bizval_loaded = true;
+        for row in sqlx::query(
+            "SELECT CAST(CODE_KEY AS CHAR), CAST(CONSUMER_KEY AS CHAR), CAST(PERSON_TYPE_ID AS SIGNED),
+                    CAST(PROVIDER_KEY AS CHAR), CAST(IFNULL(PROVIDER_VALUE, '') AS CHAR)
+             FROM b_sale_bizval WHERE CONSUMER_KEY IN ('1C', 'COMMON')",
+        )
+        .fetch_all(my)
+        .await?
+        {
+            sale.bizval.push(BizvalRow {
+                code: str_col(&row, 0),
+                consumer: str_col(&row, 1),
+                person_type_id: int_col(&row, 2).unwrap_or(0),
+                provider: str_col(&row, 3),
+                value: str_col(&row, 4),
+            });
+        }
+    }
+    if mysql_table_exists(my, "b_sale_bizval_code_1c").await? {
+        for row in sqlx::query(
+            "SELECT CAST(PERSON_TYPE_ID AS SIGNED), CAST(CODE_INDEX AS SIGNED), CAST(NAME AS CHAR)
+             FROM b_sale_bizval_code_1c",
+        )
+        .fetch_all(my)
+        .await?
+        {
+            if let (Some(person_type), Some(index)) = (int_col(&row, 0), int_col(&row, 1)) {
+                sale.rekv_names.push((person_type, index, str_col(&row, 2)));
+            }
+        }
+    }
+
     // Ограничения служб: (служба, тип 0 — доставка / 1 — оплата, класс, параметры)
     let restrictions: Vec<(i64, i64, String, String)> = sqlx::query(
         "SELECT CAST(SERVICE_ID AS SIGNED), CAST(SERVICE_TYPE AS SIGNED), CAST(CLASS_NAME AS CHAR),
@@ -2661,7 +2923,155 @@ async fn write_sale(tx: &mut sqlx::PgConnection, sale: &Sale) -> anyhow::Result<
         .execute(&mut *tx)
         .await?;
     }
+    for (person_type, domain) in &sale.domains {
+        if !person_types.contains(person_type) || !matches!(domain.as_str(), "I" | "E") {
+            continue;
+        }
+        sqlx::query("UPDATE person_types SET domain = $2 WHERE id = $1")
+            .bind(person_type)
+            .bind(domain)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if sale.bizval_loaded {
+        let mut scope: Vec<i64> = person_types.iter().copied().collect();
+        scope.push(0);
+        sqlx::query("DELETE FROM exchange_order_map WHERE person_type_id = ANY($1)")
+            .bind(&scope)
+            .execute(&mut *tx)
+            .await?;
+        let properties: HashSet<i64> = properties.iter().copied().collect();
+        for e in order_map(sale, &person_types, &properties) {
+            sqlx::query(
+                "INSERT INTO exchange_order_map (person_type_id, code, name, source, value)
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(e.person_type_id)
+            .bind(&e.code)
+            .bind(&e.name)
+            .bind(e.source.code())
+            .bind(&e.value)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
     Ok(())
+}
+
+/// Соответствие реквизитов для 1С из `b_sale_bizval`, с приоритетом как у
+/// `BusinessValue::getMapping`: «1C» типа → «1C» для всех → «COMMON» типа → «COMMON» для всех.
+/// Тип плательщика 0 — для всех: строка типа пишется, только если она важнее строки типа 0.
+/// Свойства — перенесённые (id сохраняются), поля пользователя и заказа — свои имена;
+/// чего у нас нет, пропускается с предупреждением.
+fn order_map(
+    sale: &Sale,
+    person_types: &HashSet<i64>,
+    properties: &HashSet<i64>,
+) -> Vec<crate::exchange::sale::settings::MapEntry> {
+    use crate::exchange::sale::settings::{CONTRAGENT_CODES, MapEntry, MapSource};
+    // (1С?, тип плательщика, наш код) → (название, поставщик, значение)
+    let mut rows: HashMap<(bool, i64, String), (String, &str, &str)> = HashMap::new();
+    for r in &sale.bizval {
+        let is_1c = match r.consumer.as_str() {
+            "1C" => true,
+            "COMMON" => false,
+            _ => continue,
+        };
+        let (code, name) = if let Some(rest) = r.code.strip_prefix("1C_REKV_") {
+            // 1C_REKV_<тип плательщика>_<номер> → 1C_REKV_<номер>
+            let Some((pt, index)) = rest
+                .split_once('_')
+                .and_then(|(pt, i)| Some((pt.parse::<i64>().ok()?, i.parse::<i64>().ok()?)))
+            else {
+                continue;
+            };
+            if !is_1c {
+                continue;
+            }
+            let name = sale
+                .rekv_names
+                .iter()
+                .find(|(p, i, _)| *p == pt && *i == index)
+                .map(|(_, _, n)| n.clone())
+                .unwrap_or_default();
+            (format!("1C_REKV_{index}"), name)
+        } else if CONTRAGENT_CODES.iter().any(|(c, _, _)| *c == r.code) {
+            (r.code.clone(), String::new())
+        } else {
+            continue;
+        };
+        rows.insert(
+            (is_1c, r.person_type_id, code),
+            (name, r.provider.as_str(), r.value.as_str()),
+        );
+    }
+    let mut keys: Vec<(i64, String)> = rows
+        .keys()
+        .filter(|(_, pt, _)| *pt == 0 || person_types.contains(pt))
+        .map(|(_, pt, code)| (*pt, code.clone()))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    let mut out = Vec::new();
+    for (pt, code) in keys {
+        let exact = rows.get(&(true, pt, code.clone()));
+        let picked = match exact {
+            Some(row) => row,
+            // «1C» для всех важнее «COMMON» типа — её даст строка типа 0
+            None if pt != 0 && rows.contains_key(&(true, 0, code.clone())) => continue,
+            None => match rows.get(&(false, pt, code.clone())) {
+                Some(row) => row,
+                None => continue,
+            },
+        };
+        let (name, provider, value) = picked;
+        let mapped = match *provider {
+            "PROPERTY" => value
+                .trim()
+                .parse::<i64>()
+                .ok()
+                .filter(|id| properties.contains(id))
+                .map(|id| (MapSource::Property, id.to_string())),
+            "USER" => match *value {
+                "EMAIL" => Some("email"),
+                "LOGIN" => Some("login"),
+                "NAME" => Some("name"),
+                "LAST_NAME" => Some("last_name"),
+                "SECOND_NAME" => Some("second_name"),
+                "PERSONAL_PHONE" | "PERSONAL_MOBILE" => Some("phone"),
+                _ => None,
+            }
+            .map(|f| (MapSource::User, f.to_string())),
+            "ORDER" => match *value {
+                "ID" => Some("id"),
+                "ACCOUNT_NUMBER" => Some("account_number"),
+                "USER_DESCRIPTION" => Some("user_comment"),
+                "PRICE" | "SHOULD_PAY" => Some("price"),
+                _ => None,
+            }
+            .map(|f| (MapSource::Order, f.to_string())),
+            "VALUE" | "INPUT" => Some((MapSource::Value, value.to_string())),
+            _ => None,
+        };
+        let Some((source, value)) = mapped else {
+            tracing::warn!(
+                code,
+                person_type = pt,
+                provider,
+                value,
+                "перенос из Битрикса: соответствие реквизита для 1С не перенесено"
+            );
+            continue;
+        };
+        out.push(MapEntry {
+            person_type_id: pt,
+            code,
+            name: name.clone(),
+            source,
+            value,
+        });
+    }
+    out
 }
 
 /// Торговые предложения: связь коллекций, `product_id` предложений (родительский товар),
@@ -3367,5 +3777,231 @@ mod tests {
         assert_eq!(s.interval_secs, 120);
         assert_eq!(s.file_limit, 1_000_000);
         assert!(!s.use_zip);
+    }
+
+    /// Обмен заказами: опции `sale/1C_*`, соответствия `b_sale_bizval`, домены типов
+    /// плательщика и `b_user.XML_ID` переезжают из Битрикса.
+    #[sqlx::test]
+    async fn import_carries_sale_exchange_options(db: PgPool) {
+        use crate::exchange::sale::settings::{MapEntry, MapSource, SaleSettings, load_map};
+        use chrono::TimeZone;
+        let mut data = Data::default();
+        for (name, value) in [
+            ("1C_CHANGE_STATUS_FROM_1C", "Y"),
+            ("1C_FINAL_STATUS_ON_DELIVERY", "F"),
+            ("1C_IMPORT_NEW_ORDERS", "N"),
+            ("1C_REPLACE_CURRENCY", "руб."),
+            ("1C_EXPORT_PAYED_ORDERS", ""),
+            ("1C_IMPORT_UPDATE_BASKET_QUANTITY", ""),
+            ("1C_IMPORT_DEFAULT_PS_B", "4"),
+            ("1C_IMPORT_DEFAULT_PS", "0"),
+            ("1C_SALE_ACCOUNT_NUMBER_SHOP_PREFIX", "TR"),
+            ("1C_INTERVAL", "999"),
+            ("last_export_time_committed_/x", "1778677162"),
+            ("last_export_time_committed_/old", "1700000000"),
+        ] {
+            data.options
+                .push(("sale".into(), name.into(), value.into()));
+        }
+        let user = |bitrix_id: i64, login: &str, xml_id: &str| UserRow {
+            bitrix_id,
+            login: login.into(),
+            email: String::new(),
+            name: String::new(),
+            last_name: String::new(),
+            password_hash: "x".into(),
+            active: true,
+            second_name: String::new(),
+            phone: String::new(),
+            city: String::new(),
+            work_position: String::new(),
+            photo_id: None,
+            extra: Map::new(),
+            groups: Vec::new(),
+            xml_id: xml_id.into(),
+        };
+        data.users = vec![
+            user(10, "ivan", " 10#ivan#Иванов Иван "),
+            user(11, "petr", ""),
+            // Повтор внешнего кода не ломает перенос
+            user(12, "sidor", "10#ivan#Иванов Иван"),
+        ];
+        let sale = &mut data.sale;
+        sale.person_types = vec![
+            (1, String::new(), "Физлицо".into(), true, 100),
+            (2, String::new(), "Юрлицо".into(), true, 200),
+        ];
+        sale.domains = vec![(2, "E".into()), (1, "I".into()), (3, "E".into())];
+        let prop = |id: i64, person_type_id: i64| SalePropertyRow {
+            id,
+            person_type_id,
+            group_id: None,
+            code: format!("P{id}"),
+            name: format!("Свойство {id}"),
+            kind: "text",
+            required: false,
+            util: false,
+            flags: [false; 7],
+            default_value: String::new(),
+            description: String::new(),
+            sort: 100,
+            active: true,
+            multiple: false,
+        };
+        sale.properties = vec![prop(7, 1), prop(9, 2)];
+        let bv = |code: &str, consumer: &str, pt: i64, provider: &str, value: &str| BizvalRow {
+            code: code.into(),
+            consumer: consumer.into(),
+            person_type_id: pt,
+            provider: provider.into(),
+            value: value.into(),
+        };
+        sale.bizval = vec![
+            // 1С поверх общего значения
+            bv("BUYER_PERSON_EMAIL", "COMMON", 0, "USER", "EMAIL"),
+            bv("BUYER_PERSON_EMAIL", "1C", 1, "PROPERTY", "7"),
+            // 1С для всех типов важнее общего значения типа
+            bv("BUYER_PERSON_PHONE", "COMMON", 1, "USER", "PERSONAL_PHONE"),
+            bv("BUYER_PERSON_PHONE", "1C", 0, "VALUE", "+7"),
+            bv("BUYER_PERSON_NAME_LAST", "COMMON", 1, "USER", "LAST_NAME"),
+            bv("BUYER_COMPANY_INN", "1C", 2, "PROPERTY", "9"),
+            bv("BUYER_COMPANY_NAME", "1C", 2, "ORDER", "USER_DESCRIPTION"),
+            // Свойство не перенесено, поставщик не поддерживается, тип плательщика не перенесён,
+            // код не из обмена с 1С, неизвестное поле пользователя
+            bv("BUYER_COMPANY_KPP", "1C", 2, "PROPERTY", "999"),
+            bv("BUYER_PERSON_NAME", "1C", 1, "COMPANY", "NAME"),
+            bv("BUYER_PERSON_NAME_FIRST", "1C", 3, "USER", "NAME"),
+            bv("PAYMENT_ID", "COMMON", 0, "PAYMENT", "ID"),
+            bv("BUYER_PERSON_INN", "1C", 1, "USER", "UF_INN"),
+            // Произвольные реквизиты
+            bv("1C_REKV_2_1", "1C", 2, "INPUT", "Сайт"),
+            bv("1C_REKV_2_2", "1C", 2, "ORDER", "ACCOUNT_NUMBER"),
+        ];
+        sale.rekv_names = vec![
+            (2, 1, "Канал продаж".into()),
+            (2, 2, "Номер на сайте".into()),
+        ];
+        sale.bizval_loaded = true;
+
+        // Старое соответствие перезаписывается
+        sqlx::query("INSERT INTO person_types (id, name) VALUES (1, 'Старый')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO exchange_order_map (person_type_id, code, source, value)
+             VALUES (1, 'BUYER_PERSON_ZIP', 'value', 'old')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let props = resolve_properties(&mut data);
+        let mut tx = db.begin().await.unwrap();
+        write_all(&mut tx, &data, &props).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let s = SaleSettings::load(&db).await.unwrap();
+        assert!(s.change_status_from_1c);
+        assert_eq!(s.final_status_on_delivery.as_deref(), Some("F"));
+        assert!(!s.import_new_orders);
+        assert_eq!(s.replace_currency, "руб.");
+        assert!(!s.export_paid_only);
+        // У Битрикса пустое значение — «нет»
+        assert!(!s.update_basket_quantity);
+        assert_eq!(s.default_ps_cashless, Some(4));
+        assert_eq!(s.default_ps_cash, None);
+        assert_eq!(s.number_prefix, "TR");
+        assert!(s.import_new_payments);
+        assert_eq!(
+            s.last_export_committed,
+            Some(Utc.timestamp_opt(1_778_677_162, 0).unwrap())
+        );
+        // Интервал модуля sale не переносится: он общий с каталогом
+        let interval: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM options WHERE name IN ('interval', '1C_INTERVAL')",
+        )
+        .fetch_optional(&db)
+        .await
+        .unwrap();
+        assert_eq!(interval, None);
+
+        let mut map = load_map(&db).await.unwrap();
+        map.sort_by(|a, b| (a.person_type_id, &a.code).cmp(&(b.person_type_id, &b.code)));
+        let e = |pt: i64, code: &str, name: &str, source: MapSource, value: &str| MapEntry {
+            person_type_id: pt,
+            code: code.into(),
+            name: name.into(),
+            source,
+            value: value.into(),
+        };
+        assert_eq!(
+            map,
+            vec![
+                e(0, "BUYER_PERSON_EMAIL", "", MapSource::User, "email"),
+                e(0, "BUYER_PERSON_PHONE", "", MapSource::Value, "+7"),
+                e(1, "BUYER_PERSON_EMAIL", "", MapSource::Property, "7"),
+                e(
+                    1,
+                    "BUYER_PERSON_NAME_LAST",
+                    "",
+                    MapSource::User,
+                    "last_name"
+                ),
+                e(2, "1C_REKV_1", "Канал продаж", MapSource::Value, "Сайт"),
+                e(
+                    2,
+                    "1C_REKV_2",
+                    "Номер на сайте",
+                    MapSource::Order,
+                    "account_number"
+                ),
+                e(2, "BUYER_COMPANY_INN", "", MapSource::Property, "9"),
+                e(
+                    2,
+                    "BUYER_COMPANY_NAME",
+                    "",
+                    MapSource::Order,
+                    "user_comment"
+                ),
+            ]
+        );
+
+        let domains: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, domain::text FROM person_types ORDER BY id")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(domains, vec![(1, "I".into()), (2, "E".into())]);
+
+        let users: Vec<(String, String)> =
+            sqlx::query_as("SELECT login, xml_id FROM users ORDER BY login")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            users,
+            vec![
+                ("ivan".into(), "10#ivan#Иванов Иван".into()),
+                ("petr".into(), String::new()),
+                ("sidor".into(), String::new()),
+            ]
+        );
+
+        // Повторный перенос не стирает Ид контрагента, выданный обменом
+        sqlx::query("UPDATE users SET xml_id = 'issued' WHERE login = 'petr'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut tx = db.begin().await.unwrap();
+        write_users(&mut tx, &data.users, &[], &HashSet::new())
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let petr: String = sqlx::query_scalar("SELECT xml_id FROM users WHERE login = 'petr'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(petr, "issued");
     }
 }

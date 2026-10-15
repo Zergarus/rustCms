@@ -332,6 +332,19 @@ pub async fn set_status(
     comment: &str,
 ) -> sqlx::Result<bool> {
     let mut tx = db.begin().await?;
+    let changed = set_status_in(&mut tx, order_id, status, admin_id, comment).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// [`set_status`] в транзакции вызывающего (обмен с 1С меняет статус вместе с документом).
+pub async fn set_status_in(
+    tx: &mut PgConnection,
+    order_id: i64,
+    status: &str,
+    admin_id: Option<i64>,
+    comment: &str,
+) -> sqlx::Result<bool> {
     let changed = sqlx::query(
         "UPDATE orders SET status = $2, updated_at = now() WHERE id = $1 AND status <> $2",
     )
@@ -352,13 +365,19 @@ pub async fn set_status(
         .execute(&mut *tx)
         .await?;
     }
-    tx.commit().await?;
     Ok(changed)
 }
 
 /// Отметка оплаты заказа и его оплаты. `false` — уже так.
 pub async fn set_paid(db: &PgPool, order_id: i64, paid: bool) -> sqlx::Result<bool> {
     let mut tx = db.begin().await?;
+    let changed = set_paid_in(&mut tx, order_id, paid).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// [`set_paid`] в транзакции вызывающего.
+pub async fn set_paid_in(tx: &mut PgConnection, order_id: i64, paid: bool) -> sqlx::Result<bool> {
     let changed = sqlx::query(
         "UPDATE orders SET paid = $2, paid_at = CASE WHEN $2 THEN now() END, updated_at = now()
          WHERE id = $1 AND paid <> $2",
@@ -378,7 +397,6 @@ pub async fn set_paid(db: &PgPool, order_id: i64, paid: bool) -> sqlx::Result<bo
         .execute(&mut *tx)
         .await?;
     }
-    tx.commit().await?;
     Ok(changed)
 }
 
@@ -423,6 +441,18 @@ pub async fn set_canceled(
     reason: &str,
 ) -> sqlx::Result<bool> {
     let mut tx = db.begin().await?;
+    let changed = set_canceled_in(&mut tx, order_id, canceled, reason).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// [`set_canceled`] в транзакции вызывающего.
+pub async fn set_canceled_in(
+    tx: &mut PgConnection,
+    order_id: i64,
+    canceled: bool,
+    reason: &str,
+) -> sqlx::Result<bool> {
     let Some((was, deducted)): Option<(bool, bool)> =
         sqlx::query_as("SELECT canceled, stock_deducted FROM orders WHERE id = $1 FOR UPDATE")
             .bind(order_id)
@@ -434,13 +464,13 @@ pub async fn set_canceled(
     if was == canceled {
         return Ok(false);
     }
-    let lines = stock_lines(&mut tx, order_id).await?;
-    let traced = traced_locked(&mut tx, &lines).await?;
+    let lines = stock_lines(tx, order_id).await?;
+    let traced = traced_locked(tx, &lines).await?;
     let deducted = if canceled && deducted {
-        apply(&mut tx, &stock::plan(&lines, &[], &traced)).await?;
+        apply(tx, &stock::plan(&lines, &[], &traced)).await?;
         false
     } else if !canceled && !deducted {
-        apply(&mut tx, &stock::plan(&[], &lines, &traced)).await?;
+        apply(tx, &stock::plan(&[], &lines, &traced)).await?;
         true
     } else {
         deducted
@@ -456,7 +486,6 @@ pub async fn set_canceled(
     .bind(deducted)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
     Ok(true)
 }
 
@@ -705,6 +734,43 @@ mod tests {
         assert_eq!(file_ids("5,7"), vec![5, 7]);
         assert_eq!(file_ids(" 5 , abc,,7,5,-1,0"), vec![5, 7]);
         assert!(file_ids("").is_empty());
+    }
+
+    #[sqlx::test]
+    async fn repo_actions_run_inside_caller_transaction(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        sqlx::query("INSERT INTO order_statuses (code, name) VALUES ('P', 'Оплачен')")
+            .execute(&db)
+            .await
+            .unwrap();
+        let state = |db: PgPool| async move {
+            sqlx::query_as::<_, (String, bool, bool, i64)>(
+                "SELECT status, paid, canceled,
+                        (SELECT count(*) FROM order_status_history WHERE order_id = orders.id)
+                 FROM orders WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        let before = state(db.clone()).await;
+
+        let mut tx = db.begin().await.unwrap();
+        assert!(set_status_in(&mut tx, id, "P", None, "").await.unwrap());
+        assert!(set_paid_in(&mut tx, id, true).await.unwrap());
+        assert!(set_canceled_in(&mut tx, id, true, "тест").await.unwrap());
+        tx.rollback().await.unwrap();
+        assert_eq!(state(db.clone()).await, before);
+        assert_eq!(amounts(&db, f.product_id).await, (10.0, 5.0));
+
+        // Пул-варианты работают как прежде
+        assert!(set_status(&db, id, "P", None, "").await.unwrap());
+        assert!(!set_status(&db, id, "P", None, "").await.unwrap());
+        assert!(set_paid(&db, id, true).await.unwrap());
+        assert!(set_canceled(&db, id, true, "тест").await.unwrap());
+        assert_eq!(state(db.clone()).await, ("P".into(), true, true, 2));
     }
 
     #[sqlx::test]

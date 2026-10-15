@@ -3,5 +3,6 @@
 pub mod apply;
 pub mod cml;
 pub mod http;
+pub mod sale;
 pub mod session;
 pub mod settings;
