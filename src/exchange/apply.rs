@@ -410,8 +410,9 @@ async fn apply_sections(
         match existing {
             None => {
                 let code = if settings.translit_on_add {
-                    let c = slugify(&group.name);
-                    if is_valid_slug(&c) { c } else { String::new() }
+                    unique_section_code(conn, collection.id, parent_id, None, &group.name)
+                        .await?
+                        .unwrap_or_default()
                 } else {
                     String::new()
                 };
@@ -452,8 +453,8 @@ async fn apply_sections(
                     moved = true;
                 }
                 let code = if settings.translit_on_update {
-                    let c = slugify(&group.name);
-                    if is_valid_slug(&c) { Some(c) } else { None }
+                    unique_section_code(conn, collection.id, parent_id, Some(id), &group.name)
+                        .await?
                 } else {
                     None
                 };
@@ -506,6 +507,42 @@ async fn apply_sections(
         }
     }
     Ok(())
+}
+
+/// Код раздела: транслит названия, уникальный среди соседей (`код`, `код-2`…).
+/// Негодный транслит — `None`.
+async fn unique_section_code(
+    conn: &mut PgConnection,
+    collection_id: i64,
+    parent_id: Option<i64>,
+    self_id: Option<i64>,
+    name: &str,
+) -> Result<Option<String>, ApplyError> {
+    let base = slugify(name);
+    if !is_valid_slug(&base) {
+        return Ok(None);
+    }
+    let taken: HashSet<String> = sqlx::query_scalar(
+        "SELECT code FROM collection_sections
+         WHERE collection_id = $1 AND parent_id IS NOT DISTINCT FROM $2
+           AND id IS DISTINCT FROM $3
+           AND (code = $4 OR left(code, length($4) + 1) = $4 || '-')",
+    )
+    .bind(collection_id)
+    .bind(parent_id)
+    .bind(self_id)
+    .bind(&base)
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .collect();
+    let mut code = base.clone();
+    let mut n = 2;
+    while taken.contains(&code) {
+        code = format!("{base}-{n}");
+        n += 1;
+    }
+    Ok(Some(code))
 }
 
 /// Вид поля для свойства; существующее строковое `text` остаётся `text`.
@@ -2386,6 +2423,65 @@ mod tests {
         let st = run(&db, &base(Action::Delete), &deleted).await;
         assert_eq!(count(db.clone()).await, (0, 0));
         assert_eq!(st.deleted.get("sections"), Some(&1));
+    }
+
+    #[sqlx::test]
+    async fn section_codes_are_unique_among_siblings(db: PgPool) {
+        let mut p = package().remove(0);
+        {
+            let groups = &mut p.classifier.as_mut().unwrap().groups;
+            // g-child и g-child2 — дети g-root; g-root2 — корень, как и g-root
+            for g in groups.iter_mut() {
+                g.name = "Одинаковое".into();
+            }
+        }
+        run(&db, &Settings::default(), &p).await;
+        let codes: Vec<(String, String)> =
+            sqlx::query_as("SELECT xml_id, code FROM collection_sections ORDER BY xml_id")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            codes,
+            [
+                ("g-child".to_string(), "odinakovoe".to_string()),
+                ("g-child2".to_string(), "odinakovoe-2".to_string()),
+                ("g-root".to_string(), "odinakovoe".to_string()),
+                ("g-root2".to_string(), "odinakovoe-2".to_string()),
+            ]
+        );
+        // транслит при обновлении: раздел сохраняет свой код, а не ловит код соседа
+        let on = Settings {
+            translit_on_update: true,
+            ..Settings::default()
+        };
+        p.classifier.as_mut().unwrap().groups[1].name = "Новое имя".into();
+        run(&db, &on, &p).await;
+        let codes: Vec<String> =
+            sqlx::query_scalar("SELECT code FROM collection_sections ORDER BY xml_id")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            codes,
+            ["novoe-imya", "odinakovoe-2", "odinakovoe", "odinakovoe-2"]
+        );
+    }
+
+    #[sqlx::test]
+    async fn same_slug_properties_get_distinct_codes(db: PgPool) {
+        let mut p = package().remove(1);
+        for prop in &mut p.classifier.as_mut().unwrap().properties {
+            prop.name = "Цвет!".into();
+            prop.deleted = false;
+        }
+        run(&db, &Settings::default(), &p).await;
+        let codes: Vec<String> =
+            sqlx::query_scalar("SELECT code FROM collection_fields ORDER BY sort")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(codes, ["tsvet", "tsvet_2", "tsvet_3", "tsvet_4"]);
     }
 
     #[sqlx::test]
