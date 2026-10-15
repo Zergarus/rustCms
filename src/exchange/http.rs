@@ -151,9 +151,16 @@ async fn process(
         text,
     )
         .into_response();
+    let secure = if state.config.cookie_secure {
+        "; Secure"
+    } else {
+        ""
+    };
     if let Some(token) = set_cookie
-        && let Ok(v) =
-            HeaderValue::from_str(&format!("{}={token}; Path=/; HttpOnly", session::COOKIE))
+        && let Ok(v) = HeaderValue::from_str(&format!(
+            "{}={token}; Path=/; HttpOnly; SameSite=Strict{secure}",
+            session::COOKIE
+        ))
     {
         response.headers_mut().insert(header::SET_COOKIE, v);
     }
@@ -735,6 +742,31 @@ mod tests {
                     .is_none()
         );
         assert!(c.get(&token, "mode=init").await.starts_with("failure"));
+    }
+
+    #[sqlx::test]
+    async fn session_cookie_is_strict(db: PgPool) {
+        exchange_user(&db, "exch").await;
+        for secure in [false, true] {
+            let mut state = test_state(db.clone());
+            let mut config = (*state.config).clone();
+            config.cookie_secure = secure;
+            state.config = std::sync::Arc::new(config);
+            let req = Request::builder()
+                .uri(format!("{BASE}&mode=checkauth"))
+                .header(header::AUTHORIZATION, basic("exch", "password123"))
+                .body(Body::empty())
+                .unwrap();
+            let res = crate::app(state).oneshot(req).await.unwrap();
+            let cookie = res.headers()[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .to_string();
+            assert!(cookie.starts_with("CMS_1C_SID="), "{cookie}");
+            assert!(cookie.contains("HttpOnly"), "{cookie}");
+            assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+            assert_eq!(cookie.contains("Secure"), secure, "{cookie}");
+        }
     }
 
     #[sqlx::test]
