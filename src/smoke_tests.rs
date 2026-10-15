@@ -2648,14 +2648,39 @@ async fn exchange_settings_page(db: PgPool) {
     assert_eq!((s.interval_secs, s.file_limit), (45, 100 * 1024 * 1024));
 
     // некорректный ввод: форма с ошибкой, ничего не сохранено
-    for bad in [
-        "interval_secs=0&file_limit_mb=10",
-        "interval_secs=30&file_limit_mb=0",
-    ] {
+    let before = Settings::load(&db).await.unwrap();
+    let plain: i64 = sqlx::query_scalar("SELECT id FROM collections WHERE code = 'news'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    let too_big = u64::MAX / (1024 * 1024) + 1;
+    let bad_forms = [
+        "interval_secs=0&file_limit_mb=10".to_string(),
+        "interval_secs=30&file_limit_mb=0".to_string(),
+        "interval_secs=abc&file_limit_mb=10".to_string(),
+        "interval_secs=30&file_limit_mb=abc".to_string(),
+        "interval_secs=3601&file_limit_mb=10".to_string(),
+        "interval_secs=30&file_limit_mb=99999999999999999999".to_string(),
+        format!("interval_secs=30&file_limit_mb={too_big}"),
+        "default_collection=abc&interval_secs=30&file_limit_mb=10".to_string(),
+        "default_collection=12x&interval_secs=30&file_limit_mb=10".to_string(),
+        "default_collection=999999&interval_secs=30&file_limit_mb=10".to_string(),
+        format!("default_collection={plain}&interval_secs=30&file_limit_mb=10"),
+    ];
+    for bad in &bad_forms {
         let (status, html) = post_form(&app, "/admin/exchange", &cookie, bad).await;
         assert_eq!(status, StatusCode::OK, "{bad}");
         assert!(html.contains("class=\"alert"), "{bad}: {html}");
+        assert_eq!(Settings::load(&db).await.unwrap(), before, "{bad}");
     }
+    let (_, html) = post_form(
+        &app,
+        "/admin/exchange",
+        &cookie,
+        "default_collection=abc&interval_secs=30&file_limit_mb=10",
+    )
+    .await;
+    assert!(html.contains("Коллекция по умолчанию: некорректный номер"));
     assert_eq!(Settings::load(&db).await.unwrap().interval_secs, 45);
 
     // права: без exchange.1c страница закрыта, меню без пункта

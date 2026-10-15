@@ -155,7 +155,13 @@ pub async fn save(
     Form(form): Form<ExchangeForm>,
 ) -> AppResult<Response> {
     user.require(EXCHANGE_1C)?;
-    let default_collection_id = form.default_collection.trim().parse::<i64>().ok();
+    let raw_collection = form.default_collection.trim();
+    let collection_parsed = if raw_collection.is_empty() {
+        Ok(None)
+    } else {
+        raw_collection.parse::<i64>().map(Some)
+    };
+    let default_collection_id = collection_parsed.clone().ok().flatten();
     let mut settings = Settings {
         default_collection_id,
         section_action: Action::from_code(&form.section_action),
@@ -190,7 +196,9 @@ pub async fn save(
             .await?
         }
     };
-    let error = if interval.is_none() {
+    let error = if collection_parsed.is_err() {
+        Some("Коллекция по умолчанию: некорректный номер")
+    } else if interval.is_none() {
         Some("Интервал — целое число секунд от 1 до 3600")
     } else if limit_mb.is_none() {
         Some("Лимит файла — целое число мегабайт, не меньше 1")
