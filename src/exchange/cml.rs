@@ -627,7 +627,8 @@ impl State {
     }
 
     /// Вес товара в граммах: «Вес» (элемент или реквизит) в 1С хранится в килограммах, как и в Битриксе;
-    /// граммы берутся как есть только если реквизит «ЕдиницаВеса» явно называет граммы (грамм, «г», код ОКЕИ 163).
+    /// граммы берутся как есть только если реквизит «ЕдиницаВеса» явно называет граммы (грамм, «г», код ОКЕИ 163),
+    /// миллиграммы («мг», код 161) делятся на 1000.
     fn weight_grams(&self) -> Option<f64> {
         let raw = self
             .weight_requisite
@@ -635,10 +636,20 @@ impl State {
             .or(self.weight_element.as_ref())?;
         let value = number(raw).ok().flatten()?;
         let unit = self.weight_unit.as_str();
-        // Сначала килограммы («килограмм» содержит «грамм»), затем граммы; неизвестная единица — килограммы.
+        // Сначала кило- и миллиграммы (оба содержат «грамм»), затем граммы;
+        // неизвестная единица — килограммы.
         let kilograms = unit.contains("кг") || unit.starts_with("килограмм") || unit == "166";
-        let grams = !kilograms && (unit.contains("грамм") || unit == "г" || unit == "163");
-        Some(if grams { value } else { value * 1000.0 })
+        let milligrams =
+            !kilograms && (unit == "мг" || unit.starts_with("миллиграмм") || unit == "161");
+        let grams =
+            !kilograms && !milligrams && (unit.contains("грамм") || unit == "г" || unit == "163");
+        Some(if milligrams {
+            value / 1000.0
+        } else if grams {
+            value
+        } else {
+            value * 1000.0
+        })
     }
 }
 
@@ -956,6 +967,62 @@ mod tests {
         for unit in ["г", "грамм", "граммы", "163"] {
             assert_eq!(weight_of("1,5", unit), Some(1.5), "{unit}");
         }
+        for unit in ["мг", "миллиграмм", "миллиграммы", "161"] {
+            assert_eq!(weight_of("1500", unit), Some(1.5), "{unit}");
+        }
+    }
+
+    fn goods_xml(inner: &str) -> Vec<u8> {
+        format!(
+            "<КоммерческаяИнформация><Каталог><Товары><Товар><Ид>x</Ид>{inner}</Товар></Товары></Каталог></КоммерческаяИнформация>"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn cdata_and_entities_in_text() {
+        let p = load(&goods_xml(
+            "<Наименование>Масло &quot;Люкс&quot; &lt;5W&gt;</Наименование>\
+             <Описание><![CDATA[<b>жирный</b> & текст]]></Описание>",
+        ));
+        let g = &p.catalog.unwrap().goods[0];
+        assert_eq!(g.name, "Масло \"Люкс\" <5W>");
+        assert_eq!(g.description, "<b>жирный</b> & текст");
+    }
+
+    #[test]
+    fn invalid_number_is_error() {
+        let xml = "<КоммерческаяИнформация><ПакетПредложений><Предложения><Предложение>\
+                   <Ид>x</Ид><Количество>много</Количество></Предложение></Предложения>\
+                   </ПакетПредложений></КоммерческаяИнформация>";
+        match parse(xml.as_bytes()) {
+            Err(CmlError::Number(n)) => assert_eq!(n, "много"),
+            other => panic!("ожидалась ошибка числа: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn weight_requisite_wins_over_element() {
+        let weight = |inner: &str| load(&goods_xml(inner)).catalog.unwrap().goods[0].weight_grams;
+        assert_eq!(weight("<Вес>2</Вес>"), Some(2000.0));
+        assert_eq!(
+            weight(
+                "<Вес>2</Вес><ЗначенияРеквизитов><ЗначениеРеквизита><Наименование>Вес</Наименование>\
+                 <Значение>0,5</Значение></ЗначениеРеквизита></ЗначенияРеквизитов>"
+            ),
+            Some(500.0)
+        );
+        assert_eq!(weight(""), None);
+    }
+
+    #[test]
+    fn store_attribute_without_quantity_is_zero() {
+        let xml = r#"<КоммерческаяИнформация><ПакетПредложений><Предложения><Предложение><Ид>x</Ид><Склад ИдСклада="st-1"/><Склад ИдСклада="st-2" КоличествоНаСкладе="3"/></Предложение></Предложения></ПакетПредложений></КоммерческаяИнформация>"#;
+        let o = &load(xml.as_bytes()).offers.unwrap().offers[0];
+        assert_eq!(
+            o.rests,
+            Some(vec![("st-1".to_string(), 0.0), ("st-2".to_string(), 3.0)])
+        );
     }
 
     #[test]
