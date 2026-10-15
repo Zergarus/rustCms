@@ -19,6 +19,8 @@ use crate::{
 
 const LOG_ROWS: i64 = 50;
 const MB: u64 = 1024 * 1024;
+/// Наибольший лимит части файла в форме, МБ (4 ГБ).
+const MAX_FILE_LIMIT_MB: u64 = 4096;
 
 #[derive(Serialize)]
 struct LogRow {
@@ -180,13 +182,13 @@ pub async fn save(
         .trim()
         .parse::<u32>()
         .ok()
-        .filter(|n| (1..=3600).contains(n));
+        .filter(|n| (0..=3600).contains(n));
     let limit_mb = form
         .file_limit_mb
         .trim()
         .parse::<u64>()
         .ok()
-        .filter(|n| (1..=u64::MAX / MB).contains(n));
+        .filter(|n| (1..=MAX_FILE_LIMIT_MB).contains(n));
     let collection_ok = match default_collection_id {
         None => true,
         Some(id) => {
@@ -202,9 +204,9 @@ pub async fn save(
     let error = if collection_parsed.is_err() {
         Some("Коллекция по умолчанию: некорректный номер")
     } else if interval.is_none() {
-        Some("Интервал — целое число секунд от 1 до 3600")
+        Some("Интервал — целое число секунд от 0 (без ограничения) до 3600")
     } else if limit_mb.is_none() {
-        Some("Лимит файла — целое число мегабайт, не меньше 1")
+        Some("Лимит файла — целое число мегабайт от 1 до 4096")
     } else if !collection_ok {
         Some("Коллекция по умолчанию должна быть коллекцией каталога (не предложений)")
     } else {

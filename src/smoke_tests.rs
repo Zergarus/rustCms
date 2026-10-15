@@ -2620,7 +2620,7 @@ async fn exchange_settings_page(db: PgPool) {
     .unwrap();
     sqlx::query(
         "INSERT INTO exchange_log (mode, filename, result, stats, error, duration_ms)
-         VALUES ('file', 'import.xml', 'failure', '{\"created\":{\"items\":3,\"sections\":1}}', 'Ошибка ХYZ', 5)",
+         VALUES ('file', 'import.xml', 'failure', '{\"created\":{\"items\":3,\"sections\":1}}', 'Ошибка XYZ', 5)",
     )
     .execute(&db)
     .await
@@ -2633,7 +2633,7 @@ async fn exchange_settings_page(db: PgPool) {
         "Товары каталога",
         "не выбрана",
         "import.xml",
-        "Ошибка ХYZ",
+        "Ошибка XYZ",
         "создано: items 3, sections 1",
     ] {
         assert!(html.contains(n), "нет «{n}»");
@@ -2664,7 +2664,8 @@ async fn exchange_settings_page(db: PgPool) {
         .unwrap();
     let too_big = u64::MAX / (1024 * 1024) + 1;
     let bad_forms = [
-        "interval_secs=0&file_limit_mb=10".to_string(),
+        "interval_secs=-1&file_limit_mb=10".to_string(),
+        "interval_secs=30&file_limit_mb=4097".to_string(),
         "interval_secs=30&file_limit_mb=0".to_string(),
         "interval_secs=abc&file_limit_mb=10".to_string(),
         "interval_secs=30&file_limit_mb=abc".to_string(),
@@ -2692,6 +2693,20 @@ async fn exchange_settings_page(db: PgPool) {
     .await;
     assert!(html.contains("Коллекция по умолчанию: некорректный номер"));
     assert_eq!(Settings::load(&db).await.unwrap().interval_secs, 45);
+
+    // 0 — без ограничения (как в Битриксе), 4096 МБ — наибольший лимит
+    let (status, _) = post_form_location(
+        &app,
+        "/admin/exchange",
+        &cookie,
+        "interval_secs=0&file_limit_mb=4096",
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let s = Settings::load(&db).await.unwrap();
+    assert_eq!((s.interval_secs, s.file_limit), (0, 4096 * 1024 * 1024));
+    let (_, html) = get(&app, "/admin/exchange", &cookie).await;
+    assert!(html.contains("файл целиком за один вызов"), "{html}");
 
     // права: без exchange.1c страница закрыта, меню без пункта
     let (uid, other) = user_cookie(&db, "plain", false).await;

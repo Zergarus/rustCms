@@ -32,11 +32,12 @@
   <label class="check"><input type="checkbox" name="use_offers" {% if use_offers %}checked{% endif %}> Загружать торговые предложения</label>
   <label class="check"><input type="checkbox" name="deactivate_without_price" {% if deactivate_without_price %}checked{% endif %}> Деактивировать записи без цены</label>
   <label class="check"><input type="checkbox" name="use_zip" {% if use_zip %}checked{% endif %}> Принимать файлы в zip-архиве</label>
-  <label>Интервал шага, секунд (1–3600)
-    <input type="number" name="interval_secs" min="1" max="3600" value="{{ interval_secs }}">
+  <label>Интервал шага, секунд (0 — без ограничения, до 3600)
+    <input type="number" name="interval_secs" min="0" max="3600" value="{{ interval_secs }}">
   </label>
-  <label>Лимит размера части файла, МБ
-    <input type="number" name="file_limit_mb" min="1" value="{{ file_limit_mb }}">
+  <p class="muted">Хранится для совместимости с Битриксом: CMS импортирует файл целиком за один вызов, интервал на обмен не влияет.</p>
+  <label>Лимит размера части файла, МБ (1–4096)
+    <input type="number" name="file_limit_mb" min="1" max="4096" value="{{ file_limit_mb }}">
   </label>
   <div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
 </form>
