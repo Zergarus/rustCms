@@ -70,10 +70,12 @@ async fn page(
     interval_secs: String,
     error: Option<String>,
 ) -> AppResult<Html<String>> {
-    let collections: Vec<(i64, String)> =
-        sqlx::query_as("SELECT id, name FROM collections WHERE is_catalog ORDER BY name, id")
-            .fetch_all(&state.db)
-            .await?;
+    let collections: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, name FROM collections
+             WHERE is_catalog AND product_collection_id IS NULL ORDER BY name, id",
+    )
+    .fetch_all(&state.db)
+    .await?;
     let collections: Vec<CollectionOption> = collections
         .into_iter()
         .map(|(id, name)| CollectionOption { id, name })
@@ -189,7 +191,8 @@ pub async fn save(
         None => true,
         Some(id) => {
             sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (SELECT 1 FROM collections WHERE id = $1 AND is_catalog)",
+                "SELECT EXISTS (SELECT 1 FROM collections
+                         WHERE id = $1 AND is_catalog AND product_collection_id IS NULL)",
             )
             .bind(id)
             .fetch_one(&state.db)
@@ -203,7 +206,7 @@ pub async fn save(
     } else if limit_mb.is_none() {
         Some("Лимит файла — целое число мегабайт, не меньше 1")
     } else if !collection_ok {
-        Some("Коллекция по умолчанию должна быть коллекцией каталога")
+        Some("Коллекция по умолчанию должна быть коллекцией каталога (не предложений)")
     } else {
         None
     };

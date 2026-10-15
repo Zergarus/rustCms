@@ -115,7 +115,7 @@ fn field_code_base(name: &str, n: usize) -> String {
 }
 
 /// Коллекция пакета: по `xml_id` любого из `ids` (по порядку), иначе «коллекция по умолчанию»
-/// без своего `xml_id` (ей присваивается первый непустой `id`), иначе новая коллекция каталога.
+/// (если у неё нет `xml_id`, ей присваивается первый непустой `id`), иначе новая коллекция каталога.
 async fn resolve_any(
     conn: &mut PgConnection,
     settings: &Settings,
@@ -135,23 +135,19 @@ async fn resolve_any(
     }
     let xml_id = ids.first().copied().unwrap_or("");
     if let Some(default_id) = settings.default_collection_id {
-        let adopted: Option<Collection> = sqlx::query_as(
-            "UPDATE collections SET xml_id = $2, updated_at = now()
-             WHERE id = $1 AND xml_id = '' RETURNING *",
+        // Коллекция по умолчанию (не предложений) принимает любой неизвестный каталог;
+        // свой `xml_id` она получает, только если его ещё нет.
+        let found: Option<Collection> = sqlx::query_as(
+            "UPDATE collections
+             SET xml_id = CASE WHEN xml_id = '' THEN $2 ELSE xml_id END,
+                 updated_at = CASE WHEN xml_id = '' AND $2 <> '' THEN now() ELSE updated_at END
+             WHERE id = $1 AND product_collection_id IS NULL RETURNING *",
         )
         .bind(default_id)
         .bind(xml_id)
         .fetch_optional(&mut *conn)
         .await?;
-        if let Some(c) = adopted {
-            return Ok(c);
-        }
-        if xml_id.is_empty()
-            && let Some(c) = sqlx::query_as("SELECT * FROM collections WHERE id = $1")
-                .bind(default_id)
-                .fetch_optional(&mut *conn)
-                .await?
-        {
+        if let Some(c) = found {
             return Ok(c);
         }
     }
@@ -183,10 +179,9 @@ async fn resolve_any(
     .await?)
 }
 
-// Используется следующими задачами плана обмена (админка, проектные обработчики).
-#[allow(dead_code)]
 /// Коллекция по `Ид` каталога или классификатора (см. `resolve_any`).
-pub async fn resolve_collection(
+#[cfg(test)]
+async fn resolve_collection(
     conn: &mut PgConnection,
     settings: &Settings,
     classifier_or_catalog_id: &str,
@@ -2151,17 +2146,68 @@ mod tests {
                 .unwrap();
         assert_eq!(s, 4);
 
-        // Пакет каталога без классификатора находит коллекцию по ИдКлассификатора
+        // Неизвестный Ид при заданной коллекции по умолчанию — она же, её xml_id не меняется
         let mut conn = db.acquire().await.unwrap();
         let c = resolve_collection(&mut conn, &settings, "cat-0001", "X")
             .await
             .unwrap();
-        // cat-0001 неизвестен, но коллекция по умолчанию уже занята другим xml_id → новая
-        assert_ne!(c.id, id);
+        assert_eq!(c.id, id);
         let c = resolve_collection(&mut conn, &settings, "cls-0001", "X")
             .await
             .unwrap();
         assert_eq!(c.id, id);
+        drop(conn);
+
+        // Пакет товаров с чужим Ид каталога попадает в коллекцию по умолчанию
+        let mut goods = cml::parse(include_bytes!("../../tests/fixtures/1c/goods.xml")).unwrap();
+        {
+            let cat = goods.catalog.as_mut().unwrap();
+            cat.id = "task_s1".into();
+            cat.classifier_id = "task_s1".into();
+        }
+        run(&db, &settings, &goods).await;
+        let (cid, xml): (i64, String) = sqlx::query_as(
+            "SELECT i.collection_id, c.xml_id FROM collection_items i
+             JOIN collections c ON c.id = i.collection_id WHERE i.xml_id = 'good-1'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!((cid, xml.as_str()), (id, "cls-0001"));
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM collections")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[sqlx::test]
+    async fn default_offers_collection_is_not_used(db: PgPool) {
+        let (products,): (i64,) = sqlx::query_as(
+            "INSERT INTO collections (code, name, is_catalog) VALUES ('catalog', 'Каталог', TRUE)
+             RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let (offers,): (i64,) = sqlx::query_as(
+            "INSERT INTO collections (code, name, is_catalog, product_collection_id)
+             VALUES ('offers', 'Предложения', TRUE, $1) RETURNING id",
+        )
+        .bind(products)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let settings = Settings {
+            default_collection_id: Some(offers),
+            ..Settings::default()
+        };
+        let mut conn = db.acquire().await.unwrap();
+        let c = resolve_collection(&mut conn, &settings, "cls-0001", "Новый")
+            .await
+            .unwrap();
+        assert_ne!(c.id, offers);
+        assert_ne!(c.id, products);
     }
 
     #[sqlx::test]

@@ -2610,6 +2610,14 @@ async fn exchange_settings_page(db: PgPool) {
         .execute(&db)
         .await
         .unwrap();
+    let offers: i64 = sqlx::query_scalar(
+        "INSERT INTO collections (code, name, is_catalog, product_collection_id)
+         VALUES ('goods_offers', 'Предложения каталога', TRUE, $1) RETURNING id",
+    )
+    .bind(catalog)
+    .fetch_one(&db)
+    .await
+    .unwrap();
     sqlx::query(
         "INSERT INTO exchange_log (mode, filename, result, stats, error, duration_ms)
          VALUES ('file', 'import.xml', 'failure', '{\"created\":{\"items\":3,\"sections\":1}}', 'Ошибка ХYZ', 5)",
@@ -2631,6 +2639,7 @@ async fn exchange_settings_page(db: PgPool) {
         assert!(html.contains(n), "нет «{n}»");
     }
     assert!(!html.contains("Новости обычные"));
+    assert!(!html.contains("Предложения каталога"));
     assert!(!html.contains("нфоблок"));
 
     let body = format!(
@@ -2666,6 +2675,7 @@ async fn exchange_settings_page(db: PgPool) {
         "default_collection=12x&interval_secs=30&file_limit_mb=10".to_string(),
         "default_collection=999999&interval_secs=30&file_limit_mb=10".to_string(),
         format!("default_collection={plain}&interval_secs=30&file_limit_mb=10"),
+        format!("default_collection={offers}&interval_secs=30&file_limit_mb=10"),
     ];
     for bad in &bad_forms {
         let (status, html) = post_form(&app, "/admin/exchange", &cookie, bad).await;
