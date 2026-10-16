@@ -43,6 +43,8 @@ pub struct DocumentIn {
     /// `Номер1С`; без отдельного тега — `Ид` (`XML_1C_DOCUMENT_ID` Битрикса).
     pub id_1c: String,
     pub version: String,
+    /// Дата документа (`Дата`, у Битрикса также `Дата1С`).
+    pub date: String,
     pub operation: Operation,
     /// `Основание`.
     pub base: String,
@@ -239,6 +241,11 @@ fn document(n: &Node, agents: &mut Vec<AgentIn>) -> Result<DocumentIn, CmlError>
         number: number_text.to_string(),
         id_1c: id_1c.to_string(),
         version: n.val("НомерВерсии").to_string(),
+        date: match n.val("Дата") {
+            "" => n.val("Дата1С"),
+            v => v,
+        }
+        .to_string(),
         operation,
         base: n.val("Основание").to_string(),
         deleted: flag(n.val("ПометкаУдаления")),
@@ -596,6 +603,7 @@ mod tests {
         assert_eq!(d.operation, Operation::Shipment);
         assert_eq!(d.id, "shp-1c-77");
         assert_eq!(d.base, "103");
+        assert_eq!(d.date, "2026-10-16");
         assert_eq!(d.items.len(), 2);
         assert_eq!(d.items[0].kind, ItemKind::Product);
         assert_eq!(d.items[1].kind, ItemKind::Service);

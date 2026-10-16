@@ -22,6 +22,7 @@ const TRAIT_RETURN: &str = "ПризнакВозврата";
 const TRAIT_RETURN_REASON: &str = "Причина к Возврату";
 const TRAIT_CANCEL: &str = "Отменен";
 const TRAIT_DELIVERY_DATE: &str = "Дата отгрузки по 1С";
+const TRAIT_DEDUCTED: &str = "Отгружен";
 const TRAIT_DELIVERY_NUM: &str = "Номер отгрузки по 1С";
 const TRAIT_TRACKING: &str = "Идентификатор отправления";
 const TRAIT_ALLOW_DELIVERY: &str = "Доставка разрешена";
@@ -377,19 +378,17 @@ pub(super) async fn apply_shipment(
         .fetch_one(&mut *tx)
         .await?;
     if single && doc.items.iter().any(|i| i.kind == ItemKind::Product) {
+        // Только расхождение количеств; разница в ценах отгрузку не касается
         let plan = plan_basket(tx, order_id, doc).await?;
-        if !plan.is_empty() {
+        if plan.quantity_differs() {
             if !ctx.s.update_basket_quantity {
-                if plan.quantity_differs() {
-                    bail!("количество в отгрузке не совпадает с заказом");
-                }
-            } else {
-                if is_final(tx, order_id).await? {
-                    bail!(FINAL_ORDER);
-                }
-                apply_basket(ctx, tx, order_id, &plan).await?;
-                totals = true;
+                bail!("количество в отгрузке не совпадает с заказом");
             }
+            if is_final(tx, order_id).await? {
+                bail!(FINAL_ORDER);
+            }
+            apply_basket(ctx, tx, order_id, &plan).await?;
+            totals = true;
         }
     }
 
@@ -398,7 +397,10 @@ pub(super) async fn apply_shipment(
         .map(|d| round(d.sum, 2))
         .filter(|p| !current.deducted && !same(*p, current.price));
     totals |= price.is_some();
-    let ship = !trait_of(doc, TRAIT_DELIVERY_DATE).is_empty();
+    // Отгружена: «Отгружен» = true (`Ship()`) или задана «Дата отгрузки по 1С»
+    let ship_date = trait_of(doc, TRAIT_DELIVERY_DATE);
+    let ship = trait_of(doc, TRAIT_DEDUCTED) == "true" || !ship_date.is_empty();
+    let doc_date = parse_date(ship_date).or_else(|| parse_date(&doc.date));
     let deducted = trait_of(doc, TRAIT_CANCEL) != "true" && (current.deducted || ship);
     let allow = match trait_of(doc, TRAIT_ALLOW_DELIVERY) {
         _ if ship => Some(true),
@@ -425,7 +427,7 @@ pub(super) async fn apply_shipment(
     .bind(deducted)
     .bind(allow)
     .bind(ship)
-    .bind(parse_date(trait_of(doc, TRAIT_DELIVERY_DATE)))
+    .bind(doc_date)
     .bind(trait_of(doc, TRAIT_DELIVERY_NUM))
     .bind(trait_of(doc, TRAIT_TRACKING))
     .bind(&doc.id_1c)

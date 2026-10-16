@@ -767,6 +767,7 @@ mod tests {
             number: id.into(),
             id_1c: format!("ЗК-{id}"),
             version: version.into(),
+            date: String::new(),
             operation: Operation::Order,
             base: String::new(),
             deleted: false,
@@ -2139,6 +2140,77 @@ mod tests {
         let stats = run(&db, &s, &file(vec![del])).await;
         assert_eq!(stats.errors, Vec::<String>::new());
         assert_eq!(count(&db, "shipments", other).await, 0);
+    }
+
+    #[sqlx::test]
+    async fn shipment_deducted_by_flag_with_document_date(db: PgPool) {
+        let f = fixture(&db).await;
+        shipped_status(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let sh = first_shipment(&db, id).await;
+        let s = SaleSettings {
+            final_status_on_delivery: Some("S".into()),
+            ..SaleSettings::default()
+        };
+        let d = DocumentIn {
+            date: "2026-10-13".into(),
+            ..with(ship_doc(&sh.to_string(), id, "1"), &[("Отгружен", "true")])
+        };
+        let stats = run(&db, &s, &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        let row = shipment(&db, sh).await;
+        assert_eq!((row.0, row.1, row.3), (true, true, date("2026-10-13")));
+        assert_eq!(status(&db, id).await.0, "S");
+        assert_eq!(
+            stats.notify,
+            vec![("SALE_STATUS_CHANGED_S".to_string(), id)]
+        );
+        assert_eq!(amounts(&db, f.product_id).await, (10.0, 5.0));
+
+        // Дата реквизита важнее даты документа
+        let other = place_order(&db, &f, None).await;
+        let osh = first_shipment(&db, other).await;
+        let d = DocumentIn {
+            date: "2026-10-13".into(),
+            ..with(
+                ship_doc(&osh.to_string(), other, "1"),
+                &[
+                    ("Отгружен", "true"),
+                    ("Дата отгрузки по 1С", "2026-10-14T08:00:00"),
+                ],
+            )
+        };
+        run(&db, &s, &file(vec![d])).await;
+        assert_eq!(shipment(&db, osh).await.3, date("2026-10-14"));
+    }
+
+    #[sqlx::test]
+    async fn shipment_price_difference_is_ignored(db: PgPool) {
+        let f = fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let sh = first_shipment(&db, id).await;
+        sqlx::query("UPDATE orders SET paid = TRUE WHERE id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        for s in [
+            SaleSettings::default(),
+            SaleSettings {
+                update_basket_quantity: false,
+                ..SaleSettings::default()
+            },
+        ] {
+            let mut d = with(ship_doc(&sh.to_string(), id, ""), &[("Отгружен", "true")]);
+            d.items = vec![item("tovar-1c", 90.0, 1.0)];
+            let stats = run(&db, &s, &file(vec![d])).await;
+            assert_eq!(stats.errors, Vec::<String>::new());
+            assert!(shipment(&db, sh).await.0);
+            assert_eq!(
+                lines(&db, id).await,
+                vec![(f.product_id, 1.0, 100.0, false)]
+            );
+        }
     }
 
     #[sqlx::test]
