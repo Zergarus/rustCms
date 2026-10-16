@@ -81,10 +81,12 @@ fn exchange_kind(query: &HashMap<String, String>) -> Option<&'static str> {
     }
 }
 
-/// Режимы, которые пишутся в журнал обмена.
-fn logged(kind: &str, mode: &str) -> bool {
+/// Режимы, которые пишутся в журнал обмена (`file` заказов — в старом протоколе, где он
+/// загружает документы).
+fn logged(kind: &str, mode: &str, session: &Session) -> bool {
     if kind == session::KIND_SALE {
         matches!(mode, "query" | "success" | "import")
+            || mode == "file" && crate::exchange::sale::http::old_protocol(session)
     } else {
         matches!(mode, "import" | "deactivate" | "complete")
     }
@@ -156,7 +158,7 @@ async fn process(
     }
     match (&session, &reply) {
         // Журнал пишется только для проверенной сессии
-        (Some(session), _) if logged(kind, mode) => {
+        (Some(session), _) if logged(kind, mode, session) => {
             let (result, stats, error) = match &reply {
                 // Текст — по первой строке ответа (success / progress / error), XML — success
                 Ok(o) if o.content_type == XML_1251 => {

@@ -47,10 +47,14 @@ pub(crate) async fn dispatch(
         "init" => init(state, session, query, token).await,
         "query" => export(state, session).await,
         "success" => success(state, session).await,
+        "file" if old_protocol(session) => {
+            old_file(state, session, filename()?, headers, body).await
+        }
         "file" => file(state, session, filename()?, headers, body).await,
-        "import" => import(state, session, filename()?, None).await,
+        "import" => import(state, session, filename()?, Step::Settings).await,
         "info" => info(state).await,
-        other => Err(format!("Неизвестный режим «{other}»")),
+        // `CC_BSC1_ERROR_UNKNOWN_COMMAND`
+        _ => Err("Неизвестная команда.".into()),
     }
 }
 
@@ -201,13 +205,65 @@ fn summary(stats: &SaleStats) -> String {
 }
 
 /// `import`: распаковка zip, затем документы файла по шагам — группы с позиции из сессии,
-/// пока не истёк шаг (`step` — для тестов, иначе интервал настроек; 0 — без ограничения).
+/// пока не истёк шаг.
 /// Ответ `progress` — файл не дочитан; `success` с итогом или ошибками документов построчно.
+/// Старый протокол (`init` без `version`): `file` сразу загружает файл.
+pub(crate) fn old_protocol(session: &Session) -> bool {
+    session.state.get("version").is_none()
+}
+
+/// `file` старого протокола (`component.php`, ветка «old version»): тело дописывается к файлу,
+/// и файл (у архива — первый файл архива) сразу загружается целиком.
+async fn old_file(
+    state: &AppState,
+    session: &Session,
+    filename: &str,
+    headers: &HeaderMap,
+    body: Body,
+) -> Reply {
+    file(state, session, filename, headers, body).await?;
+    let is_zip = !filename.contains('/')
+        && std::path::Path::new(filename)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+    if !is_zip {
+        return import(state, session, filename, Step::Whole).await;
+    }
+    let path = session::dir(&state.config.upload_dir, session).join(filename);
+    let first = tokio::task::spawn_blocking(move || first_zip_file(&path))
+        .await
+        .map_err(|e| e.to_string())?
+        // `CC_BSC1_ZIP_ERROR`
+        .ok_or("Ошибка распаковки архива.")?;
+    import(state, session, &first, Step::Whole).await
+}
+
+/// Имя первого файла архива (`current($rArchiver)['filename']`).
+fn first_zip_file(path: &std::path::Path) -> Option<String> {
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(path).ok()?).ok()?;
+    (0..archive.len()).find_map(|i| {
+        let entry = archive.by_index_raw(i).ok()?;
+        (!entry.is_dir()).then(|| entry.name().to_string())
+    })
+}
+
+/// Длина шага `import`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Step {
+    /// Интервал настроек; 0 — весь файл за вызов.
+    Settings,
+    /// Заданная длина (тесты).
+    #[cfg_attr(not(test), allow(dead_code))]
+    Fixed(Duration),
+    /// Весь файл за вызов.
+    Whole,
+}
+
 pub(crate) async fn import(
     state: &AppState,
     session: &Session,
     filename: &str,
-    step: Option<Duration>,
+    step: Step,
 ) -> Reply {
     check_cml_version(session)?;
     let rel = session::safe_rel_path(filename)
@@ -218,11 +274,9 @@ pub(crate) async fn import(
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-    let data = tokio::fs::read(dir.join(&rel))
-        .await
-        .map_err(|_| format!("Файл «{filename}» не найден"))?;
+    let data = tokio::fs::read(dir.join(&rel)).await.unwrap_or_default();
     if data.is_empty() {
-        // `CC_BSC1_EMPTY_CML`
+        // `CC_BSC1_EMPTY_CML`: нет файла или он пуст
         return Err("Файл для импорта пуст.".into());
     }
     let parsed = tokio::task::spawn_blocking(move || parse::parse(&data))
@@ -231,10 +285,10 @@ pub(crate) async fn import(
         .map_err(|e| e.to_string())?;
     let s = SaleSettings::load(&state.db).await.map_err(db_err)?;
     let map = sale_settings::load_map(&state.db).await.map_err(db_err)?;
-    // Шаг: заданный (тесты) или интервал настроек; 0 в настройках — весь файл за вызов
     let step = match step {
-        Some(step) => Some(step),
-        None => {
+        Step::Fixed(step) => Some(step),
+        Step::Whole => None,
+        Step::Settings => {
             let secs = Settings::load(&state.db)
                 .await
                 .map_err(db_err)?
@@ -398,6 +452,10 @@ mod tests {
             .fetch_all(db)
             .await
             .unwrap()
+    }
+
+    async fn log_len(db: &PgPool) -> usize {
+        log(db).await.len()
     }
 
     #[sqlx::test]
@@ -649,15 +707,102 @@ mod tests {
 
         // Нет файла — failure
         let r = c.get(&token, "mode=import&filename=none.xml").await;
-        assert!(r.starts_with("failure\n"), "{r}");
+        assert_eq!(r, "failure\nФайл для импорта пуст.");
+        upload(&c, &token, "empty.xml", b"").await;
+        let r = c.get(&token, "mode=import&filename=empty.xml").await;
+        assert_eq!(r, "failure\nФайл для импорта пуст.");
+        assert_eq!(
+            c.get(&token, "mode=bogus").await,
+            "failure\nНеизвестная команда."
+        );
 
         let log = log(&db).await;
         let imports: Vec<_> = log.iter().filter(|l| l.1 == "import").collect();
-        assert_eq!(imports.len(), 5);
+        assert_eq!(imports.len(), 6);
         assert!(imports.iter().all(|l| l.0 == "sale"));
         assert_eq!(imports[0].2, "success");
         assert_eq!(imports[0].3["orders_updated"], 1);
         assert_eq!(imports[4].2, "failure");
+        assert_eq!(imports[5].2, "failure");
+    }
+
+    #[sqlx::test]
+    async fn old_protocol_file_imports_at_once(db: PgPool) {
+        sale_user(&db, "sale").await;
+        let f = order_fixture(&db).await;
+        statuses(&db).await;
+        SaleSettings {
+            change_status_from_1c: true,
+            ..SaleSettings::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+        let a = place_order(&db, &f, None).await;
+        let b = place_order(&db, &f, None).await;
+        let c = Client::with_type(&test_state(db.clone()), "sale");
+        let token = login(&c, "sale").await;
+        // Без version — старый протокол: file сразу загружает документы
+        c.get(&token, "mode=init").await;
+
+        let data = cml(&[status_doc(a, "1", "F"), status_doc(b, "1", "Q")]);
+        let r = c
+            .post(
+                &token,
+                "mode=file&filename=orders.xml",
+                data.clone().into_bytes(),
+            )
+            .await;
+        assert_eq!(r, format!("success\nДокумент {b}: статус Q не найден"));
+        assert_eq!(status_of(&db, a).await, "F");
+
+        // Повтор того же файла — без изменений
+        sqlx::query("UPDATE orders SET status = 'N' WHERE id = $1")
+            .bind(a)
+            .execute(&db)
+            .await
+            .unwrap();
+        let r = c
+            .post(&token, "mode=file&filename=orders.xml", data.into_bytes())
+            .await;
+        assert!(r.starts_with("success"), "{r}");
+        assert_eq!(status_of(&db, a).await, "N");
+
+        // Архив: загружается первый файл архива
+        let zip = make_zip(&[("in/b.xml", cml(&[status_doc(b, "2", "P")]).as_bytes())]);
+        let r = c.post(&token, "mode=file&filename=pack.zip", zip).await;
+        assert_eq!(r, "success\nОбновлено: заказы 1");
+        assert_eq!(status_of(&db, b).await, "P");
+
+        // Пустой файл — failure
+        let r = c.post(&token, "mode=file&filename=empty.xml", vec![]).await;
+        assert_eq!(r, "failure\nФайл для импорта пуст.");
+
+        let log = log(&db).await;
+        let rows: Vec<(&str, &str, &str)> = log
+            .iter()
+            .map(|l| (l.0.as_str(), l.1.as_str(), l.2.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("sale", "file", "success"),
+                ("sale", "file", "success"),
+                ("sale", "file", "success"),
+                ("sale", "file", "failure"),
+            ]
+        );
+        assert_eq!(log[0].3["orders_updated"], 1);
+
+        // С version file только дописывает
+        c.get(&token, "mode=init&version=2.08").await;
+        let data = cml(&[status_doc(a, "2", "F")]);
+        let r = c
+            .post(&token, "mode=file&filename=new.xml", data.into_bytes())
+            .await;
+        assert_eq!(r, "success");
+        assert_eq!(status_of(&db, a).await, "N");
+        assert_eq!(log_len(&db).await, 4);
     }
 
     #[sqlx::test]
@@ -683,7 +828,7 @@ mod tests {
             .unwrap();
 
         // Шаг истёк после первой группы: progress, позиция — в сессии
-        let r = import(&state, &s, "o.xml", Some(Duration::ZERO))
+        let r = import(&state, &s, "o.xml", Step::Fixed(Duration::ZERO))
             .await
             .unwrap();
         assert_eq!(String::from_utf8(r.body).unwrap(), "progress");
@@ -696,7 +841,7 @@ mod tests {
         assert_eq!(st["sale_pos"]["o.xml"], 1);
 
         // Следующий шаг — с позиции: первый документ не применяется повторно
-        let r = import(&state, &s, "o.xml", Some(Duration::ZERO))
+        let r = import(&state, &s, "o.xml", Step::Fixed(Duration::ZERO))
             .await
             .unwrap();
         assert_eq!(
