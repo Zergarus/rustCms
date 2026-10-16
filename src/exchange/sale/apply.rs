@@ -66,6 +66,20 @@ async fn order_by(
         .await
 }
 
+/// Заказ по номеру документа 1С (`orders.id_1c`), новейший.
+async fn by_id_1c(conn: &mut PgConnection, key: &str) -> sqlx::Result<Option<i64>> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Ok(None);
+    }
+    order_by(
+        conn,
+        "SELECT id FROM orders WHERE id_1c = $1 ORDER BY id DESC LIMIT 1",
+        key,
+    )
+    .await
+}
+
 async fn find_plain(conn: &mut PgConnection, key: &str) -> sqlx::Result<Option<i64>> {
     if let Ok(id) = key.parse::<i64>()
         && let Some(id) = sqlx::query_scalar("SELECT id FROM orders WHERE id = $1")
@@ -75,13 +89,7 @@ async fn find_plain(conn: &mut PgConnection, key: &str) -> sqlx::Result<Option<i
     {
         return Ok(Some(id));
     }
-    if let Some(id) = order_by(
-        conn,
-        "SELECT id FROM orders WHERE id_1c = $1 ORDER BY id DESC LIMIT 1",
-        key,
-    )
-    .await?
-    {
+    if let Some(id) = by_id_1c(conn, key).await? {
         return Ok(Some(id));
     }
     order_by(
@@ -233,9 +241,12 @@ async fn apply_order(
     stats: &mut SaleStats,
 ) -> anyhow::Result<Option<i64>> {
     let prefix = &ctx.s.number_prefix;
-    let mut found = find_order(tx, &doc.id, prefix).await?;
-    if found.is_none() && doc.id_1c != doc.id {
-        found = find_order(tx, &doc.id_1c, prefix).await?;
+    // `getDocumentId`: Номер — как номер заказа сайта; Ид и Номер1С — только по `id_1c`
+    let mut found = find_order(tx, &doc.number, prefix).await?;
+    for key in [&doc.id, &doc.id_1c] {
+        if found.is_none() {
+            found = by_id_1c(tx, key).await?;
+        }
     }
     let Some(id) = found else {
         if !ctx.s.import_new_orders {
@@ -335,6 +346,11 @@ fn delivery_line(doc: &DocumentIn) -> Option<&ItemIn> {
     doc.items.iter().find(|i| i.kind == ItemKind::Service)
 }
 
+fn round(v: f64, digits: i32) -> f64 {
+    let k = 10f64.powi(digits);
+    (v * k).round() / k
+}
+
 fn same(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-9
 }
@@ -381,19 +397,21 @@ async fn update_basket(
             Some(n) => {
                 matched[n] = true;
                 let r = &rows[n];
+                // Точность столбцов: количество — 3 знака, цена — 2
                 let quantity = if it.quantity > 0.0 {
-                    it.quantity
+                    round(it.quantity, 3)
                 } else {
                     r.quantity
                 };
-                if !same(quantity, r.quantity) || !same(it.price, r.price) {
-                    updates.push((r.id, quantity, it.price));
+                let price = round(it.price, 2);
+                if !same(quantity, r.quantity) || !same(price, r.price) {
+                    updates.push((r.id, quantity, price));
                 }
             }
             None => {
                 let (product_id, name) = product_by_xml_id(tx, &it.xml_id).await?;
                 if it.quantity > 0.0 {
-                    inserts.push((product_id, name, it.quantity, it.price));
+                    inserts.push((product_id, name, round(it.quantity, 3), round(it.price, 2)));
                 }
             }
         }
@@ -410,7 +428,7 @@ async fn update_basket(
             .fetch_one(&mut *tx)
             .await?;
     let delivery = delivery_line(doc)
-        .map(|d| d.sum)
+        .map(|d| round(d.sum, 2))
         .filter(|p| !same(*p, current_delivery));
     if updates.is_empty() && inserts.is_empty() && removed.is_empty() && delivery.is_none() {
         return Ok(());
@@ -1445,5 +1463,84 @@ mod tests {
         let (stats, next) = apply_file(&db, &s, &[], &sale, None, 1, Some(Instant::now())).await;
         assert_eq!((stats.orders_updated, next), (1, None));
         assert!(status(&db, b).await.3);
+    }
+
+    #[sqlx::test]
+    async fn lookup_follows_document_number_then_id_1c(db: PgPool) {
+        let f = fixture(&db).await;
+        let a = place_order(&db, &f, None).await;
+        let b = place_order(&db, &f, None).await;
+        let c = place_order(&db, &f, None).await;
+        sqlx::query("UPDATE orders SET account_number = 'A-' || id WHERE id = $1")
+            .bind(a)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE orders SET id_1c = 'guid-c' WHERE id = $1")
+            .bind(c)
+            .execute(&db)
+            .await
+            .unwrap();
+        let s = SaleSettings {
+            number_prefix: "SHOP".into(),
+            import_new_orders: false,
+            ..SaleSettings::default()
+        };
+        let cancel = |id: &str, number: &str, id_1c: &str| DocumentIn {
+            number: number.into(),
+            id_1c: id_1c.into(),
+            ..doc(id, "", &[("Отменен", "true")])
+        };
+
+        // (а) Ид — GUID из 1С, Номер — префикс + номер заказа
+        let stats = run(
+            &db,
+            &s,
+            &file(vec![cancel("guid-a", &format!("SHOPA-{a}"), "ЗК-1")]),
+        )
+        .await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert!(status(&db, a).await.3);
+
+        // (б) Номер1С, совпадающий с id другого заказа, этот заказ не находит
+        let stats = run(
+            &db,
+            &s,
+            &file(vec![cancel("guid-x", "нет", &b.to_string())]),
+        )
+        .await;
+        assert_eq!(
+            stats.errors,
+            vec!["Документ guid-x: заказ не найден".to_string()]
+        );
+        // Ид-число — тоже только по id_1c
+        let stats = run(&db, &s, &file(vec![cancel(&b.to_string(), "нет", "ЗК-2")])).await;
+        assert_eq!(stats.errors.len(), 1);
+        assert!(!status(&db, b).await.3);
+
+        // (в) Ид совпадает с сохранённым id_1c
+        let stats = run(&db, &s, &file(vec![cancel("guid-c", "нет", "ЗК-3")])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert!(status(&db, c).await.3);
+    }
+
+    #[sqlx::test]
+    async fn line_price_compared_with_cents(db: PgPool) {
+        let f = fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        sqlx::query("UPDATE orders SET paid = TRUE WHERE id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut d = doc(&id.to_string(), "1", &[]);
+        d.items = vec![item("tovar-1c", 100.004, 1.0)];
+        let stats = run(&db, &SaleSettings::default(), &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(stats.orders_updated, 1);
+        assert_eq!(
+            lines(&db, id).await,
+            vec![(f.product_id, 1.0, 100.0, false)]
+        );
     }
 }
