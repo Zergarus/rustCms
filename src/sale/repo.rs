@@ -400,6 +400,24 @@ pub async fn set_paid_in(tx: &mut PgConnection, order_id: i64, paid: bool) -> sq
     Ok(changed)
 }
 
+/// Оплата заказа по его оплатам: оплачен, когда оплаты есть и оплачены все (сами оплаты не
+/// меняются). Возвращает новое значение, если оно изменилось.
+pub async fn sync_paid_in(tx: &mut PgConnection, order_id: i64) -> sqlx::Result<Option<bool>> {
+    sqlx::query_scalar(
+        "WITH p AS (
+             SELECT EXISTS (SELECT 1 FROM payments WHERE order_id = $1)
+                    AND NOT EXISTS (SELECT 1 FROM payments WHERE order_id = $1 AND NOT paid) AS paid
+         )
+         UPDATE orders o SET paid = p.paid, paid_at = CASE WHEN p.paid THEN now() END,
+                             updated_at = now()
+         FROM p WHERE o.id = $1 AND o.paid <> p.paid
+         RETURNING o.paid",
+    )
+    .bind(order_id)
+    .fetch_optional(&mut *tx)
+    .await
+}
+
 /// Пересчитывает суммы заказа по позициям: товары, доставка (`None` — прежняя), итог; цена
 /// первой отгрузки — доставка, единственная неоплаченная оплата — итог. Возвращает итог.
 pub async fn recalc_totals_in(

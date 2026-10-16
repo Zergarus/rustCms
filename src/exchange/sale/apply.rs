@@ -10,9 +10,9 @@ use anyhow::{anyhow, bail};
 use serde::Serialize;
 use sqlx::{PgConnection, PgPool};
 
-use super::mark_exchange;
 use super::parse::{AgentIn, DocumentIn, ItemIn, ItemKind, Operation, SaleFile};
 use super::settings::{CONTRAGENT_CODES, MapEntry, MapSource, SaleSettings};
+use super::{apply_docs, mark_exchange};
 use crate::bxapi::project::OrderImportHook;
 use crate::sale::repo::{
     recalc_totals_in, set_canceled_in, set_status_in, stock_lines, traced_locked,
@@ -24,7 +24,7 @@ const TRAIT_STATUS: &str = "Статуса заказа ИД";
 /// Реквизит документа с отменой (`CC_BSC1_CANCEL`).
 const TRAIT_CANCEL: &str = "Отменен";
 /// Комментарий истории статусов при смене из 1С.
-const HISTORY_COMMENT: &str = "1С";
+pub(super) const HISTORY_COMMENT: &str = "1С";
 
 /// Итог приёма; `notify` — письма о смене статуса (событие, заказ), отправляются после коммита.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -67,7 +67,7 @@ async fn order_by(
 }
 
 /// Заказ по номеру документа 1С (`orders.id_1c`), новейший.
-async fn by_id_1c(conn: &mut PgConnection, key: &str) -> sqlx::Result<Option<i64>> {
+pub(super) async fn by_id_1c(conn: &mut PgConnection, key: &str) -> sqlx::Result<Option<i64>> {
     let key = key.trim();
     if key.is_empty() {
         return Ok(None);
@@ -137,7 +137,7 @@ pub async fn find_order(
 
 /// Документ новее сохранённой версии: числа сравниваются как числа, иначе как строки;
 /// пустая версия (своя или документа) не мешает (`checkVersion1C`).
-fn is_newer(doc: &str, stored: &str) -> bool {
+pub(super) fn is_newer(doc: &str, stored: &str) -> bool {
     let (d, s) = (doc.trim(), stored.trim());
     if d.is_empty() || s.is_empty() {
         return true;
@@ -148,9 +148,9 @@ fn is_newer(doc: &str, stored: &str) -> bool {
     }
 }
 
-struct Ctx<'a> {
-    db: &'a PgPool,
-    s: &'a SaleSettings,
+pub(super) struct Ctx<'a> {
+    pub(super) db: &'a PgPool,
+    pub(super) s: &'a SaleSettings,
     map: &'a [MapEntry],
     agents: &'a [AgentIn],
     hook: Option<&'a dyn OrderImportHook>,
@@ -224,7 +224,8 @@ async fn apply_document(
 ) -> anyhow::Result<()> {
     let order_id = match &doc.operation {
         Operation::Order => apply_order(ctx, tx, doc, stats).await?,
-        Operation::Payment(_) | Operation::Shipment => bail!("не реализовано"),
+        Operation::Payment(op) => apply_docs::apply_payment(ctx, tx, doc, *op, stats).await?,
+        Operation::Shipment => apply_docs::apply_shipment(ctx, tx, doc, stats).await?,
         Operation::Unknown(name) => bail!("неизвестная хозяйственная операция «{name}»"),
     };
     if let (Some(order_id), Some(hook)) = (order_id, ctx.hook) {
@@ -258,24 +259,17 @@ async fn apply_order(
         return Ok(Some(id));
     };
 
-    let (version, paid, deducted): (String, bool, bool) = sqlx::query_as(
-        "SELECT version_1c, paid, stock_deducted FROM orders WHERE id = $1 FOR UPDATE",
-    )
-    .bind(id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let version: String =
+        sqlx::query_scalar("SELECT version_1c FROM orders WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
     if !is_newer(&doc.version, &version) {
         stats.skipped += 1;
         return Ok(None);
     }
     if ctx.s.update_basket_quantity && doc.items.iter().any(|i| i.kind == ItemKind::Product) {
-        let shipped: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM shipments WHERE order_id = $1 AND deducted)",
-        )
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
-        update_basket(ctx, tx, id, doc, paid || shipped, deducted).await?;
+        update_basket(ctx, tx, id, doc).await?;
     }
     sqlx::query("UPDATE orders SET id_1c = $2, version_1c = $3 WHERE id = $1")
         .bind(id)
@@ -304,19 +298,30 @@ async fn apply_flags(
     }
     let code = doc.traits.get(TRAIT_STATUS).map_or("", |v| v.trim());
     if ctx.s.change_status_from_1c && !code.is_empty() {
-        let notify: Option<bool> =
-            sqlx::query_scalar("SELECT notify FROM order_statuses WHERE code = $1")
-                .bind(code)
-                .fetch_optional(&mut *tx)
-                .await?;
-        let Some(notify) = notify else {
-            bail!("статус {code} не найден");
-        };
-        if set_status_in(tx, id, code, None, HISTORY_COMMENT).await? && notify {
-            stats
-                .notify
-                .push((format!("SALE_STATUS_CHANGED_{code}"), id));
-        }
+        set_status_1c(tx, id, code, stats).await?;
+    }
+    Ok(())
+}
+
+/// Статус из 1С: история с комментарием «1С», письмо — если статус шлёт письма и сменился.
+pub(super) async fn set_status_1c(
+    tx: &mut PgConnection,
+    id: i64,
+    code: &str,
+    stats: &mut SaleStats,
+) -> anyhow::Result<()> {
+    let notify: Option<bool> =
+        sqlx::query_scalar("SELECT notify FROM order_statuses WHERE code = $1")
+            .bind(code)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(notify) = notify else {
+        bail!("статус {code} не найден");
+    };
+    if set_status_in(tx, id, code, None, HISTORY_COMMENT).await? && notify {
+        stats
+            .notify
+            .push((format!("SALE_STATUS_CHANGED_{code}"), id));
     }
     Ok(())
 }
@@ -342,16 +347,16 @@ fn normalize_xml_id(xml_id: &str) -> &str {
     }
 }
 
-fn delivery_line(doc: &DocumentIn) -> Option<&ItemIn> {
+pub(super) fn delivery_line(doc: &DocumentIn) -> Option<&ItemIn> {
     doc.items.iter().find(|i| i.kind == ItemKind::Service)
 }
 
-fn round(v: f64, digits: i32) -> f64 {
+pub(super) fn round(v: f64, digits: i32) -> f64 {
     let k = 10f64.powi(digits);
     (v * k).round() / k
 }
 
-fn same(a: f64, b: f64) -> bool {
+pub(super) fn same(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-9
 }
 
@@ -365,16 +370,32 @@ struct BasketRow {
     xml_id: String,
 }
 
-/// Состав по документу (`updateOrderWithoutShipmentsPayments`): строки сопоставляются по Ид
-/// товара; новые добавляются, отсутствующие в документе удаляются; строка-услуга — доставка.
-async fn update_basket(
-    ctx: &Ctx<'_>,
+/// Правка позиций по строкам-товарам документа: строки сопоставляются по Ид товара, новые
+/// добавляются, отсутствующие в документе удаляются.
+#[derive(Default)]
+pub(super) struct BasketPlan {
+    /// Строка, количество, цена, изменилось ли количество.
+    updates: Vec<(i64, f64, f64, bool)>,
+    inserts: Vec<(i64, String, f64, f64)>,
+    removed: Vec<i64>,
+}
+
+impl BasketPlan {
+    pub(super) fn is_empty(&self) -> bool {
+        self.updates.is_empty() && self.inserts.is_empty() && self.removed.is_empty()
+    }
+
+    /// Расходится состав или количество (не только цены).
+    pub(super) fn quantity_differs(&self) -> bool {
+        !self.inserts.is_empty() || !self.removed.is_empty() || self.updates.iter().any(|u| u.3)
+    }
+}
+
+pub(super) async fn plan_basket(
     tx: &mut PgConnection,
     id: i64,
     doc: &DocumentIn,
-    is_final: bool,
-    deducted: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<BasketPlan> {
     let rows: Vec<BasketRow> = sqlx::query_as(
         "SELECT c.id, c.item_id, c.store_id, c.quantity::float8 AS quantity,
                 COALESCE(c.price, 0)::float8 AS price, COALESCE(i.xml_id, '') AS xml_id
@@ -385,8 +406,7 @@ async fn update_basket(
     .fetch_all(&mut *tx)
     .await?;
     let mut matched = vec![false; rows.len()];
-    let mut updates = Vec::new();
-    let mut inserts = Vec::new();
+    let mut plan = BasketPlan::default();
     for it in doc.items.iter().filter(|i| i.kind == ItemKind::Product) {
         let pos = rows.iter().enumerate().position(|(n, r)| {
             !matched[n]
@@ -405,44 +425,49 @@ async fn update_basket(
                 };
                 let price = round(it.price, 2);
                 if !same(quantity, r.quantity) || !same(price, r.price) {
-                    updates.push((r.id, quantity, price));
+                    plan.updates
+                        .push((r.id, quantity, price, !same(quantity, r.quantity)));
                 }
             }
             None => {
                 let (product_id, name) = product_by_xml_id(tx, &it.xml_id).await?;
                 if it.quantity > 0.0 {
-                    inserts.push((product_id, name, round(it.quantity, 3), round(it.price, 2)));
+                    plan.inserts.push((
+                        product_id,
+                        name,
+                        round(it.quantity, 3),
+                        round(it.price, 2),
+                    ));
                 }
             }
         }
     }
-    let removed: Vec<i64> = rows
+    plan.removed = rows
         .iter()
         .zip(&matched)
         .filter(|(_, m)| !**m)
         .map(|(r, _)| r.id)
         .collect();
-    let current_delivery: f64 =
-        sqlx::query_scalar("SELECT delivery_price::float8 FROM orders WHERE id = $1")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
-    let delivery = delivery_line(doc)
-        .map(|d| round(d.sum, 2))
-        .filter(|p| !same(*p, current_delivery));
-    if updates.is_empty() && inserts.is_empty() && removed.is_empty() && delivery.is_none() {
-        return Ok(());
-    }
-    if is_final {
-        bail!("заказ в финальном состоянии, состав не изменён");
-    }
+    Ok(plan)
+}
 
+/// Применяет план; остатки — через `stock::plan`, если заказ их списал. Суммы не пересчитывает.
+pub(super) async fn apply_basket(
+    ctx: &Ctx<'_>,
+    tx: &mut PgConnection,
+    id: i64,
+    plan: &BasketPlan,
+) -> anyhow::Result<()> {
+    let deducted: bool = sqlx::query_scalar("SELECT stock_deducted FROM orders WHERE id = $1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
     let before = stock_lines(tx, id).await?;
     sqlx::query("DELETE FROM cart_items WHERE id = ANY($1)")
-        .bind(&removed)
+        .bind(&plan.removed)
         .execute(&mut *tx)
         .await?;
-    for (line, quantity, price) in &updates {
+    for (line, quantity, price, _) in &plan.updates {
         sqlx::query(
             "UPDATE cart_items SET quantity = $2, price = $3, custom_price = TRUE, updated_at = now()
              WHERE id = $1",
@@ -453,7 +478,7 @@ async fn update_basket(
         .execute(&mut *tx)
         .await?;
     }
-    for (product_id, name, quantity, price) in &inserts {
+    for (product_id, name, quantity, price) in &plan.inserts {
         insert_line(ctx, tx, id, *product_id, name, *quantity, *price).await?;
     }
     if deducted {
@@ -462,6 +487,45 @@ async fn update_basket(
         let traced = traced_locked(tx, &all).await?;
         stock::apply(tx, &stock::plan(&before, &after, &traced)).await?;
     }
+    Ok(())
+}
+
+/// Оплачен или есть отгруженная отгрузка — состав не правится.
+pub(super) async fn is_final(tx: &mut PgConnection, id: i64) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT paid OR EXISTS (SELECT 1 FROM shipments WHERE order_id = o.id AND deducted)
+         FROM orders o WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await
+}
+
+pub(super) const FINAL_ORDER: &str = "заказ в финальном состоянии, состав не изменён";
+
+/// Состав по документу (`updateOrderWithoutShipmentsPayments`); строка-услуга — доставка.
+async fn update_basket(
+    ctx: &Ctx<'_>,
+    tx: &mut PgConnection,
+    id: i64,
+    doc: &DocumentIn,
+) -> anyhow::Result<()> {
+    let plan = plan_basket(tx, id, doc).await?;
+    let current_delivery: f64 =
+        sqlx::query_scalar("SELECT delivery_price::float8 FROM orders WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let delivery = delivery_line(doc)
+        .map(|d| round(d.sum, 2))
+        .filter(|p| !same(*p, current_delivery));
+    if plan.is_empty() && delivery.is_none() {
+        return Ok(());
+    }
+    if is_final(tx, id).await? {
+        bail!(FINAL_ORDER);
+    }
+    apply_basket(ctx, tx, id, &plan).await?;
     recalc_totals_in(tx, id, delivery).await?;
     Ok(())
 }
@@ -692,6 +756,7 @@ mod tests {
 
     use super::*;
     use crate::bxapi::project::BoxFuture;
+    use crate::exchange::sale::document::PayOperation;
     use crate::exchange::sale::parse::{AgentIn, ItemIn, ItemKind, Operation};
     use crate::exchange::sale::settings::{Domain, MapSource};
     use crate::test_support::{Fixture, amounts, order_fixture, place_order};
@@ -1542,5 +1607,795 @@ mod tests {
             lines(&db, id).await,
             vec![(f.product_id, 1.0, 100.0, false)]
         );
+    }
+
+    // --- Оплаты и отгрузки ---
+
+    fn pay_doc(number: &str, base: i64, version: &str, op: PayOperation) -> DocumentIn {
+        DocumentIn {
+            id: format!("pay-guid-{number}"),
+            number: number.into(),
+            id_1c: format!("ПП-{number}"),
+            operation: Operation::Payment(op),
+            base: base.to_string(),
+            ..doc(number, version, &[])
+        }
+    }
+
+    fn ship_doc(number: &str, base: i64, version: &str) -> DocumentIn {
+        DocumentIn {
+            id: format!("ship-guid-{number}"),
+            number: number.into(),
+            id_1c: format!("РН-{number}"),
+            operation: Operation::Shipment,
+            base: base.to_string(),
+            ..doc(number, version, &[])
+        }
+    }
+
+    fn with(mut d: DocumentIn, traits: &[(&str, &str)]) -> DocumentIn {
+        for (k, v) in traits {
+            d.traits.insert(k.to_string(), v.to_string());
+        }
+        d
+    }
+
+    /// Первая (единственная) оплата и отгрузка заказа фикстуры.
+    async fn first_payment(db: &PgPool, order: i64) -> i64 {
+        sqlx::query_scalar("SELECT min(id) FROM payments WHERE order_id = $1")
+            .bind(order)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    async fn first_shipment(db: &PgPool, order: i64) -> i64 {
+        sqlx::query_scalar("SELECT min(id) FROM shipments WHERE order_id = $1")
+            .bind(order)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    type PaymentRow = (
+        bool,
+        String,
+        Option<chrono::NaiveDate>,
+        bool,
+        String,
+        String,
+        String,
+        bool,
+    );
+
+    async fn payment(db: &PgPool, id: i64) -> PaymentRow {
+        sqlx::query_as(
+            "SELECT paid, pay_voucher_num, pay_voucher_date, is_return, return_comment, id_1c,
+                    version_1c, updated_1c
+             FROM payments WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    async fn order_paid(db: &PgPool, id: i64) -> bool {
+        sqlx::query_scalar("SELECT paid FROM orders WHERE id = $1")
+            .bind(id)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    async fn count(db: &PgPool, table: &str, order: i64) -> i64 {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM {table} WHERE order_id = $1"
+        )))
+        .bind(order)
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    fn date(s: &str) -> Option<chrono::NaiveDate> {
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+    }
+
+    #[sqlx::test]
+    async fn payment_paid_with_voucher(db: PgPool) {
+        let f = fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let p1 = first_payment(&db, id).await;
+        let p2: i64 = sqlx::query_scalar(
+            "INSERT INTO payments (order_id, name, sum) VALUES ($1, 'Остаток', 0) RETURNING id",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let s = SaleSettings::default();
+
+        let d = with(
+            pay_doc(&p1.to_string(), id, "1", PayOperation::Cashless),
+            &[
+                ("Оплачен", "true"),
+                ("Дата оплаты по 1С", "2026-10-14T10:20:30"),
+                ("Номер оплаты по 1С", "000123"),
+            ],
+        );
+        let stats = run(&db, &s, &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(stats.payments_updated, 1);
+        assert_eq!(
+            payment(&db, p1).await,
+            (
+                true,
+                "000123".into(),
+                date("2026-10-14"),
+                false,
+                String::new(),
+                format!("ПП-{p1}"),
+                "1".into(),
+                true
+            )
+        );
+        // Вторая оплата не тронута, заказ ещё не оплачен
+        assert!(!payment(&db, p2).await.0);
+        assert!(!order_paid(&db, id).await);
+        assert!(stats.notify.is_empty());
+        assert!(status(&db, id).await.2);
+
+        // Вторая — по Ид, сохранённому в id_1c; теперь оплачены все — заказ оплачен
+        sqlx::query("UPDATE payments SET id_1c = 'guid-p2' WHERE id = $1")
+            .bind(p2)
+            .execute(&db)
+            .await
+            .unwrap();
+        let d = DocumentIn {
+            number: String::new(),
+            id: "guid-p2".into(),
+            id_1c: "guid-p2".into(),
+            ..with(
+                pay_doc("x", id, "1", PayOperation::Cash),
+                &[("Оплачен", "true")],
+            )
+        };
+        let stats = run(&db, &s, &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert!(payment(&db, p2).await.0);
+        assert!(order_paid(&db, id).await);
+        assert_eq!(stats.notify, vec![("SALE_ORDER_PAID".to_string(), id)]);
+
+        // Номер чужой оплаты не находит оплату этого заказа; без создания — ошибка
+        let other = place_order(&db, &f, None).await;
+        let no_new = SaleSettings {
+            import_new_payments: false,
+            ..SaleSettings::default()
+        };
+        let d = pay_doc(
+            &first_payment(&db, other).await.to_string(),
+            id,
+            "1",
+            PayOperation::Cash,
+        );
+        let key = d.id.clone();
+        let stats = run(&db, &no_new, &file(vec![d])).await;
+        assert_eq!(
+            stats.errors,
+            vec![format!("Документ {key}: оплата не найдена")]
+        );
+
+        // Основание не найдено — заказ не найден
+        let d = pay_doc("chuzhaya", 999_999, "1", PayOperation::Cash);
+        let key = d.id.clone();
+        let stats = run(&db, &s, &file(vec![d])).await;
+        assert_eq!(
+            stats.errors,
+            vec![format!("Документ {key}: заказ не найден")]
+        );
+    }
+
+    #[sqlx::test]
+    async fn payment_return_unpays(db: PgPool) {
+        let f = fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let p = first_payment(&db, id).await;
+        let s = SaleSettings::default();
+        let paid = with(
+            pay_doc(&p.to_string(), id, "1", PayOperation::Cashless),
+            &[("Оплачен", "true")],
+        );
+        run(&db, &s, &file(vec![paid])).await;
+        assert!(order_paid(&db, id).await);
+
+        let ret = with(
+            pay_doc(&p.to_string(), id, "2", PayOperation::Cashless),
+            &[
+                ("Оплачен", "true"),
+                ("ПризнакВозврата", "true"),
+                ("Причина к Возврату", "Брак"),
+            ],
+        );
+        let stats = run(&db, &s, &file(vec![ret])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        let row = payment(&db, p).await;
+        assert_eq!((row.0, row.3, row.4.as_str()), (false, true, "Брак"));
+        assert!(!order_paid(&db, id).await);
+
+        // «Отменен» тоже снимает оплату
+        let again = with(
+            pay_doc(&p.to_string(), id, "3", PayOperation::Cashless),
+            &[("Оплачен", "true")],
+        );
+        run(&db, &s, &file(vec![again])).await;
+        assert!(payment(&db, p).await.0 && order_paid(&db, id).await);
+        let cancel = with(
+            pay_doc(&p.to_string(), id, "4", PayOperation::Cashless),
+            &[("Оплачен", "true"), ("Отменен", "true")],
+        );
+        let stats = run(&db, &s, &file(vec![cancel])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert!(!payment(&db, p).await.0 && !order_paid(&db, id).await);
+    }
+
+    #[sqlx::test]
+    async fn new_payment_uses_default_pay_system_by_operation(db: PgPool) {
+        let f = fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let mut ps = Vec::new();
+        for name in ["Наличные", "Безнал", "Эквайринг", "Оплачено в 1С"]
+        {
+            let ps_id: i64 =
+                sqlx::query_scalar("INSERT INTO pay_systems (name) VALUES ($1) RETURNING id")
+                    .bind(name)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            ps.push(ps_id);
+        }
+        let s = SaleSettings {
+            default_ps_cash: Some(ps[0]),
+            default_ps_cashless: Some(ps[1]),
+            default_ps_acquiring: Some(ps[2]),
+            default_ps_order_paid: Some(ps[3]),
+            ..SaleSettings::default()
+        };
+        let new = |number: &str, op, sum: f64, paid: bool| DocumentIn {
+            sum: Some(sum),
+            ..with(
+                pay_doc(number, id, "1", op),
+                &[("Оплачен", if paid { "true" } else { "false" })],
+            )
+        };
+        let sale = file(vec![
+            new("1С-01", PayOperation::Cash, 10.0, false),
+            new("1С-02", PayOperation::Cashless, 20.0, true),
+            new("1С-03", PayOperation::Acquiring, 30.0, false),
+            // Оплата всей суммы заказа
+            new("1С-04", PayOperation::Cash, 100.0, true),
+        ]);
+        let stats = run(&db, &s, &sale).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!((stats.payments_created, stats.payments_updated), (4, 0));
+        type Row = (Option<i64>, String, f64, bool, String, String, bool);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT pay_system_id, name, sum::float8, paid, id_1c, version_1c, updated_1c
+             FROM payments WHERE order_id = $1 AND id_1c <> '' ORDER BY id",
+        )
+        .bind(id)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    Some(ps[0]),
+                    "Наличные".into(),
+                    10.0,
+                    false,
+                    "ПП-1С-01".into(),
+                    "1".into(),
+                    true
+                ),
+                (
+                    Some(ps[1]),
+                    "Безнал".into(),
+                    20.0,
+                    true,
+                    "ПП-1С-02".into(),
+                    "1".into(),
+                    true
+                ),
+                (
+                    Some(ps[2]),
+                    "Эквайринг".into(),
+                    30.0,
+                    false,
+                    "ПП-1С-03".into(),
+                    "1".into(),
+                    true
+                ),
+                (
+                    Some(ps[3]),
+                    "Оплачено в 1С".into(),
+                    100.0,
+                    true,
+                    "ПП-1С-04".into(),
+                    "1".into(),
+                    true
+                ),
+            ]
+        );
+        // Исходная оплата заказа не оплачена — заказ не оплачен
+        assert!(!order_paid(&db, id).await);
+
+        // Без настройки «Создавать новые оплаты» — ошибка
+        let off = SaleSettings {
+            import_new_payments: false,
+            ..s.clone()
+        };
+        let stats = run(
+            &db,
+            &off,
+            &file(vec![new("1С-05", PayOperation::Cash, 1.0, false)]),
+        )
+        .await;
+        assert_eq!(
+            stats.errors,
+            vec!["Документ pay-guid-1С-05: оплата не найдена".to_string()]
+        );
+        assert_eq!(count(&db, "payments", id).await, 5);
+    }
+
+    #[sqlx::test]
+    async fn payment_deletion_rules(db: PgPool) {
+        let f = fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let p1 = first_payment(&db, id).await;
+        let p2: i64 = sqlx::query_scalar(
+            "INSERT INTO payments (order_id, name, sum, paid, paid_at) VALUES ($1, 'Оплачена', 5, TRUE, now())
+             RETURNING id",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let s = SaleSettings::default();
+        let del = |p: i64| DocumentIn {
+            deleted: true,
+            ..pay_doc(&p.to_string(), id, "1", PayOperation::Cash)
+        };
+
+        // Неоплаченная удаляется; остались только оплаченные — заказ оплачен
+        let stats = run(&db, &s, &file(vec![del(p1)])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(stats.payments_updated, 1);
+        assert_eq!(count(&db, "payments", id).await, 1);
+        assert!(order_paid(&db, id).await);
+
+        // Оплаченная — ошибка, остаётся
+        let stats = run(&db, &s, &file(vec![del(p2)])).await;
+        assert_eq!(
+            stats.errors,
+            vec![format!(
+                "Документ pay-guid-{p2}: оплата проведена, удаление невозможно"
+            )]
+        );
+        assert_eq!(count(&db, "payments", id).await, 1);
+
+        // Не найдена — ошибка, а не новая оплата
+        let stats = run(&db, &s, &file(vec![del(999_999)])).await;
+        assert_eq!(
+            stats.errors,
+            vec!["Документ pay-guid-999999: оплата не найдена".to_string()]
+        );
+        assert_eq!(count(&db, "payments", id).await, 1);
+
+        // Оплаты отменённого заказа и заказа в статусе F не меняются
+        sqlx::query("UPDATE orders SET canceled = TRUE WHERE id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let d = pay_doc(&p2.to_string(), id, "2", PayOperation::Cash);
+        let stats = run(&db, &s, &file(vec![d.clone()])).await;
+        assert_eq!(
+            stats.errors,
+            vec![format!("Документ pay-guid-{p2}: заказ отменён")]
+        );
+        statuses(&db).await;
+        sqlx::query("UPDATE orders SET canceled = FALSE, status = 'F' WHERE id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let stats = run(&db, &s, &file(vec![d])).await;
+        assert_eq!(
+            stats.errors,
+            vec![format!("Документ pay-guid-{p2}: заказ в финальном статусе")]
+        );
+    }
+
+    type ShipmentRow = (
+        bool,
+        bool,
+        String,
+        Option<chrono::NaiveDate>,
+        String,
+        String,
+        String,
+        bool,
+        f64,
+    );
+
+    async fn shipment(db: &PgPool, id: i64) -> ShipmentRow {
+        sqlx::query_as(
+            "SELECT deducted, allow_delivery, delivery_doc_num, delivery_doc_date, tracking_number,
+                    id_1c, version_1c, updated_1c, price::float8
+             FROM shipments WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    async fn shipped_status(db: &PgPool) {
+        sqlx::query(
+            "INSERT INTO order_statuses (code, name, notify) VALUES ('S', 'Отгружен', TRUE)",
+        )
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    async fn shipment_deducted_tracking_and_final_status(db: PgPool) {
+        let f = fixture(&db).await;
+        shipped_status(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let sh = first_shipment(&db, id).await;
+        let s = SaleSettings {
+            final_status_on_delivery: Some("S".into()),
+            ..SaleSettings::default()
+        };
+
+        // Только разрешение доставки: не отгружена, статус прежний
+        let allow = with(
+            ship_doc(&sh.to_string(), id, "1"),
+            &[("Доставка разрешена", "true")],
+        );
+        let stats = run(&db, &s, &file(vec![allow])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(stats.shipments_updated, 1);
+        let row = shipment(&db, sh).await;
+        assert_eq!((row.0, row.1), (false, true));
+        assert_eq!(status(&db, id).await.0, "N");
+
+        let d = with(
+            ship_doc(&sh.to_string(), id, "2"),
+            &[
+                ("Дата отгрузки по 1С", "2026-10-15T09:00:00"),
+                ("Номер отгрузки по 1С", "РН-0077"),
+                ("Идентификатор отправления", "TRACK-42"),
+            ],
+        );
+        let stats = run(&db, &s, &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(
+            shipment(&db, sh).await,
+            (
+                true,
+                true,
+                "РН-0077".into(),
+                date("2026-10-15"),
+                "TRACK-42".into(),
+                format!("РН-{sh}"),
+                "2".into(),
+                true,
+                0.0
+            )
+        );
+        let (st, _, marked, _) = status(&db, id).await;
+        assert_eq!((st.as_str(), marked), ("S", true));
+        let comment: String = sqlx::query_scalar(
+            "SELECT comment FROM order_status_history WHERE order_id = $1 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(comment, "1С");
+        assert_eq!(
+            stats.notify,
+            vec![("SALE_STATUS_CHANGED_S".to_string(), id)]
+        );
+        // Отгрузка остатки не списывает
+        assert_eq!(amounts(&db, f.product_id).await, (10.0, 5.0));
+
+        // Удаление отгруженной — ошибка
+        let del = DocumentIn {
+            deleted: true,
+            ..ship_doc(&sh.to_string(), id, "3")
+        };
+        let stats = run(&db, &s, &file(vec![del])).await;
+        assert_eq!(
+            stats.errors,
+            vec![format!(
+                "Документ ship-guid-{sh}: отгрузка проведена, удаление невозможно"
+            )]
+        );
+        assert_eq!(count(&db, "shipments", id).await, 1);
+
+        // Неотгруженная удаляется
+        let other = place_order(&db, &f, None).await;
+        let osh = first_shipment(&db, other).await;
+        let del = DocumentIn {
+            deleted: true,
+            ..ship_doc(&osh.to_string(), other, "1")
+        };
+        let stats = run(&db, &s, &file(vec![del])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(count(&db, "shipments", other).await, 0);
+    }
+
+    #[sqlx::test]
+    async fn shipment_quantity_mismatch(db: PgPool) {
+        let f = fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let sh = first_shipment(&db, id).await;
+        let mut d = ship_doc(&sh.to_string(), id, "1");
+        d.items = vec![item("tovar-1c", 100.0, 3.0), delivery(250.0)];
+
+        // Без опции — ошибка, ничего не изменилось
+        let off = SaleSettings {
+            update_basket_quantity: false,
+            ..SaleSettings::default()
+        };
+        let stats = run(&db, &off, &file(vec![d.clone()])).await;
+        assert_eq!(
+            stats.errors,
+            vec![format!(
+                "Документ ship-guid-{sh}: количество в отгрузке не совпадает с заказом"
+            )]
+        );
+        assert_eq!(
+            lines(&db, id).await,
+            vec![(f.product_id, 1.0, 100.0, false)]
+        );
+        assert_eq!(shipment(&db, sh).await.6, "");
+
+        // Совпадающее количество без опции — не ошибка
+        let mut same = ship_doc(&sh.to_string(), id, "1");
+        same.items = vec![item("tovar-1c", 100.0, 1.0)];
+        let stats = run(&db, &off, &file(vec![same])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+
+        // С опцией — правка позиций по правилам заказа: остатки и суммы, доставка — цена отгрузки
+        d.version = "2".into();
+        let stats = run(&db, &SaleSettings::default(), &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(lines(&db, id).await, vec![(f.product_id, 3.0, 100.0, true)]);
+        assert_eq!(quantity(&db, f.product_id).await, 8.0);
+        assert_eq!(shipment(&db, sh).await.8, 250.0);
+        assert_eq!(totals(&db, id).await, (300.0, 250.0, 550.0, 550.0, 250.0));
+
+        // Оплаченный заказ по составу не правится
+        sqlx::query("UPDATE orders SET paid = TRUE WHERE id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut d = ship_doc(&sh.to_string(), id, "3");
+        d.items = vec![item("tovar-1c", 100.0, 1.0)];
+        let stats = run(&db, &SaleSettings::default(), &file(vec![d])).await;
+        assert_eq!(
+            stats.errors,
+            vec![format!(
+                "Документ ship-guid-{sh}: заказ в финальном состоянии, состав не изменён"
+            )]
+        );
+        assert_eq!(lines(&db, id).await, vec![(f.product_id, 3.0, 100.0, true)]);
+    }
+
+    #[sqlx::test]
+    async fn new_shipment_and_disabled_creation(db: PgPool) {
+        let f = fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let courier: i64 =
+            sqlx::query_scalar("INSERT INTO deliveries (name) VALUES ('Курьер') RETURNING id")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let s = SaleSettings {
+            default_delivery: Some(courier),
+            ..SaleSettings::default()
+        };
+        let mut d = with(
+            ship_doc("1С-77", id, "1"),
+            &[
+                ("Дата отгрузки по 1С", "2026-10-15"),
+                ("Идентификатор отправления", "T-1"),
+            ],
+        );
+        // Отгрузка не единственная — позиции с заказом не сверяются
+        d.items = vec![item("tovar-1c", 100.0, 5.0), delivery(300.0)];
+        let stats = run(&db, &s, &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!((stats.shipments_created, stats.shipments_updated), (1, 0));
+        let row: (Option<i64>, String, f64, bool, String, String) = sqlx::query_as(
+            "SELECT delivery_id, delivery_name, price::float8, deducted, tracking_number, id_1c
+             FROM shipments WHERE order_id = $1 AND id_1c <> ''",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            row,
+            (
+                Some(courier),
+                "Курьер".into(),
+                300.0,
+                true,
+                "T-1".into(),
+                "РН-1С-77".into()
+            )
+        );
+        assert_eq!(
+            lines(&db, id).await,
+            vec![(f.product_id, 1.0, 100.0, false)]
+        );
+        // Доставка заказа — сумма отгрузок
+        assert_eq!(
+            sqlx::query_scalar::<_, f64>("SELECT delivery_price::float8 FROM orders WHERE id = $1")
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            300.0
+        );
+
+        let off = SaleSettings {
+            import_new_shipments: false,
+            ..s.clone()
+        };
+        let stats = run(&db, &off, &file(vec![ship_doc("1С-78", id, "1")])).await;
+        assert_eq!(
+            stats.errors,
+            vec!["Документ ship-guid-1С-78: отгрузка не найдена".to_string()]
+        );
+        assert_eq!(count(&db, "shipments", id).await, 2);
+    }
+
+    #[sqlx::test]
+    async fn container_is_one_transaction(db: PgPool) {
+        let f = fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let p: i64 = sqlx::query_scalar(
+            "INSERT INTO payments (order_id, name, sum, paid) VALUES ($1, 'Оплачена', 5, TRUE) RETURNING id",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let mut order = doc(&id.to_string(), "1", &[]);
+        order.items = vec![item("tovar-1c", 100.0, 2.0)];
+        let bad = DocumentIn {
+            deleted: true,
+            ..pay_doc(&p.to_string(), id, "1", PayOperation::Cash)
+        };
+        let sale = SaleFile {
+            agents: Vec::new(),
+            groups: vec![vec![order, bad]],
+        };
+        let stats = run(&db, &SaleSettings::default(), &sale).await;
+        assert_eq!(
+            stats.errors,
+            vec![format!(
+                "Документ pay-guid-{p}: оплата проведена, удаление невозможно"
+            )]
+        );
+        assert_eq!((stats.orders_updated, stats.payments_updated), (0, 0));
+        // Документ заказа откатился вместе с оплатой: ни Номер1С, ни состава, ни остатков
+        assert_eq!(status(&db, id).await.1, "");
+        assert_eq!(
+            lines(&db, id).await,
+            vec![(f.product_id, 1.0, 100.0, false)]
+        );
+        assert_eq!(amounts(&db, f.product_id).await, (10.0, 5.0));
+    }
+
+    #[sqlx::test]
+    async fn repeat_file_is_noop(db: PgPool) {
+        let f = fixture(&db).await;
+        shipped_status(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let p = first_payment(&db, id).await;
+        let sh = first_shipment(&db, id).await;
+        let s = SaleSettings {
+            final_status_on_delivery: Some("S".into()),
+            ..SaleSettings::default()
+        };
+        let mut order = doc(&id.to_string(), "1", &[]);
+        order.items = vec![item("tovar-1c", 100.0, 2.0)];
+        let mut ship = with(
+            ship_doc(&sh.to_string(), id, "1"),
+            &[
+                ("Дата отгрузки по 1С", "2026-10-15"),
+                ("Идентификатор отправления", "T-9"),
+            ],
+        );
+        ship.items = vec![item("tovar-1c", 100.0, 2.0)];
+        let sale = SaleFile {
+            agents: Vec::new(),
+            groups: vec![
+                vec![order],
+                vec![with(
+                    pay_doc(&p.to_string(), id, "1", PayOperation::Cashless),
+                    &[("Оплачен", "true")],
+                )],
+                vec![DocumentIn {
+                    sum: Some(50.0),
+                    ..with(
+                        pay_doc("1С-П", id, "1", PayOperation::Cash),
+                        &[("Оплачен", "true")],
+                    )
+                }],
+                vec![ship],
+                vec![with(
+                    ship_doc("1С-Р", id, "1"),
+                    &[("Дата отгрузки по 1С", "2026-10-16")],
+                )],
+            ],
+        };
+        let first = run(&db, &s, &sale).await;
+        assert_eq!(first.errors, Vec::<String>::new());
+        assert_eq!(
+            (
+                first.orders_updated,
+                first.payments_updated,
+                first.payments_created,
+                first.shipments_updated,
+                first.shipments_created
+            ),
+            (1, 1, 1, 1, 1)
+        );
+        assert_eq!(first.notify.len(), 2, "{:?}", first.notify);
+        let snapshot = async || {
+            (
+                count(&db, "payments", id).await,
+                count(&db, "shipments", id).await,
+                count(&db, "order_status_history", id).await,
+                lines(&db, id).await,
+                quantity(&db, f.product_id).await,
+                totals_all(&db, id).await,
+            )
+        };
+        let before = snapshot().await;
+
+        let second = run(&db, &s, &sale).await;
+        assert_eq!(second.errors, Vec::<String>::new());
+        assert_eq!(
+            SaleStats {
+                skipped: 0,
+                ..second.clone()
+            },
+            SaleStats::default()
+        );
+        assert_eq!(second.skipped, 5);
+        assert_eq!(snapshot().await, before);
+    }
+
+    async fn totals_all(db: &PgPool, id: i64) -> (f64, f64, bool, String) {
+        sqlx::query_as(
+            "SELECT price::float8, delivery_price::float8, paid, status FROM orders WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(db)
+        .await
+        .unwrap()
     }
 }
