@@ -400,6 +400,56 @@ pub async fn set_paid_in(tx: &mut PgConnection, order_id: i64, paid: bool) -> sq
     Ok(changed)
 }
 
+/// Пересчитывает суммы заказа по позициям: товары, доставка (`None` — прежняя), итог; цена
+/// первой отгрузки — доставка, единственная неоплаченная оплата — итог. Возвращает итог.
+pub async fn recalc_totals_in(
+    tx: &mut PgConnection,
+    order_id: i64,
+    delivery_price: Option<f64>,
+) -> sqlx::Result<f64> {
+    let (goods, current): (f64, f64) = sqlx::query_as(
+        "SELECT COALESCE((SELECT sum(COALESCE(price, 0) * quantity) FROM cart_items
+                          WHERE order_id = o.id), 0)::float8,
+                o.delivery_price::float8
+         FROM orders o WHERE o.id = $1",
+    )
+    .bind(order_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let goods = round2(goods);
+    let delivery = round2(delivery_price.unwrap_or(current));
+    let total = round2(goods + delivery);
+    sqlx::query(
+        "UPDATE orders SET goods_price = $2, delivery_price = $3, price = $4, updated_at = now()
+         WHERE id = $1",
+    )
+    .bind(order_id)
+    .bind(goods)
+    .bind(delivery)
+    .bind(total)
+    .execute(&mut *tx)
+    .await?;
+    if delivery_price.is_some() {
+        sqlx::query(
+            "UPDATE shipments SET price = $2
+             WHERE id = (SELECT min(id) FROM shipments WHERE order_id = $1)",
+        )
+        .bind(order_id)
+        .bind(delivery)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE payments SET sum = $2 WHERE order_id = $1 AND NOT paid
+             AND (SELECT count(*) FROM payments WHERE order_id = $1) = 1",
+    )
+    .bind(order_id)
+    .bind(total)
+    .execute(&mut *tx)
+    .await?;
+    Ok(total)
+}
+
 /// Позиции заказа для расчёта остатков.
 pub async fn stock_lines(tx: &mut PgConnection, order_id: i64) -> sqlx::Result<Vec<StockLine>> {
     let rows: Vec<(i64, Option<i64>, f64)> = sqlx::query_as(

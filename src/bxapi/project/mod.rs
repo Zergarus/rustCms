@@ -147,6 +147,18 @@ pub trait OrderExportHook: Send + Sync {
     ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>>;
 }
 
+/// Обработчик проекта при приёме документов заказа из 1С (аналог событий обмена Битрикса):
+/// вызывается после записи каждого документа в той же транзакции. Ошибка отменяет документ
+/// (вместе с остальными документами его контейнера).
+pub trait OrderImportHook: Send + Sync {
+    fn after_document<'a>(
+        &'a self,
+        conn: &'a mut sqlx::PgConnection,
+        order_id: i64,
+        doc: &'a crate::exchange::sale::parse::DocumentIn,
+    ) -> BoxFuture<'a, anyhow::Result<()>>;
+}
+
 /// Выбор города (`bxapi.location`).
 pub struct LocationConfig {
     /// Типы местоположений в поиске (`CITY`, `VILLAGE`...).
@@ -281,6 +293,10 @@ pub struct Project {
     // Читает протокол обмена заказами (подключается следующей задачей плана)
     #[allow(dead_code)]
     pub order_export_hook: Option<Arc<dyn OrderExportHook>>,
+    /// Свой разбор документов заказа из 1С (`None` — только штатный).
+    // Читает протокол обмена заказами (подключается следующей задачей плана)
+    #[allow(dead_code)]
+    pub order_import_hook: Option<Arc<dyn OrderImportHook>>,
     pub cart: CartConfig,
     pub order: OrderConfig,
     pub profile: ProfileConfig,
@@ -384,6 +400,7 @@ impl Default for Project {
             form_guards: Vec::new(),
             import_hook: None,
             order_export_hook: None,
+            order_import_hook: None,
             cart: CartConfig::default(),
             order: OrderConfig::default(),
             profile: ProfileConfig::default(),
