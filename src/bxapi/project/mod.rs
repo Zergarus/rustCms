@@ -290,12 +290,8 @@ pub struct Project {
     /// Обработчик товаров при обмене с 1С (`None` — ничего не делается).
     pub import_hook: Option<Arc<dyn ImportHook>>,
     /// Реквизиты заказа при выгрузке в 1С (`None` — только реквизиты модуля).
-    // Читает протокол обмена заказами (подключается следующей задачей плана)
-    #[allow(dead_code)]
     pub order_export_hook: Option<Arc<dyn OrderExportHook>>,
     /// Свой разбор документов заказа из 1С (`None` — только штатный).
-    // Читает протокол обмена заказами (подключается следующей задачей плана)
-    #[allow(dead_code)]
     pub order_import_hook: Option<Arc<dyn OrderImportHook>>,
     pub cart: CartConfig,
     pub order: OrderConfig,

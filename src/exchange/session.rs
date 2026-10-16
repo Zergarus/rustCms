@@ -52,6 +52,12 @@ pub struct Session {
 }
 
 impl Session {
+    /// Тип обмена сессии (`state.type`): `catalog` / `sale`; без типа (сессии до обмена
+    /// заказами) — `catalog`.
+    pub fn kind(&self) -> &str {
+        self.state["type"].as_str().unwrap_or(KIND_CATALOG)
+    }
+
     pub fn is_imported(&self, filename: &str) -> bool {
         self.state["imported"]
             .as_array()
@@ -63,21 +69,31 @@ pub fn token_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
-/// Новая сессия обмена: токен возвращается один раз, в БД лежит его sha256.
-pub async fn start(db: &PgPool, user_id: i64) -> Result<(Session, String), SessionError> {
+pub const KIND_CATALOG: &str = "catalog";
+pub const KIND_SALE: &str = "sale";
+
+/// Новая сессия обмена типа `kind` (`state.type`): токен возвращается один раз, в БД лежит
+/// его sha256.
+pub async fn start(
+    db: &PgPool,
+    user_id: i64,
+    kind: &str,
+) -> Result<(Session, String), SessionError> {
     let token = hex::encode(rand::random::<[u8; 32]>());
+    let state = serde_json::json!({ "type": kind });
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO exchange_sessions (token_hash, user_id) VALUES ($1, $2)
+        "INSERT INTO exchange_sessions (token_hash, user_id, state) VALUES ($1, $2, $3)
          RETURNING id",
     )
     .bind(token_hash(&token))
     .bind(user_id)
+    .bind(&state)
     .fetch_one(db)
     .await?;
     let session = Session {
         id,
         user_id: Some(user_id),
-        state: serde_json::json!({}),
+        state,
         expired: false,
     };
     Ok((session, token))
@@ -451,7 +467,7 @@ mod tests {
         .fetch_one(&db)
         .await
         .unwrap();
-        let (s, token) = start(&db, user_id).await.unwrap();
+        let (s, token) = start(&db, user_id, KIND_CATALOG).await.unwrap();
         assert_eq!(token.len(), 64);
         let hash: String =
             sqlx::query_scalar("SELECT token_hash FROM exchange_sessions WHERE id = $1")

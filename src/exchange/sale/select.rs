@@ -526,7 +526,7 @@ fn doc_id(id_1c: &str, id: i64) -> String {
 
 /// ХозОперация оплаты по типу платёжной системы (`PaySystem\Manager::getPsType`): онлайн-оплата —
 /// эквайринг, безналичные — безналичные, остальное — наличные (как у Битрикса по умолчанию).
-fn pay_operation(api_type: &str, handler: &str) -> PayOperation {
+pub(super) fn pay_operation(api_type: &str, handler: &str) -> PayOperation {
     if !handler.is_empty() || api_type == "redirect" {
         PayOperation::Acquiring
     } else if matches!(api_type, "cashless" | "document" | "qr") {

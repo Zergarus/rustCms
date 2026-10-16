@@ -185,6 +185,56 @@ impl PayOperation {
             PayOperation::Acquiring => "Эквайринговая операция",
         }
     }
+
+    /// Тип оплаты для справочника `info` (`EntityType::getDescription` типа из
+    /// `PaymentImport::resolveEntityTypeIdByCodeType`).
+    pub fn description(self) -> &'static str {
+        match self {
+            PayOperation::Cashless => "Безналичная оплата",
+            PayOperation::Cash => "Наличная оплата",
+            PayOperation::Acquiring => "Эквайринговая оплата",
+        }
+    }
+}
+
+/// Справочники для `info` (`sale.export.1c`, теги `CC_BSC1_DI_*` из языкового файла
+/// компонента; «Cтатусы» — с латинской C, как там): статусы, платёжные системы с типом
+/// оплаты, службы доставки. В windows-1251.
+pub fn render_info(
+    statuses: &[(String, String)],
+    pay_systems: &[(i64, String, PayOperation)],
+    deliveries: &[(i64, String)],
+) -> Vec<u8> {
+    let mut x = Xml::new();
+    x.decl();
+    x.open("Справочник");
+    x.open("Cтатусы");
+    for (code, name) in statuses {
+        x.open("Элемент");
+        x.leaf("Ид", code);
+        x.leaf("Название", name);
+        x.close("Элемент");
+    }
+    x.close("Cтатусы");
+    x.open("ПлатежныеСистемы");
+    for (id, name, op) in pay_systems {
+        x.open("Элемент");
+        x.leaf("Ид", &id.to_string());
+        x.leaf("Название", name);
+        x.leaf("ТипОплаты", op.description());
+        x.close("Элемент");
+    }
+    x.close("ПлатежныеСистемы");
+    x.open("СлужбыДоставки");
+    for (id, name) in deliveries {
+        x.open("Элемент");
+        x.leaf("Ид", &id.to_string());
+        x.leaf("Название", name);
+        x.close("Элемент");
+    }
+    x.close("СлужбыДоставки");
+    x.close("Справочник");
+    to_cp1251(&x.finish())
 }
 
 /// Выгрузка заказов (`CSaleExport::ExportOrders2Xml`): корень, за каждым заказом — от 2.10

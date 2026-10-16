@@ -1,4 +1,6 @@
-//! HTTP-протокол обмена с 1С: `checkauth`, `init`, `file`, `import`, `deactivate`, `complete`.
+//! HTTP-протокол обмена с 1С: вход и сессия для обоих типов обмена, каталог (`type=catalog`:
+//! `checkauth`, `init`, `file`, `import`, `deactivate`, `complete`); режимы обмена заказами
+//! (`type=sale`) — в `exchange::sale::http`.
 //!
 //! Распаковка zip выполняется лениво — при первом `import` после загрузки архива.
 
@@ -26,29 +28,67 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/api/1c/exchange", get(handle).post(handle))
 }
 
-/// Успешный ответ: полный текст тела и счётчики для журнала.
+pub(crate) const TEXT: &str = "text/plain; charset=utf-8";
+pub(crate) const XML_1251: &str = "application/xml; charset=windows-1251";
+
+/// Успешный ответ: тело, его тип и счётчики для журнала.
 #[derive(Debug)]
 pub(crate) struct Outcome {
-    body: String,
-    stats: Value,
+    pub(crate) body: Vec<u8>,
+    pub(crate) content_type: &'static str,
+    pub(crate) stats: Value,
 }
 
 impl Outcome {
-    fn text(body: impl Into<String>) -> Outcome {
+    pub(crate) fn text(body: impl Into<String>) -> Outcome {
         Outcome {
-            body: body.into(),
+            body: body.into().into_bytes(),
+            content_type: TEXT,
             stats: Value::Object(Default::default()),
         }
+    }
+
+    /// XML в windows-1251 (`query`, `info` обмена заказами).
+    pub(crate) fn xml(body: Vec<u8>) -> Outcome {
+        Outcome {
+            body,
+            content_type: XML_1251,
+            stats: Value::Object(Default::default()),
+        }
+    }
+
+    pub(crate) fn with_stats(mut self, stats: Value) -> Outcome {
+        self.stats = stats;
+        self
     }
 }
 
 pub(crate) type Reply = Result<Outcome, String>;
 
-fn db_err(e: impl std::fmt::Display) -> String {
+pub(crate) fn db_err(e: impl std::fmt::Display) -> String {
     format!("Ошибка базы данных: {e}")
 }
 
 const DENIED: &str = "Доступ запрещён";
+const OTHER_KIND: &str = "Сессия открыта для другого типа обмена";
+
+/// Тип обмена из `type`: `catalog` / `sale`.
+fn exchange_kind(query: &HashMap<String, String>) -> Option<&'static str> {
+    match query.get("type").map(String::as_str) {
+        Some(session::KIND_CATALOG) => Some(session::KIND_CATALOG),
+        Some(session::KIND_SALE) => Some(session::KIND_SALE),
+        _ => None,
+    }
+}
+
+/// Режимы, которые пишутся в журнал обмена.
+fn logged(kind: &str, mode: &str) -> bool {
+    if kind == session::KIND_SALE {
+        matches!(mode, "query" | "success" | "import")
+    } else {
+        matches!(mode, "import" | "deactivate" | "complete")
+    }
+}
 
 async fn handle(
     State(state): State<AppState>,
@@ -64,7 +104,7 @@ async fn handle(
             tracing::error!("обмен с 1С: обработчик запроса упал: {e}");
             (
                 StatusCode::OK,
-                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                [(header::CONTENT_TYPE, TEXT)],
                 "failure\nВнутренняя ошибка обмена",
             )
                 .into_response()
@@ -81,6 +121,7 @@ async fn process(
     let started = Instant::now();
     let mode = query.get("mode").map(String::as_str).unwrap_or("");
     let filename = query.get("filename").map(String::as_str).unwrap_or("");
+    let kind = exchange_kind(&query).unwrap_or(session::KIND_CATALOG);
     let mut set_cookie = None;
     let mut session = None;
     let reply = dispatch(
@@ -95,6 +136,7 @@ async fn process(
     .await;
     if let (Some(session), Err(e)) = (&session, &reply)
         && mode == "import"
+        && kind == session::KIND_CATALOG
     {
         // Файл с ошибкой блокирует деактивацию, пока он не загрузится успешно
         let marked = sqlx::query(
@@ -114,15 +156,29 @@ async fn process(
     }
     match (&session, &reply) {
         // Журнал пишется только для проверенной сессии
-        (Some(session), _) if matches!(mode, "import" | "deactivate" | "complete") => {
+        (Some(session), _) if logged(kind, mode) => {
             let (result, stats, error) = match &reply {
-                Ok(o) => ("success", o.stats.clone(), String::new()),
-                Err(e) => ("failure", Value::Object(Default::default()), e.clone()),
+                // Текст — по первой строке ответа (success / progress / error), XML — success
+                Ok(o) if o.content_type == XML_1251 => {
+                    ("success".to_string(), o.stats.clone(), String::new())
+                }
+                Ok(o) => (
+                    String::from_utf8_lossy(o.body.split(|b| *b == b'\n').next().unwrap_or(b""))
+                        .into_owned(),
+                    o.stats.clone(),
+                    String::new(),
+                ),
+                Err(e) => (
+                    "failure".to_string(),
+                    Value::Object(Default::default()),
+                    e.clone(),
+                ),
             };
             let logged = sqlx::query(
-                "INSERT INTO exchange_log (user_id, mode, filename, result, stats, error, duration_ms)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                "INSERT INTO exchange_log (kind, user_id, mode, filename, result, stats, error, duration_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             )
+            .bind(kind)
             .bind(session.user_id)
             .bind(mode)
             .bind(truncate(filename, 255))
@@ -139,16 +195,12 @@ async fn process(
         (None, Err(e)) => tracing::warn!(mode, "обмен с 1С: отказ до входа: {e}"),
         _ => {}
     }
-    let text = match reply {
-        Ok(o) => o.body,
-        Err(e) => format!("failure\n{e}"),
+    let (content_type, body) = match reply {
+        Ok(o) => (o.content_type, o.body),
+        Err(e) => (TEXT, format!("failure\n{e}").into_bytes()),
     };
-    let mut response = (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        text,
-    )
-        .into_response();
+    let mut response =
+        (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], body).into_response();
     let secure = if state.config.cookie_secure {
         "; Secure"
     } else {
@@ -178,11 +230,9 @@ async fn dispatch(
     session_out: &mut Option<Session>,
     set_cookie: &mut Option<String>,
 ) -> Reply {
-    if query.get("type").map(String::as_str) != Some("catalog") {
-        return Err("Неподдерживаемый тип обмена".into());
-    }
+    let kind = exchange_kind(query).ok_or("Неподдерживаемый тип обмена")?;
     if mode == "checkauth" {
-        let (reply, token) = checkauth(state, headers).await?;
+        let (reply, token) = checkauth(state, headers, kind).await?;
         *set_cookie = Some(token.clone());
         return Ok(reply);
     }
@@ -200,8 +250,17 @@ async fn dispatch(
     if session.expired {
         return Err("Сессия обмена истекла".into());
     }
-    authorize(state, session.user_id).await?;
+    if session.kind() != kind {
+        return Err(OTHER_KIND.into());
+    }
+    authorize(state, session.user_id, kind).await?;
     let session = session_out.insert(session);
+    if kind == session::KIND_SALE {
+        return crate::exchange::sale::http::dispatch(
+            state, session, mode, query, headers, body, &token,
+        )
+        .await;
+    }
     let filename = || {
         query
             .get("filename")
@@ -219,8 +278,17 @@ async fn dispatch(
     }
 }
 
-/// Пользователь сессии всё ещё существует, активен и имеет право на обмен.
-async fn authorize(state: &AppState, user_id: Option<i64>) -> Result<(), String> {
+/// Право на тип обмена: каталог — `exchange.1c`, заказы — `exchange.1c.sale`.
+fn permission(kind: &str) -> &'static str {
+    if kind == session::KIND_SALE {
+        access::EXCHANGE_1C_SALE
+    } else {
+        access::EXCHANGE_1C
+    }
+}
+
+/// Пользователь сессии всё ещё существует, активен и имеет право на тип обмена.
+async fn authorize(state: &AppState, user_id: Option<i64>, kind: &str) -> Result<(), String> {
     let user_id = user_id.ok_or(DENIED)?;
     let user: Option<crate::auth::User> =
         sqlx::query_as("SELECT id, login, email, is_admin, active FROM users WHERE id = $1")
@@ -232,7 +300,7 @@ async fn authorize(state: &AppState, user_id: Option<i64>) -> Result<(), String>
     let access = access::Access::load(&state.db, user)
         .await
         .map_err(db_err)?;
-    if access.can(access::EXCHANGE_1C) {
+    if access.can(permission(kind)) {
         Ok(())
     } else {
         Err(DENIED.into())
@@ -251,7 +319,11 @@ fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
     Some((login.to_string(), password.to_string()))
 }
 
-async fn checkauth(state: &AppState, headers: &HeaderMap) -> Result<(Outcome, String), String> {
+async fn checkauth(
+    state: &AppState,
+    headers: &HeaderMap,
+    kind: &str,
+) -> Result<(Outcome, String), String> {
     let (login, password) = basic_credentials(headers).ok_or(DENIED)?;
     let user = crate::auth::verify_login(&state.db, &login, password)
         .await
@@ -262,13 +334,15 @@ async fn checkauth(state: &AppState, headers: &HeaderMap) -> Result<(Outcome, St
     let access = access::Access::load(&state.db, user)
         .await
         .map_err(db_err)?;
-    if !access.can(access::EXCHANGE_1C) {
+    if !access.can(permission(kind)) {
         return Err(DENIED.into());
     }
     if let Err(e) = session::cleanup_expired(&state.db, &state.config.upload_dir).await {
         tracing::warn!("обмен с 1С: очистка старых сессий: {e}");
     }
-    let (_, token) = session::start(&state.db, user_id).await.map_err(db_err)?;
+    let (_, token) = session::start(&state.db, user_id, kind)
+        .await
+        .map_err(db_err)?;
     Ok((
         Outcome::text(format!("success\n{}\n{token}", session::COOKIE)),
         token,
@@ -290,7 +364,10 @@ async fn init(state: &AppState, session: &Session, token: &str) -> Reply {
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
-    sqlx::query("UPDATE exchange_sessions SET state = '{}' WHERE id = $1")
+    sqlx::query(
+        "UPDATE exchange_sessions SET state = jsonb_strip_nulls(jsonb_build_object('type', state->'type'))
+         WHERE id = $1",
+    )
         .bind(session.id)
         .execute(&mut *tx)
         .await
@@ -303,7 +380,7 @@ async fn init(state: &AppState, session: &Session, token: &str) -> Reply {
     )))
 }
 
-async fn file(
+pub(crate) async fn file(
     state: &AppState,
     session: &Session,
     filename: &str,
@@ -425,10 +502,8 @@ pub(crate) async fn import_file(
     }
     .await;
     match result {
-        Ok(stats) => Ok(Outcome {
-            body: format!("success\n{}", summary(&stats)),
-            stats: serde_json::to_value(&stats).unwrap_or_default(),
-        }),
+        Ok(stats) => Ok(Outcome::text(format!("success\n{}", summary(&stats)))
+            .with_stats(serde_json::to_value(&stats).unwrap_or_default())),
         Err(e) => {
             // Транзакция откатилась, а записанные на диск файлы остались бы сиротами
             ctx.discard_written().await;
@@ -451,10 +526,8 @@ async fn deactivate_now(state: &AppState, session: &Session) -> Reply {
         let would_act =
             settings.element_action != Action::None || settings.section_action != Action::None;
         if would_act {
-            return Ok(Outcome {
-                body: format!("success\n{SKIPPED_NOTE}"),
-                stats: serde_json::json!({ "note": SKIPPED_NOTE }),
-            });
+            return Ok(Outcome::text(format!("success\n{SKIPPED_NOTE}"))
+                .with_stats(serde_json::json!({ "note": SKIPPED_NOTE })));
         }
     }
     let mut tx = state.db.begin().await.map_err(db_err)?;
@@ -470,10 +543,7 @@ async fn deactivate_now(state: &AppState, session: &Session) -> Reply {
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
-    Ok(Outcome {
-        body: "success".into(),
-        stats: serde_json::to_value(&stats).unwrap_or_default(),
-    })
+    Ok(Outcome::text("success").with_stats(serde_json::to_value(&stats).unwrap_or_default()))
 }
 
 async fn deactivate(state: &AppState, session: &Session) -> Reply {
@@ -504,7 +574,7 @@ async fn complete(state: &AppState, session: &Session) -> Reply {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::exchange::session::{self, Limits};
     use crate::exchange::settings::{Action, Settings};
@@ -519,7 +589,7 @@ mod tests {
     const GROUPS: &str = include_str!("../../tests/fixtures/1c/groups.xml");
     const PRICES: &str = include_str!("../../tests/fixtures/1c/prices.xml");
 
-    fn basic(login: &str, password: &str) -> String {
+    pub(crate) fn basic(login: &str, password: &str) -> String {
         use base64::Engine;
         format!(
             "Basic {}",
@@ -527,25 +597,33 @@ mod tests {
         )
     }
 
-    struct Client {
+    pub(crate) struct Client {
         app: Router,
+        base: String,
     }
 
     impl Client {
-        fn new(state: &AppState) -> Client {
+        pub(crate) fn new(state: &AppState) -> Client {
+            Client::with_type(state, "catalog")
+        }
+
+        /// Клиент обмена с параметром `type` (`catalog` / `sale`).
+        pub(crate) fn with_type(state: &AppState, kind: &str) -> Client {
             Client {
                 app: crate::app(state.clone()),
+                base: format!("/api/1c/exchange?type={kind}"),
             }
         }
 
-        async fn raw(
+        /// Запрос без проверки типа содержимого: (Content-Type, тело).
+        pub(crate) async fn send(
             &self,
             method: &str,
             uri: &str,
             cookie: Option<&str>,
             auth: Option<&str>,
             body: Vec<u8>,
-        ) -> String {
+        ) -> (String, Vec<u8>) {
             let mut req = Request::builder().method(method).uri(uri);
             if let Some(c) = cookie {
                 req = req.header(header::COOKIE, format!("{}={c}", session::COOKIE));
@@ -559,19 +637,37 @@ mod tests {
                 .oneshot(req.body(Body::from(body)).unwrap())
                 .await
                 .unwrap();
-            assert_eq!(
-                res.headers()[header::CONTENT_TYPE],
-                "text/plain; charset=utf-8",
-                "{uri}"
-            );
+            let content_type = res.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .to_string();
             let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-            String::from_utf8(bytes.to_vec()).unwrap()
+            (content_type, bytes.to_vec())
         }
 
-        async fn checkauth(&self, login: &str, password: &str) -> String {
+        pub(crate) async fn raw(
+            &self,
+            method: &str,
+            uri: &str,
+            cookie: Option<&str>,
+            auth: Option<&str>,
+            body: Vec<u8>,
+        ) -> String {
+            let (content_type, bytes) = self.send(method, uri, cookie, auth, body).await;
+            assert_eq!(content_type, "text/plain; charset=utf-8", "{uri}");
+            String::from_utf8(bytes).unwrap()
+        }
+
+        /// GET режима обмена с ответом как есть: (Content-Type, тело).
+        pub(crate) async fn get_bytes(&self, token: &str, query: &str) -> (String, Vec<u8>) {
+            let uri = format!("{}&{query}", self.base);
+            self.send("GET", &uri, Some(token), None, vec![]).await
+        }
+
+        pub(crate) async fn checkauth(&self, login: &str, password: &str) -> String {
             self.raw(
                 "GET",
-                &format!("{BASE}&mode=checkauth"),
+                &format!("{}&mode=checkauth", self.base),
                 None,
                 Some(&basic(login, password)),
                 vec![],
@@ -579,19 +675,24 @@ mod tests {
             .await
         }
 
-        async fn get(&self, token: &str, query: &str) -> String {
-            self.raw("GET", &format!("{BASE}&{query}"), Some(token), None, vec![])
-                .await
+        pub(crate) async fn get(&self, token: &str, query: &str) -> String {
+            let uri = format!("{}&{query}", self.base);
+            self.raw("GET", &uri, Some(token), None, vec![]).await
         }
 
-        async fn post(&self, token: &str, query: &str, body: Vec<u8>) -> String {
-            self.raw("POST", &format!("{BASE}&{query}"), Some(token), None, body)
-                .await
+        pub(crate) async fn post(&self, token: &str, query: &str, body: Vec<u8>) -> String {
+            let uri = format!("{}&{query}", self.base);
+            self.raw("POST", &uri, Some(token), None, body).await
         }
     }
 
     /// Пользователь группы с правом `exchange.1c`.
-    async fn exchange_user(db: &PgPool, login: &str) -> i64 {
+    pub(crate) async fn exchange_user(db: &PgPool, login: &str) -> i64 {
+        exchange_user_with(db, login, "exchange.1c").await
+    }
+
+    /// Пользователь группы с правом `permission`.
+    pub(crate) async fn exchange_user_with(db: &PgPool, login: &str, permission: &str) -> i64 {
         let user = crate::auth::create_user(db, login, "password123".into(), false)
             .await
             .unwrap();
@@ -601,13 +702,12 @@ mod tests {
                 .fetch_one(db)
                 .await
                 .unwrap();
-        sqlx::query(
-            "INSERT INTO group_permissions (group_id, permission) VALUES ($1, 'exchange.1c')",
-        )
-        .bind(group)
-        .execute(db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO group_permissions (group_id, permission) VALUES ($1, $2)")
+            .bind(group)
+            .bind(permission)
+            .execute(db)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
             .bind(user.id)
             .bind(group)
@@ -617,7 +717,7 @@ mod tests {
         user.id
     }
 
-    async fn login(c: &Client, login: &str) -> String {
+    pub(crate) async fn login(c: &Client, login: &str) -> String {
         let r = c.checkauth(login, "password123").await;
         let lines: Vec<&str> = r.lines().collect();
         assert_eq!(&lines[..2], ["success", "CMS_1C_SID"], "{r}");
@@ -639,7 +739,7 @@ mod tests {
         )
     }
 
-    fn make_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    pub(crate) fn make_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut buf = std::io::Cursor::new(Vec::new());
         let mut w = zip::ZipWriter::new(&mut buf);
         let opts = zip::write::SimpleFileOptions::default();
@@ -651,7 +751,7 @@ mod tests {
         buf.into_inner()
     }
 
-    async fn upload(c: &Client, token: &str, filename: &str, data: &[u8]) {
+    pub(crate) async fn upload(c: &Client, token: &str, filename: &str, data: &[u8]) {
         for chunk in data.chunks(1024) {
             let r = c
                 .post(
@@ -884,7 +984,9 @@ mod tests {
     async fn zip_limits_enforced(db: PgPool) {
         let user_id = exchange_user(&db, "exch").await;
         let state = test_state(db.clone());
-        let (s, _) = session::start(&db, user_id).await.unwrap();
+        let (s, _) = session::start(&db, user_id, session::KIND_CATALOG)
+            .await
+            .unwrap();
         let dir = session::dir(&state.config.upload_dir, &s);
         std::fs::create_dir_all(&dir).unwrap();
         let big = vec![b'a'; 4096];
@@ -1172,7 +1274,9 @@ mod tests {
     async fn failure_after_apply_discards_written_files(db: PgPool) {
         let user_id = exchange_user(&db, "exch").await;
         let state = test_state(db.clone());
-        let (s, _) = session::start(&db, user_id).await.unwrap();
+        let (s, _) = session::start(&db, user_id, session::KIND_CATALOG)
+            .await
+            .unwrap();
         let dir = session::dir(&state.config.upload_dir, &s);
         std::fs::create_dir_all(dir.join("import_files/aa")).unwrap();
         std::fs::write(
@@ -1436,7 +1540,9 @@ mod tests {
 
     /// Сессия с файлом `name` в каталоге.
     async fn session_with_file(state: &AppState, user_id: i64, name: &str, data: &[u8]) -> Session {
-        let (s, _) = session::start(&state.db, user_id).await.unwrap();
+        let (s, _) = session::start(&state.db, user_id, session::KIND_CATALOG)
+            .await
+            .unwrap();
         let dir = session::dir(&state.config.upload_dir, &s);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name), data).unwrap();

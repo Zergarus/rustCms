@@ -1,11 +1,12 @@
 //! Обмен заказами с 1С (`type=sale`).
 
-// Метку и настройки подключают следующие задачи плана обмена заказами.
+// Сохранение настроек и соответствия реквизитов подключает админка (следующая задача плана).
 #![allow(dead_code)]
 
 pub mod apply;
 mod apply_docs;
 pub mod document;
+pub mod http;
 pub mod parse;
 pub mod select;
 pub mod settings;
