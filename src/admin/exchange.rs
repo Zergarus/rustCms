@@ -16,9 +16,13 @@ use crate::{
     access::{Access, EXCHANGE_1C, EXCHANGE_1C_SALE},
     error::{AppError, AppResult},
     exchange::{
-        sale::settings::{
-            CONTRAGENT_CODES, Domain, MapEntry, MapSource, ORDER_FIELDS, SaleSettings, USER_FIELDS,
-            load_map, save_map,
+        sale::{
+            apply::SaleStats,
+            http::summary as sale_summary,
+            settings::{
+                CONTRAGENT_CODES, Domain, MapEntry, MapSource, ORDER_FIELDS, SaleSettings,
+                USER_FIELDS, load_map, save_map,
+            },
         },
         settings::{Action, Settings},
     },
@@ -47,8 +51,29 @@ struct CollectionOption {
     name: String,
 }
 
+/// Счётчики обмена заказами: выгрузка (`{"orders": N}`) или итог приёма (`SaleStats`).
+fn summarize_sale(stats: &Value) -> String {
+    if let Some(n) = stats.get("orders").and_then(Value::as_u64) {
+        return format!("Выгружено: заказы {n}");
+    }
+    let Ok(parsed) = serde_json::from_value::<SaleStats>(stats.clone()) else {
+        return String::new();
+    };
+    if stats.as_object().is_none_or(|o| o.is_empty()) {
+        return String::new();
+    }
+    let mut text = sale_summary(&parsed);
+    if !parsed.errors.is_empty() {
+        text.push_str(&format!(". Ошибок: {}", parsed.errors.len()));
+    }
+    text
+}
+
 /// Счётчики из `stats` одной строкой: «создано: items 3, sections 1; обновлено: …».
-fn summarize(stats: &Value) -> String {
+fn summarize(kind: &str, stats: &Value) -> String {
+    if kind == "sale" {
+        return summarize_sale(stats);
+    }
     const KINDS: [(&str, &str); 5] = [
         ("created", "создано"),
         ("updated", "обновлено"),
@@ -101,7 +126,7 @@ async fn journal(state: &AppState, user: &Access) -> AppResult<Vec<LogRow>> {
                 mode,
                 filename,
                 result,
-                summary: summarize(&stats),
+                summary: summarize(&kind, &stats),
                 error,
             },
         )
@@ -357,19 +382,34 @@ async fn sale_page(
         sqlx::query_as("SELECT id, name FROM deliveries ORDER BY active DESC, sort, id")
             .fetch_all(&state.db)
             .await?;
-    let person_types: Vec<(i64, String, String, i64)> = sqlx::query_as(
+    let sale_types: Vec<(i64, String, String, i64)> = sqlx::query_as(
         "SELECT p.id, p.name, p.domain,
                 (SELECT count(*) FROM exchange_order_map m WHERE m.person_type_id = p.id)
          FROM person_types p ORDER BY p.sort, p.id",
     )
     .fetch_all(&state.db)
     .await?;
+    let mapped_all: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM exchange_order_map WHERE person_type_id = 0")
+            .fetch_one(&state.db)
+            .await?;
+    let mut person_types = vec![(
+        0,
+        "Для всех типов плательщика".to_string(),
+        String::new(),
+        mapped_all,
+    )];
+    person_types.extend(sale_types);
     let person_types: Vec<PersonTypeRow> = person_types
         .into_iter()
         .map(|(id, name, domain, mapped)| PersonTypeRow {
             id,
             name,
-            domain: domain_label(&domain),
+            domain: if id == 0 {
+                "—"
+            } else {
+                domain_label(&domain)
+            },
             mapped,
         })
         .collect();
@@ -600,8 +640,13 @@ struct RekvRow {
 /// Пустых строк для новых реквизитов под таблицей.
 const BLANK_REKV: u32 = 3;
 
-fn codes_of(domain: Domain) -> impl Iterator<Item = &'static (&'static str, &'static str, Domain)> {
-    CONTRAGENT_CODES.iter().filter(move |c| c.2 == domain)
+/// Коды контрагента домена; без домена (соответствие «для всех типов») — обоих.
+fn codes_of(
+    domain: Option<Domain>,
+) -> impl Iterator<Item = &'static (&'static str, &'static str, Domain)> {
+    CONTRAGENT_CODES
+        .iter()
+        .filter(move |c| domain.is_none_or(|d| c.2 == d))
 }
 
 fn rekv_number(code: &str) -> Option<u32> {
@@ -612,7 +657,7 @@ fn rekv_number(code: &str) -> Option<u32> {
 }
 
 /// Строки формы из сохранённого соответствия.
-fn rows_from_map(domain: Domain, entries: &[MapEntry]) -> (Vec<CodeRow>, Vec<RekvRow>) {
+fn rows_from_map(domain: Option<Domain>, entries: &[MapEntry]) -> (Vec<CodeRow>, Vec<RekvRow>) {
     let by_code: HashMap<&str, &MapEntry> = entries.iter().map(|e| (e.code.as_str(), e)).collect();
     let codes = codes_of(domain)
         .map(|(code, field, _)| {
@@ -641,7 +686,10 @@ fn rows_from_map(domain: Domain, entries: &[MapEntry]) -> (Vec<CodeRow>, Vec<Rek
 }
 
 /// Строки формы из присланных полей: введённое остаётся на месте при ошибке.
-fn rows_from_form(domain: Domain, f: &HashMap<String, String>) -> (Vec<CodeRow>, Vec<RekvRow>) {
+fn rows_from_form(
+    domain: Option<Domain>,
+    f: &HashMap<String, String>,
+) -> (Vec<CodeRow>, Vec<RekvRow>) {
     let get = |k: String| f.get(&k).map(|v| v.trim().to_string()).unwrap_or_default();
     let codes = codes_of(domain)
         .map(|(code, field, _)| CodeRow {
@@ -682,17 +730,22 @@ async fn map_page(
     state: &AppState,
     user: &Access,
     person_type_id: i64,
-    domain: Domain,
+    domain: Option<Domain>,
     codes: Vec<CodeRow>,
     mut rekv: Vec<RekvRow>,
     error: Option<String>,
 ) -> AppResult<Html<String>> {
-    let name: String = sqlx::query_scalar("SELECT name FROM person_types WHERE id = $1")
-        .bind(person_type_id)
-        .fetch_one(&state.db)
-        .await?;
+    let name: String = if person_type_id == 0 {
+        "Для всех типов плательщика".into()
+    } else {
+        sqlx::query_scalar("SELECT name FROM person_types WHERE id = $1")
+            .bind(person_type_id)
+            .fetch_one(&state.db)
+            .await?
+    };
     let properties: Vec<(i64, String, String)> = sqlx::query_as(
-        "SELECT id, name, kind FROM order_properties WHERE person_type_id = $1 ORDER BY sort, id",
+        "SELECT id, name, kind FROM order_properties
+         WHERE person_type_id = $1 OR $1 = 0 ORDER BY person_type_id, sort, id",
     )
     .bind(person_type_id)
     .fetch_all(&state.db)
@@ -716,7 +769,7 @@ async fn map_page(
             error,
             person_type_id,
             person_type => name,
-            domain => domain.code(),
+            domain => domain.map(Domain::code),
             codes,
             rekv,
             properties,
@@ -726,14 +779,18 @@ async fn map_page(
     )
 }
 
-async fn person_type_domain(state: &AppState, id: i64) -> AppResult<Domain> {
+/// Домен типа плательщика; `None` — соответствие «для всех типов» (id 0).
+async fn person_type_domain(state: &AppState, id: i64) -> AppResult<Option<Domain>> {
+    if id == 0 {
+        return Ok(None);
+    }
     let domain: Option<String> =
         sqlx::query_scalar("SELECT domain FROM person_types WHERE id = $1")
             .bind(id)
             .fetch_optional(&state.db)
             .await?;
     domain
-        .map(|d| Domain::from_code(&d))
+        .map(|d| Some(Domain::from_code(&d)))
         .ok_or(AppError::NotFound)
 }
 
@@ -773,7 +830,8 @@ async fn check_value(
                 return Ok(bad("свойство — номер или номер_CITY / _COUNTRY / _REGION"));
             };
             let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM order_properties WHERE id = $1 AND person_type_id = $2)",
+                "SELECT EXISTS (SELECT 1 FROM order_properties
+                 WHERE id = $1 AND (person_type_id = $2 OR $2 = 0))",
             )
             .bind(id)
             .bind(person_type_id)
@@ -807,13 +865,17 @@ pub async fn save_map_form(
         Some("E") => Some(Domain::Entity),
         _ => None,
     };
-    let shown = domain.unwrap_or(stored_domain);
+    let for_all = stored_domain.is_none();
+    let shown = if for_all {
+        None
+    } else {
+        domain.or(stored_domain)
+    };
     let (codes, rekv) = rows_from_form(shown, &f);
 
     let mut entries = Vec::new();
-    let mut error = domain
-        .is_none()
-        .then(|| "Домен: выберите физлицо или юрлицо".to_string());
+    let mut error =
+        (!for_all && domain.is_none()).then(|| "Домен: выберите физлицо или юрлицо".to_string());
     for row in codes.iter().filter(|r| !r.source.is_empty()) {
         if error.is_some() {
             break;
@@ -870,11 +932,13 @@ pub async fn save_map_form(
         .await?
         .into_response());
     }
-    sqlx::query("UPDATE person_types SET domain = $2 WHERE id = $1")
-        .bind(person_type_id)
-        .bind(shown.code())
-        .execute(&state.db)
-        .await?;
+    if let Some(shown) = shown {
+        sqlx::query("UPDATE person_types SET domain = $2 WHERE id = $1")
+            .bind(person_type_id)
+            .bind(shown.code())
+            .execute(&state.db)
+            .await?;
+    }
     save_map(&state.db, person_type_id, &entries).await?;
     Ok(Redirect::to(&format!("/admin/exchange/map/{person_type_id}")).into_response())
 }
@@ -1261,5 +1325,100 @@ mod tests {
         let (_, html) = get(&app, "/admin/exchange?tab=sale", &cookie).await;
         assert!(html.contains(&url), "{html}");
         assert!(html.contains("Юрлицо"));
+    }
+
+    #[sqlx::test]
+    async fn journal_summarizes_sale_rows(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        sqlx::query(
+            "INSERT INTO exchange_log (kind, mode, filename, result, stats, error, duration_ms) VALUES
+             ('sale', 'file', 'o.xml', 'success',
+              '{\"orders_created\":2,\"orders_updated\":1,\"payments_created\":0,\"payments_updated\":3,\"shipments_created\":0,\"shipments_updated\":0,\"skipped\":4,\"errors\":[\"плохой документ\"]}', '', 1),
+             ('sale', 'query', '', 'success', '{\"orders\":5}', '', 1)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let (_, html) = get(&app, "/admin/exchange?tab=sale", &cookie).await;
+        for n in [
+            "Выгружено: заказы 5",
+            "Создано: заказы 2. Обновлено: заказы 1, оплаты 3. Пропущено: 4. Ошибок: 1",
+        ] {
+            assert!(html.contains(n), "нет «{n}»: {html}");
+        }
+    }
+
+    #[sqlx::test]
+    async fn map_for_all_person_types(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let (_, _, prop) = person_type(&db).await;
+        sqlx::query(
+            "INSERT INTO exchange_order_map (person_type_id, code, name, source, value)
+             VALUES (0, 'BUYER_PERSON_INN', '', 'value', 'ОБЩИЙ'), (0, '1C_REKV_4', 'Общий', 'user', 'login')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let (status, html) = get(&app, "/admin/exchange/map/0", &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        for n in [
+            "BUYER_PERSON_INN",
+            "BUYER_COMPANY_INN",
+            "ОБЩИЙ",
+            "1C_REKV_4",
+            "Общий",
+        ] {
+            assert!(html.contains(n), "нет «{n}»");
+        }
+        assert!(!html.contains(r#"name="domain""#));
+        let (_, list) = get(&app, "/admin/exchange?tab=sale", &cookie).await;
+        assert!(list.contains("/admin/exchange/map/0"));
+
+        // свойство любого типа плательщика; домен не требуется
+        let body = format!(
+            "src_BUYER_PERSON_INN=value&val_BUYER_PERSON_INN=NEW\
+             &src_BUYER_COMPANY_INN=property&val_BUYER_COMPANY_INN={prop}\
+             &rekv_4_name=%D0%9E&rekv_4_source=order&rekv_4_value=id"
+        );
+        let (status, html) = post_form(&app, "/admin/exchange/map/0", &cookie, &body).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{html}");
+        let mut got: Vec<(i64, String, String, String)> = load_map(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| {
+                (
+                    e.person_type_id,
+                    e.code,
+                    e.source.code().to_string(),
+                    e.value,
+                )
+            })
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                (0, "1C_REKV_4".into(), "order".into(), "id".into()),
+                (
+                    0,
+                    "BUYER_COMPANY_INN".into(),
+                    "property".into(),
+                    prop.to_string()
+                ),
+                (0, "BUYER_PERSON_INN".into(), "value".into(), "NEW".into()),
+            ]
+        );
+        let (status, html) = post_form(
+            &app,
+            "/admin/exchange/map/0",
+            &cookie,
+            "src_BUYER_PERSON_INN=property&val_BUYER_PERSON_INN=999999",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(r#"class="alert""#));
     }
 }

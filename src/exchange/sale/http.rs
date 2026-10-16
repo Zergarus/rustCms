@@ -165,7 +165,7 @@ async fn success(state: &AppState, session: &Session) -> Reply {
 }
 
 /// Итог приёма для ответа 1С: «Создано: заказы 1. Обновлено: оплаты 2».
-fn summary(stats: &SaleStats) -> String {
+pub(crate) fn summary(stats: &SaleStats) -> String {
     let mut parts = Vec::new();
     for (label, counts) in [
         (

@@ -27,7 +27,8 @@ const TRAIT_CANCEL: &str = "Отменен";
 pub(super) const HISTORY_COMMENT: &str = "1С";
 
 /// Итог приёма; `notify` — письма о смене статуса (событие, заказ), отправляются после коммита.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SaleStats {
     pub orders_created: u32,
     pub orders_updated: u32,

@@ -13,6 +13,7 @@
 </select>
 {% endmacro %}
 <form class="card form table-wrap" method="post" action="/admin/exchange/map/{{ person_type_id }}">
+  {% if domain %}
   <label>Домен типа плательщика
     <select name="domain">
       <option value="I" {% if domain == "I" %}selected{% endif %}>Физлицо</option>
@@ -20,6 +21,9 @@
     </select>
   </label>
   <p class="muted">После смены домена сохраните форму: список реквизитов контрагента обновится.</p>
+  {% else %}
+  <p class="muted">Эти соответствия действуют для типов плательщика, у которых своей настройки реквизита нет. Свойством заказа может быть свойство любого типа плательщика.</p>
+  {% endif %}
   <p class="muted">Источник: «Свойство заказа» — номер свойства (для местоположения также номер_CITY, номер_COUNTRY, номер_REGION); «Поле пользователя» — {{ user_fields|join(", ") }}; «Поле заказа» — {{ order_fields|join(", ") }}; «Значение» — любая строка.</p>
   {% if properties %}
   <details><summary>Свойства заказа этого типа плательщика</summary>
