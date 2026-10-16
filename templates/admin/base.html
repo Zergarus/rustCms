@@ -36,7 +36,7 @@
     {"id": "dashboard", "url": "/admin", "label": "Рабочий стол", "show": true},
     {"id": "collections", "url": "/admin/collections", "label": "Коллекции", "show": user.can_see_collections},
     {"id": "shop", "url": "/admin/shop/orders" if "orders.manage" in user.permissions else "/admin/shop/stores", "label": "Магазин", "show": "shop.manage" in user.permissions or "orders.manage" in user.permissions},
-    {"id": "exchange", "url": "/admin/exchange", "label": "Обмен с 1С", "show": "exchange.1c" in user.permissions},
+    {"id": "exchange", "url": "/admin/exchange", "label": "Обмен с 1С", "show": "exchange.1c" in user.permissions or "exchange.1c.sale" in user.permissions},
     {"id": "users", "url": "/admin/users", "label": "Пользователи", "show": "users.manage" in user.permissions},
     {"id": "groups", "url": "/admin/groups", "label": "Группы", "show": user.is_admin},
   ] %}

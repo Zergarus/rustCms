@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use axum::{
     Extension,
     extract::{Multipart, Path, Query, State},
+    http::header,
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::Form;
@@ -233,6 +234,38 @@ struct PropField {
     options: Vec<(String, String)>,
 }
 
+/// Данные обмена с 1С заказа.
+#[derive(FromRow, Serialize)]
+struct OneCOrder {
+    id_1c: String,
+    version_1c: String,
+    updated_1c: bool,
+    external: bool,
+}
+
+#[derive(FromRow, Serialize)]
+struct OneCPayment {
+    name: String,
+    id_1c: String,
+    version_1c: String,
+    pay_voucher_num: String,
+    pay_voucher_date: Option<String>,
+    is_return: bool,
+    return_comment: String,
+}
+
+#[derive(FromRow, Serialize)]
+struct OneCShipment {
+    delivery_name: String,
+    id_1c: String,
+    version_1c: String,
+    deducted: bool,
+    deducted_at: Option<String>,
+    delivery_doc_num: String,
+    delivery_doc_date: Option<String>,
+    tracking_number: String,
+}
+
 pub(crate) async fn card(
     state: &AppState,
     user: Access,
@@ -333,6 +366,29 @@ pub(crate) async fn card(
             .fetch_all(&state.db)
             .await?;
     let version = super::order_edit::version(&order.updated_at);
+    let onec: OneCOrder =
+        sqlx::query_as("SELECT id_1c, version_1c, updated_1c, external FROM orders WHERE id = $1")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await?;
+    let onec_payments: Vec<OneCPayment> = sqlx::query_as(
+        "SELECT name, id_1c, version_1c, pay_voucher_num,
+                to_char(pay_voucher_date, 'YYYY-MM-DD') AS pay_voucher_date, is_return, return_comment
+         FROM payments WHERE order_id = $1 ORDER BY id",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    let onec_shipments: Vec<OneCShipment> = sqlx::query_as(
+        "SELECT delivery_name, id_1c, version_1c, deducted,
+                to_char(deducted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') AS deducted_at,
+                delivery_doc_num, to_char(delivery_doc_date, 'YYYY-MM-DD') AS delivery_doc_date,
+                tracking_number
+         FROM shipments WHERE order_id = $1 ORDER BY id",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
     let person_type: String = sqlx::query_scalar("SELECT name FROM person_types WHERE id = $1")
         .bind(order.person_type_id)
         .fetch_optional(&state.db)
@@ -342,7 +398,7 @@ pub(crate) async fn card(
         state,
         "shop/order.html",
         context! { user, order, fields, file_fields, extra, stores, statuses, person_type, error, notice,
-        store_list, deliveries, pay_systems, version },
+        store_list, deliveries, pay_systems, version, onec, onec_payments, onec_shipments },
     )
 }
 
@@ -353,6 +409,49 @@ pub async fn view(
 ) -> AppResult<Html<String>> {
     require_orders(&user)?;
     card(&state, user, id, None, None).await
+}
+
+/// XML заказа в формате обмена с 1С (схема 2.08) для проверки. Ничего не отмечает: Ид
+/// контрагента не сохраняется, метка выгрузки не двигается.
+pub async fn xml1c(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+) -> AppResult<Response> {
+    use crate::exchange::sale::{
+        document::{self, SchemaVersion},
+        select,
+        settings::{SaleSettings, load_map},
+    };
+    require_orders(&user)?;
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM orders WHERE id = $1)")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+    if !exists {
+        return Err(AppError::NotFound);
+    }
+    let settings = SaleSettings::load(&state.db).await?;
+    let map = load_map(&state.db).await?;
+    let version = SchemaVersion::parse(Some("2.08"));
+    let hook = state.project.order_export_hook.as_deref();
+    let mut conn = state.db.acquire().await?;
+    let order = select::build(&mut conn, id, &settings, &map, version, hook, false).await?;
+    let xml = document::render(&[order], version, Utc::now());
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/xml; charset=windows-1251".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"order_{id}_1c.xml\""),
+            ),
+        ],
+        xml,
+    )
+        .into_response())
 }
 
 fn send(state: &AppState, event: String, order_id: i64) {
@@ -612,5 +711,129 @@ mod tests {
             },
         );
         assert_eq!(bad.sql().as_str(), base);
+    }
+
+    use axum::http::{StatusCode, header};
+
+    use crate::smoke_tests::get;
+    use crate::test_support::{
+        admin_cookie, get_raw, order_fixture, permitted_cookie, place_order, test_state,
+    };
+
+    #[sqlx::test]
+    async fn card_shows_1c_block_and_xml_export(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let user: i64 = sqlx::query_scalar(
+            "INSERT INTO users (login, email, password_hash) VALUES ('buyer', 'b@e.x', 'x') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let id = place_order(&db, &f, Some(user)).await;
+        sqlx::query(
+            "INSERT INTO payments (order_id, name, id_1c, version_1c, pay_voucher_num, pay_voucher_date, is_return, return_comment)
+             VALUES ($1, 'Оплата 1С', 'PAY-1', '2', 'ПП-15', '2026-05-12', TRUE, 'возврат клиенту')",
+        )
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE shipments SET id_1c = 'SHIP-1', version_1c = '3', deducted = TRUE,
+                    deducted_at = '2026-05-13 10:20:00+00', delivery_doc_num = 'РН-9',
+                    delivery_doc_date = '2026-05-13', tracking_number = 'TRACK123'
+             WHERE order_id = $1",
+        )
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+        // Метка «из 1С» ставится только внутри обмена
+        let mut tx = db.begin().await.unwrap();
+        sqlx::query("SELECT set_config('cms.exchange_1c', 'on', true)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE orders SET id_1c = 'N-77', version_1c = '5', updated_1c = TRUE, external = TRUE WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let state = test_state(db.clone());
+        let app = crate::app(state);
+        let cookie = admin_cookie(&db).await;
+
+        let (status, html) = get(&app, &format!("/admin/shop/orders/{id}"), &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        for n in [
+            "N-77",
+            "изменён из 1С",
+            "создан в 1С",
+            "PAY-1",
+            "ПП-15",
+            "2026-05-12",
+            "возврат клиенту",
+            "SHIP-1",
+            "РН-9",
+            "TRACK123",
+            "2026-05-13 10:20",
+            &format!("/admin/shop/orders/{id}/xml1c"),
+        ] {
+            assert!(html.contains(n), "нет «{n}»");
+        }
+
+        let marks = || async {
+            sqlx::query_as::<_, (String, Option<String>)>(
+                "SELECT (SELECT xml_id FROM users WHERE id = $1),
+                        (SELECT value FROM options WHERE module = 'exchange' AND name = 'sale_last_export_committed')",
+            )
+            .bind(user)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        let before = marks().await;
+        let (status, headers, body) =
+            get_raw(&app, &format!("/admin/shop/orders/{id}/xml1c"), &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers[header::CONTENT_TYPE],
+            "application/xml; charset=windows-1251"
+        );
+        assert_eq!(
+            headers[header::CONTENT_DISPOSITION],
+            format!("attachment; filename=\"order_{id}_1c.xml\"")
+        );
+        let (text, _, bad) = encoding_rs::WINDOWS_1251.decode(&body);
+        assert!(!bad);
+        assert!(
+            text.starts_with(r#"<?xml version="1.0" encoding="windows-1251"?>"#),
+            "{text}"
+        );
+        assert!(text.contains("<Документ>"), "{text}");
+        assert!(
+            text.contains("<ХозОперация>Заказ товара</ХозОперация>"),
+            "{text}"
+        );
+        assert!(text.contains("<Номер1С>N-77</Номер1С>"), "{text}");
+        assert_eq!(
+            marks().await,
+            before,
+            "выгрузка из карточки ничего не отмечает"
+        );
+        assert_eq!(before.0, "", "Ид контрагента не сохранён");
+
+        let (status, _, _) = get_raw(&app, "/admin/shop/orders/999999/xml1c", &cookie).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let none = permitted_cookie(&db, "plain", &["exchange.1c.sale"]).await;
+        let (status, _, _) = get_raw(&app, &format!("/admin/shop/orders/{id}/xml1c"), &none).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let manager = permitted_cookie(&db, "manager", &["orders.manage"]).await;
+        let (status, _, _) =
+            get_raw(&app, &format!("/admin/shop/orders/{id}/xml1c"), &manager).await;
+        assert_eq!(status, StatusCode::OK);
     }
 }

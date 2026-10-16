@@ -3,7 +3,12 @@
 {% block title %}Обмен с 1С{% endblock %}
 {% block content %}
 <h1>Обмен с 1С</h1>
+<nav class="shop-nav">
+  {% if "exchange.1c" in user.permissions %}<a href="/admin/exchange?tab=catalog" class="{% if tab == "catalog" %}active{% endif %}">Каталог</a>{% endif %}
+  {% if "exchange.1c.sale" in user.permissions %}<a href="/admin/exchange?tab=sale" class="{% if tab == "sale" %}active{% endif %}">Заказы</a>{% endif %}
+</nav>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+{% if tab == "catalog" %}
 <form class="card form" method="post" action="/admin/exchange">
   <label>Коллекция по умолчанию
     <select name="default_collection">
@@ -42,14 +47,81 @@
   <div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
 </form>
 
+{% endif %}
+{% if tab == "sale" %}
+{% macro yn(name, label, on) %}<label class="check"><input type="checkbox" name="{{ name }}" {% if on %}checked{% endif %}> {{ label }}</label>{% endmacro %}
+<form class="card form" method="post" action="/admin/exchange/sale">
+  <h2>Выгрузка заказов в 1С</h2>
+  {{ yn("export_paid_only", "Выгружать только оплаченные заказы", s.export_paid_only) }}
+  {{ yn("export_allow_delivery_only", "Выгружать только заказы с разрешённой доставкой", s.export_allow_delivery_only) }}
+  <label>Выгружать начиная со статуса
+    <select name="export_from_status">
+      <option value="">— все статусы —</option>
+      {% for st in statuses %}<option value="{{ st[0] }}" {% if st[0] == s.export_from_status %}selected{% endif %}>{{ st[1] }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Заменять валюту в выгрузке на
+    <input name="replace_currency" value="{{ s.replace_currency }}" placeholder="не заменять">
+  </label>
+  <label>Префикс номера заказа
+    <input name="number_prefix" value="{{ s.number_prefix }}">
+  </label>
+  <p class="muted">Последняя подтверждённая выгрузка: {{ last_export or "ещё не было" }}</p>
+
+  <h2>Приём заказов из 1С</h2>
+  {{ yn("change_status_from_1c", "Менять статус заказа по данным 1С", s.change_status_from_1c) }}
+  <label>Статус при отгрузке
+    <select name="final_status_on_delivery">
+      <option value="">— не задан —</option>
+      {% for st in statuses %}<option value="{{ st[0] }}" {% if st[0] == s.final_status_on_delivery %}selected{% endif %}>{{ st[1] }}</option>{% endfor %}
+    </select>
+  </label>
+  {{ yn("update_basket_quantity", "Обновлять количество товаров в заказе", s.update_basket_quantity) }}
+  {{ yn("import_new_orders", "Создавать новые заказы", s.import_new_orders) }}
+  {{ yn("import_new_payments", "Создавать новые оплаты", s.import_new_payments) }}
+  {{ yn("import_new_shipments", "Создавать новые отгрузки", s.import_new_shipments) }}
+  {{ yn("new_order_new_shipment", "Создавать отгрузку для нового заказа", s.new_order_new_shipment) }}
+  {% for f in [("default_ps_cash", "Платёжная система по умолчанию: наличные", s.default_ps_cash), ("default_ps_cashless", "Платёжная система по умолчанию: безналичные", s.default_ps_cashless), ("default_ps_acquiring", "Платёжная система по умолчанию: эквайринг", s.default_ps_acquiring), ("default_ps_order_paid", "Платёжная система по умолчанию: оплаченный заказ", s.default_ps_order_paid)] %}
+  <label>{{ f[1] }}
+    <select name="{{ f[0] }}">
+      <option value="">— не задана —</option>
+      {% for p in pay_systems %}<option value="{{ p[0] }}" {% if p[0]|string == f[2] %}selected{% endif %}>{{ p[1] }}</option>{% endfor %}
+    </select>
+  </label>
+  {% endfor %}
+  <label>Служба доставки по умолчанию
+    <select name="default_delivery">
+      <option value="">— не задана —</option>
+      {% for d in deliveries %}<option value="{{ d[0] }}" {% if d[0]|string == s.default_delivery %}selected{% endif %}>{{ d[1] }}</option>{% endfor %}
+    </select>
+  </label>
+  <div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
+</form>
+
+<h2>Соответствие реквизитов контрагента</h2>
+{% if person_types %}
+<table class="table">
+  <thead><tr><th>Тип плательщика</th><th>Домен</th><th>Настроено реквизитов</th><th></th></tr></thead>
+  <tbody>
+  {% for pt in person_types %}
+  <tr><td>{{ pt.name }}</td><td>{{ pt.domain }}</td><td>{{ pt.mapped }}</td><td><a href="/admin/exchange/map/{{ pt.id }}">Настроить</a></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">Типов плательщика нет.</p>
+{% endif %}
+{% endif %}
+
 <h2>Журнал обмена</h2>
 {% if log %}
 <table class="table">
-  <thead><tr><th>Время</th><th>Режим</th><th>Файл</th><th>Итог</th><th>Счётчики</th><th>Ошибка</th></tr></thead>
+  <thead><tr><th>Время</th><th>Тип</th><th>Режим</th><th>Файл</th><th>Итог</th><th>Счётчики</th><th>Ошибка</th></tr></thead>
   <tbody>
   {% for r in log %}
   <tr>
     <td class="muted">{{ r.created_at }}</td>
+    <td>{{ r.kind }}</td>
     <td>{{ r.mode }}</td>
     <td>{{ r.filename }}</td>
     <td>{{ r.result }}</td>

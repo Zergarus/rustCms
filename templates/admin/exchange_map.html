@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% set section = "exchange" %}
+{% block title %}Соответствие реквизитов — {{ person_type }}{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/admin/exchange?tab=sale">Обмен с 1С</a> /</div>
+<h1>Соответствие реквизитов: {{ person_type }}</h1>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+{% macro source_select(name, current) %}
+<select name="{{ name }}">
+  {% for o in [("", "— не используется —"), ("property", "Свойство заказа"), ("user", "Поле пользователя"), ("order", "Поле заказа"), ("value", "Значение")] %}
+  <option value="{{ o[0] }}" {% if o[0] == current %}selected{% endif %}>{{ o[1] }}</option>
+  {% endfor %}
+</select>
+{% endmacro %}
+<form class="card form table-wrap" method="post" action="/admin/exchange/map/{{ person_type_id }}">
+  <label>Домен типа плательщика
+    <select name="domain">
+      <option value="I" {% if domain == "I" %}selected{% endif %}>Физлицо</option>
+      <option value="E" {% if domain == "E" %}selected{% endif %}>Юрлицо</option>
+    </select>
+  </label>
+  <p class="muted">После смены домена сохраните форму: список реквизитов контрагента обновится.</p>
+  <p class="muted">Источник: «Свойство заказа» — номер свойства (для местоположения также номер_CITY, номер_COUNTRY, номер_REGION); «Поле пользователя» — {{ user_fields|join(", ") }}; «Поле заказа» — {{ order_fields|join(", ") }}; «Значение» — любая строка.</p>
+  {% if properties %}
+  <details><summary>Свойства заказа этого типа плательщика</summary>
+    <ul>{% for p in properties %}<li>{{ p.id }} — {{ p.name }} <span class="muted">({{ p.kind }})</span></li>{% endfor %}</ul>
+  </details>
+  {% endif %}
+
+  <h2>Реквизиты контрагента</h2>
+  <table>
+    <thead><tr><th>Код</th><th>Поле контрагента</th><th>Источник</th><th>Значение</th></tr></thead>
+    <tbody>
+    {% for c in codes %}
+    <tr>
+      <td>{{ c.code }}</td>
+      <td class="muted">{{ c.field }}</td>
+      <td>{{ source_select("src_" ~ c.code, c.source) }}</td>
+      <td><input name="val_{{ c.code }}" value="{{ c.value }}"></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Произвольные реквизиты</h2>
+  <table>
+    <thead><tr><th>Код</th><th>Название</th><th>Источник</th><th>Значение</th></tr></thead>
+    <tbody>
+    {% for r in rekv %}
+    <tr>
+      <td>1C_REKV_{{ r.n }}</td>
+      <td><input name="rekv_{{ r.n }}_name" value="{{ r.name }}"></td>
+      <td>{{ source_select("rekv_" ~ r.n ~ "_source", r.source) }}</td>
+      <td><input name="rekv_{{ r.n }}_value" value="{{ r.value }}"></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="form-actions"><button class="btn primary" type="submit">Сохранить</button> <a class="btn" href="/admin/exchange?tab=sale">Назад</a></div>
+</form>
+{% endblock %}

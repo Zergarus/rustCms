@@ -360,7 +360,9 @@ pub(super) fn same(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-9
 }
 
+// `item_id` и `store_id` выбираются для сверки позиций, но пока нигде не читаются.
 #[derive(sqlx::FromRow)]
+#[allow(dead_code)]
 struct BasketRow {
     id: i64,
     item_id: i64,

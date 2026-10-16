@@ -242,3 +242,48 @@ pub async fn content_fixture(db: &PgPool) -> Content {
         group_id,
     }
 }
+
+/// GET без перекодирования тела: статус, заголовки и байты ответа.
+pub async fn get_raw(
+    app: &axum::Router,
+    path: &str,
+    cookie: &str,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    use tower::ServiceExt;
+    let req = axum::http::Request::get(path)
+        .header(axum::http::header::COOKIE, cookie)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let (status, headers) = (res.status(), res.headers().clone());
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, headers, body.to_vec())
+}
+
+/// Обычный пользователь с правами `permissions` (через группу); возвращает Cookie сессии.
+pub async fn permitted_cookie(db: &PgPool, login: &str, permissions: &[&str]) -> String {
+    let (uid, cookie) = user_cookie(db, login, false).await;
+    let group: i64 =
+        sqlx::query_scalar("INSERT INTO groups (code, name) VALUES ($1, $1) RETURNING id")
+            .bind(format!("g_{login}"))
+            .fetch_one(db)
+            .await
+            .unwrap();
+    for perm in permissions.iter().chain(&["admin.access"]) {
+        sqlx::query("INSERT INTO group_permissions (group_id, permission) VALUES ($1, $2)")
+            .bind(group)
+            .bind(perm)
+            .execute(db)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(uid)
+        .bind(group)
+        .execute(db)
+        .await
+        .unwrap();
+    cookie
+}

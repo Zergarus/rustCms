@@ -85,6 +85,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/shop/locations", get(shop::locations))
         .route("/shop/orders", get(shop::orders::list))
         .route("/shop/orders/{id}", get(shop::orders::view))
+        .route("/shop/orders/{id}/xml1c", get(shop::orders::xml1c))
         .route("/shop/orders/{id}/status", post(shop::orders::set_status))
         .route("/shop/orders/{id}/paid", post(shop::orders::set_paid))
         .route("/shop/orders/{id}/cancel", post(shop::orders::set_canceled))
@@ -211,6 +212,11 @@ pub fn router(state: AppState) -> Router<AppState> {
             get(shop::settings::form).post(shop::settings::save),
         )
         .route("/exchange", get(exchange::form).post(exchange::save))
+        .route("/exchange/sale", post(exchange::save_sale))
+        .route(
+            "/exchange/map/{person_type_id}",
+            get(exchange::map_form).post(exchange::save_map_form),
+        )
         .route("/users", get(users::list).post(users::create))
         .route("/users/new", get(users::new_form))
         .route("/users/{id}", get(users::edit_form).post(users::update))

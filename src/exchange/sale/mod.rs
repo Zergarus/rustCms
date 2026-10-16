@@ -1,8 +1,5 @@
 //! Обмен заказами с 1С (`type=sale`).
 
-// Сохранение настроек и соответствия реквизитов подключает админка (следующая задача плана).
-#![allow(dead_code)]
-
 pub mod apply;
 mod apply_docs;
 pub mod document;
