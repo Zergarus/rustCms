@@ -13,9 +13,6 @@ use super::document::{ADDRESS_PARTS, PayOperation};
 use super::settings::Domain;
 use crate::exchange::cml::{CmlError, element, flag, number};
 
-/// Ид строки доставки в составе документа.
-const DELIVERY_ID: &str = "ORDER_DELIVERY";
-
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SaleFile {
     pub agents: Vec<AgentIn>,
@@ -43,7 +40,7 @@ pub enum Operation {
 pub struct DocumentIn {
     pub id: String,
     pub number: String,
-    /// `Номер1С`; без отдельного тега — `Номер`.
+    /// `Номер1С`; без отдельного тега — `Ид` (`XML_1C_DOCUMENT_ID` Битрикса).
     pub id_1c: String,
     pub version: String,
     pub operation: Operation,
@@ -64,7 +61,15 @@ pub struct ItemIn {
     pub price: f64,
     pub quantity: f64,
     pub sum: f64,
-    pub is_delivery: bool,
+    pub kind: ItemKind,
+}
+
+/// Тип строки по реквизиту «ТипНоменклатуры»; услуга — строка доставки.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemKind {
+    Product,
+    Service,
+    Unknown,
 }
 
 /// Узел XML: имя, текст и вложенные элементы.
@@ -152,6 +157,11 @@ pub fn parse(data: &[u8]) -> Result<SaleFile, CmlError> {
     let mut out = SaleFile::default();
     for node in &root.children {
         match node.name.as_str() {
+            "Контрагенты" => {
+                for a in node.all("Контрагент") {
+                    add_agent(&mut out.agents, agent(a));
+                }
+            }
             "Документ" => {
                 let doc = document(node, &mut out.agents)?;
                 out.groups.push(vec![doc]);
@@ -174,7 +184,7 @@ pub fn parse(data: &[u8]) -> Result<SaleFile, CmlError> {
 fn document(n: &Node, agents: &mut Vec<AgentIn>) -> Result<DocumentIn, CmlError> {
     let number_text = n.val("Номер");
     let id_1c = match n.val("Номер1С") {
-        "" => number_text,
+        "" => n.val("Ид"),
         v => v,
     };
     let operation = match n.val("ХозОперация") {
@@ -197,9 +207,7 @@ fn document(n: &Node, agents: &mut Vec<AgentIn>) -> Result<DocumentIn, CmlError>
             if agent_id.is_none() && !agent.id.is_empty() {
                 agent_id = Some(agent.id.clone());
             }
-            if !agent.id.is_empty() && !agents.iter().any(|x| x.id == agent.id) {
-                agents.push(agent);
-            }
+            add_agent(agents, agent);
         }
     }
 
@@ -207,26 +215,24 @@ fn document(n: &Node, agents: &mut Vec<AgentIn>) -> Result<DocumentIn, CmlError>
     if let Some(list) = n.child("Товары") {
         for it in list.all("Товар") {
             let xml_id = it.val("Ид").to_string();
+            let kind = match trait_map(it).get("ТипНоменклатуры").map(String::as_str)
+            {
+                Some("Товар") => ItemKind::Product,
+                Some("Услуга") => ItemKind::Service,
+                _ => ItemKind::Unknown,
+            };
             items.push(ItemIn {
-                is_delivery: xml_id == DELIVERY_ID,
+                kind,
                 xml_id,
                 name: it.val("Наименование").to_string(),
-                price: num(it.val("ЦенаЗаЕдиницу"))?,
-                quantity: num(it.val("Количество"))?,
-                sum: num(it.val("Сумма"))?,
+                price: num(it.val("ЦенаЗаЕдиницу")),
+                quantity: num(it.val("Количество")),
+                sum: num(it.val("Сумма")),
             });
         }
     }
 
-    let mut traits = BTreeMap::new();
-    if let Some(list) = n.child("ЗначенияРеквизитов") {
-        for t in list.all("ЗначениеРеквизита") {
-            let name = t.val("Наименование");
-            if !name.is_empty() {
-                traits.insert(name.to_string(), t.val("Значение").to_string());
-            }
-        }
-    }
+    let traits = trait_map(n);
 
     Ok(DocumentIn {
         id: n.val("Ид").to_string(),
@@ -236,15 +242,36 @@ fn document(n: &Node, agents: &mut Vec<AgentIn>) -> Result<DocumentIn, CmlError>
         operation,
         base: n.val("Основание").to_string(),
         deleted: flag(n.val("ПометкаУдаления")),
-        sum: number(n.val("Сумма"))?,
+        sum: number(n.val("Сумма")).unwrap_or(Some(0.0)),
         agent_id,
         items,
         traits,
     })
 }
 
-fn num(s: &str) -> Result<f64, CmlError> {
-    Ok(number(s)?.unwrap_or(0.0))
+/// Как `ToFloat` Битрикса: нечисловое значение — 0, документ остаётся.
+fn add_agent(agents: &mut Vec<AgentIn>, agent: AgentIn) {
+    if !agent.id.is_empty() && !agents.iter().any(|x| x.id == agent.id) {
+        agents.push(agent);
+    }
+}
+
+fn num(s: &str) -> f64 {
+    number(s).ok().flatten().unwrap_or(0.0)
+}
+
+/// `ЗначенияРеквизитов`: наименование → значение.
+fn trait_map(n: &Node) -> BTreeMap<String, String> {
+    let mut traits = BTreeMap::new();
+    if let Some(list) = n.child("ЗначенияРеквизитов") {
+        for t in list.all("ЗначениеРеквизита") {
+            let name = t.val("Наименование");
+            if !name.is_empty() {
+                traits.insert(name.to_string(), t.val("Значение").to_string());
+            }
+        }
+    }
+    traits
 }
 
 /// Контрагент 1С в поля контрагента (обратное к `ExportContragents`); пустые значения не попадают.
@@ -287,7 +314,7 @@ fn agent(n: &Node) -> AgentIn {
         },
     );
 
-    let domain = if official.is_empty() {
+    let domain = if n.val("ИНН").is_empty() {
         Domain::Individual
     } else {
         Domain::Entity
@@ -295,18 +322,6 @@ fn agent(n: &Node) -> AgentIn {
     address(&mut fields, n, "АдресРегистрации", "");
     address(&mut fields, n, "ЮридическийАдрес", "");
     address(&mut fields, n, "Адрес", "F_");
-
-    if let Some(account) = n
-        .child("РасчетныеСчета")
-        .and_then(|l| l.child("РасчетныйСчет"))
-    {
-        put(&mut fields, "ACCOUNT_NUMBER", account.val("НомерСчета"));
-        if let Some(bank) = account.child("Банк") {
-            put(&mut fields, "B_NAME", bank.val("Наименование"));
-            put(&mut fields, "B_BIK", bank.val("БИК"));
-            address(&mut fields, bank, "Адрес", "B_");
-        }
-    }
 
     if let Some(contacts) = n.child("Контакты") {
         for c in contacts.all("Контакт") {
@@ -421,7 +436,7 @@ mod tests {
                     price: 1200.5,
                     quantity: 2.5,
                     sum: 3001.25,
-                    is_delivery: false,
+                    kind: ItemKind::Product,
                 },
                 ItemIn {
                     xml_id: "cone-30".into(),
@@ -429,7 +444,7 @@ mod tests {
                     price: 849.0,
                     quantity: 10.0,
                     sum: 8490.0,
-                    is_delivery: false,
+                    kind: ItemKind::Unknown,
                 },
                 ItemIn {
                     xml_id: "ORDER_DELIVERY".into(),
@@ -437,7 +452,7 @@ mod tests {
                     price: 250.0,
                     quantity: 1.0,
                     sum: 250.0,
-                    is_delivery: true,
+                    kind: ItemKind::Service,
                 },
             ]
         );
@@ -450,13 +465,50 @@ mod tests {
     }
 
     #[test]
-    fn id_1c_falls_back_to_number() {
+    fn id_1c_falls_back_to_id() {
         let file = load("import_payment.xml");
         assert_eq!(only(&file).id_1c, "ПКО-00009");
         let file = load("import_shipment.xml");
         let d = only(&file);
         assert_eq!(d.number, "77");
-        assert_eq!(d.id_1c, "77");
+        assert_eq!(d.id_1c, "shp-1c-77");
+    }
+
+    #[test]
+    fn domain_follows_inn_and_root_agents() {
+        let file = load("import_agents.xml");
+        let ids: Vec<_> = file.agents.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["ip-5", "org-noinn", "fiz-1"]);
+        let domains: Vec<_> = file.agents.iter().map(|a| a.domain).collect();
+        assert_eq!(
+            domains,
+            [Domain::Entity, Domain::Individual, Domain::Individual]
+        );
+        assert_eq!(file.agents[0].fields["INN"], "500100732259");
+        assert_eq!(file.agents[0].fields["PHONE"], "+7 900 555-00-05");
+        assert_eq!(file.agents[2].fields["AGENT_NAME"], "Орлов Олег");
+        let d = only(&file);
+        assert_eq!(d.agent_id.as_deref(), Some("fiz-1"));
+    }
+
+    #[test]
+    fn bad_numbers_become_zero() {
+        let file = load("import_agents.xml");
+        let d = only(&file);
+        assert_eq!(d.sum, Some(0.0));
+        assert_eq!(d.items[0].price, 0.0);
+        assert_eq!(d.items[0].quantity, 2.0);
+        assert_eq!(d.items[0].sum, 100.0);
+    }
+
+    #[test]
+    fn bank_accounts_are_not_read() {
+        let file = load("import_new_order_agent.xml");
+        let f = &file.agents[0].fields;
+        assert!(
+            !f.keys()
+                .any(|k| k.starts_with("B_") || k == "ACCOUNT_NUMBER")
+        );
     }
 
     #[test]
@@ -492,11 +544,6 @@ mod tests {
                 ("INN", "7701234567"),
                 ("KPP", "770101001"),
                 ("OKPO", "12345678"),
-                ("ACCOUNT_NUMBER", "40702810900000000001"),
-                ("B_NAME", "АО «Банк»"),
-                ("B_BIK", "044525000"),
-                ("B_ADDRESS_FULL", "Москва, ул. Банковская, 3"),
-                ("B_CITY", "Москва"),
                 ("F_ADDRESS_FULL", "Москва, Складской пр., 3"),
                 ("F_STREET", "Складской пр."),
                 ("PHONE", "+7 495 000-00-01"),
@@ -550,8 +597,8 @@ mod tests {
         assert_eq!(d.id, "shp-1c-77");
         assert_eq!(d.base, "103");
         assert_eq!(d.items.len(), 2);
-        assert!(!d.items[0].is_delivery);
-        assert!(d.items[1].is_delivery);
+        assert_eq!(d.items[0].kind, ItemKind::Product);
+        assert_eq!(d.items[1].kind, ItemKind::Service);
         assert_eq!(d.traits["Дата отгрузки по 1С"], "2026-10-16 10:30:00");
         assert_eq!(d.traits["Номер отслеживания"], "RR123456789RU");
         assert_eq!(d.traits["Доставка разрешена"], "true");
@@ -634,7 +681,5 @@ mod tests {
             parse("<КоммерческаяИнформация><Документ>".as_bytes()),
             Err(CmlError::Xml(_))
         ));
-        let bad = "<КоммерческаяИнформация><Документ><Сумма>много</Сумма></Документ></КоммерческаяИнформация>";
-        assert!(matches!(parse(bad.as_bytes()), Err(CmlError::Number(_))));
     }
 }
