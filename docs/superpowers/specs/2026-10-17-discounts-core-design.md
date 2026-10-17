@@ -72,11 +72,13 @@ CMS — универсальный шаблон под любой проект (
 | `CondSaleOrderSumm`, `CondSaleOrderWeight`, `CondSalePersonType`, `CondSalePaySystem`, `CondSaleDelivery`, `CondSaleCmnDayOfWeek` | заказ |
 | `CondBsktAppliedDiscount` | к позиции уже применена скидка |
 
-Действия (`actions`): `ActSaleBsktGrp` — скидка (`Type: Discount`) или наценка (`Extra`) на
-позиции под вложенными условиями: `Unit` `Perc` / `CurEach` (на каждую единицу) / `CurAll`
-(сумма, распределяемая пропорционально стоимости позиций) / `Cur` (установить цену), `Max`
-(не больше, для процента); `ActSaleSubGrp` — подгруппа действий; `ActSaleDelivery` — скидка
-или наценка на доставку (`Perc` / `Cur`).
+Действия (`actions`), константы `CSaleActionCtrlBasketGroup` / `CSaleActionCtrlDelivery`:
+`ActSaleBsktGrp` — на позиции под вложенными условиями, `Type` `Discount` (скидка) /
+`Extra` (наценка) / `Closeout` (установить цену), `Unit` `Perc` / `CurEach` (на каждую
+единицу) / `CurAll` (сумма, распределяемая пропорционально стоимости позиций), `Max`
+(не больше; с `CurAll` не используется); `ActSaleSubGrp` — подгруппа действий;
+`ActSaleDelivery` — доставка, `Type` `Discount` / `DiscountZero` / `Extra`, `Unit` `Perc` /
+`Cur`.
 
 Неизвестный класс в дереве: правило не применяется, `unsupported` перечисляет классы,
 админка показывает предупреждение.
