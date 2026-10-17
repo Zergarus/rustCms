@@ -40,9 +40,10 @@ pub async fn query(
     let started = Instant::now();
     let statuses = statuses_from(db, s.export_from_status.as_deref()).await?;
     // Раньше отбора: транзакция, начатая до него, может закоммитить заказ с updated_at
-    // (now() её начала) ниже метки уже после отбора
+    // (now() её начала) ниже метки уже после отбора. Транзакции, начатые между этой
+    // проверкой и отбором, в неё не попадают — их закрывает время самой проверки.
     let in_flight: Option<DateTime<Utc>> = sqlx::query_scalar(
-        "SELECT min(xact_start) FROM pg_stat_activity
+        "SELECT LEAST(min(xact_start), statement_timestamp()) FROM pg_stat_activity
          WHERE datname = current_database() AND pid <> pg_backend_pid()
            AND xact_start IS NOT NULL AND backend_type = 'client backend'",
     )
@@ -1419,6 +1420,33 @@ mod tests {
         t.commit().await.unwrap();
         commit_export(&db, mark.unwrap()).await.unwrap();
         assert!(ids(&db).await.0.contains(&a), "заказ из T потерян");
+    }
+
+    /// Транзакция, начатая после чтения pg_stat_activity, но до снимка заказов, не видна
+    /// в pg_stat_activity: метка всё равно не уходит дальше момента этого чтения.
+    #[sqlx::test]
+    async fn mark_does_not_pass_time_of_in_flight_check(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let a = place_order(&db, &f, None).await;
+        // Заказ, изменённый «после» проверки: его updated_at позже начала query
+        exec(&db, "ALTER TABLE orders DISABLE TRIGGER orders_mark_1c", a).await;
+        exec(
+            &db,
+            "UPDATE orders SET updated_at = now() + interval '1 minute' WHERE id = $1",
+            a,
+        )
+        .await;
+        exec(&db, "ALTER TABLE orders ENABLE TRIGGER orders_mark_1c", a).await;
+        let started: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let (got, mark) = ids(&db).await;
+        assert_eq!(got, vec![a]);
+        assert!(
+            mark.unwrap() < started + chrono::Duration::seconds(30),
+            "{mark:?}"
+        );
     }
 
     #[sqlx::test]
