@@ -7,8 +7,8 @@ use chrono::NaiveDate;
 use sqlx::PgConnection;
 
 use super::apply::{
-    Ctx, FINAL_ORDER, SaleStats, apply_basket, delivery_line, find_order, is_final, is_newer,
-    plan_basket, round, same, set_status_1c,
+    Ctx, FINAL_ORDER, SaleStats, apply_basket, delivery_line, doc_error, find_order, is_final,
+    is_newer, plan_basket, round, same, set_status_1c,
 };
 use super::document::PayOperation;
 use super::parse::{DocumentIn, ItemKind};
@@ -137,6 +137,12 @@ pub(super) async fn apply_payment(
     stats: &mut SaleStats,
 ) -> anyhow::Result<Option<i64>> {
     let (order_id, found) = locate(ctx, tx, Child::Payment, doc).await?;
+    // Строка заказа — раньше строки оплаты, как на сайте (`set_paid_in`): без взаимной блокировки
+    let (canceled, status): (bool, String) =
+        sqlx::query_as("SELECT canceled, status FROM orders WHERE id = $1 FOR UPDATE")
+            .bind(order_id)
+            .fetch_one(&mut *tx)
+            .await?;
     let current = match found {
         Some(id) => {
             let p: PaymentState = sqlx::query_as(
@@ -153,11 +159,6 @@ pub(super) async fn apply_payment(
         }
         None => None,
     };
-    let (canceled, status): (bool, String) =
-        sqlx::query_as("SELECT canceled, status FROM orders WHERE id = $1 FOR UPDATE")
-            .bind(order_id)
-            .fetch_one(&mut *tx)
-            .await?;
     if canceled {
         bail!("заказ отменён");
     }
@@ -318,6 +319,11 @@ pub(super) async fn apply_shipment(
     stats: &mut SaleStats,
 ) -> anyhow::Result<Option<i64>> {
     let (order_id, found) = locate(ctx, tx, Child::Shipment, doc).await?;
+    // Строка заказа — раньше строки отгрузки, как на сайте
+    let status: String = sqlx::query_scalar("SELECT status FROM orders WHERE id = $1 FOR UPDATE")
+        .bind(order_id)
+        .fetch_one(&mut *tx)
+        .await?;
     let current = match found {
         Some(id) => {
             let sh: ShipmentState = sqlx::query_as(
@@ -335,10 +341,6 @@ pub(super) async fn apply_shipment(
         }
         None => None,
     };
-    let status: String = sqlx::query_scalar("SELECT status FROM orders WHERE id = $1 FOR UPDATE")
-        .bind(order_id)
-        .fetch_one(&mut *tx)
-        .await?;
     if status == STATUS_FINAL {
         bail!("заказ в финальном статусе");
     }
@@ -372,6 +374,8 @@ pub(super) async fn apply_shipment(
     };
 
     let mut totals = false;
+    // Состав финального заказа расходится: ошибка в итог, отгрузка применяется без версии
+    let mut kept = false;
     // Позиций у отгрузки нет: сверяются с заказом, только если отгрузка у него единственная
     let single: bool = sqlx::query_scalar("SELECT count(*) = 1 FROM shipments WHERE order_id = $1")
         .bind(order_id)
@@ -385,10 +389,12 @@ pub(super) async fn apply_shipment(
                 bail!("количество в отгрузке не совпадает с заказом");
             }
             if is_final(tx, order_id).await? {
-                bail!(FINAL_ORDER);
+                stats.errors.push(doc_error(doc, &FINAL_ORDER));
+                kept = true;
+            } else {
+                apply_basket(ctx, tx, order_id, &plan).await?;
+                totals = true;
             }
-            apply_basket(ctx, tx, order_id, &plan).await?;
-            totals = true;
         }
     }
 
@@ -419,7 +425,8 @@ pub(super) async fn apply_shipment(
              delivery_doc_date = CASE WHEN $5 THEN COALESCE($6, delivery_doc_date) ELSE delivery_doc_date END,
              delivery_doc_num = CASE WHEN $7 <> '' THEN $7 ELSE delivery_doc_num END,
              tracking_number = CASE WHEN $8 <> '' THEN $8 ELSE tracking_number END,
-             id_1c = $9, version_1c = $10, updated_1c = TRUE
+             id_1c = $9, version_1c = CASE WHEN $11 THEN version_1c ELSE $10 END,
+             updated_1c = TRUE
          WHERE id = $1",
     )
     .bind(current.id)
@@ -432,6 +439,7 @@ pub(super) async fn apply_shipment(
     .bind(trait_of(doc, TRAIT_TRACKING))
     .bind(&doc.id_1c)
     .bind(&doc.version)
+    .bind(kept)
     .execute(&mut *tx)
     .await?;
     if totals {

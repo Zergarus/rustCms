@@ -77,7 +77,10 @@ pub struct ExportOrder {
     pub id: i64,
     pub number: String,
     pub created_at: DateTime<Utc>,
+    /// Валюта для документов заказа: с заменой из настроек.
     pub currency: String,
+    /// Валюта заказа без замены — документ удалённой отгрузки (`export.php:2149`).
+    pub original_currency: String,
     pub sum: f64,
     pub comment: String,
     pub id_1c: String,
@@ -434,7 +437,7 @@ fn removed_shipment_document(x: &mut Xml, o: &ExportOrder, r: &RemovedShipment) 
     x.leaf("Дата", &date(r.date));
     x.leaf("ХозОперация", "Отпуск товара");
     x.leaf("Роль", "Продавец");
-    x.leaf("Валюта", &currency(&o.currency));
+    x.leaf("Валюта", &currency(&o.original_currency));
     x.leaf("Основание", &o.id.to_string());
     x.leaf("ПометкаУдаления", "true");
     x.leaf("ЗначенияРеквизитов", "");
@@ -961,6 +964,7 @@ mod tests {
             number: id.to_string(),
             created_at: at(created),
             currency: s("RUB"),
+            original_currency: s("RUB"),
             sum,
             comment: String::new(),
             id_1c: String::new(),
@@ -1546,6 +1550,19 @@ mod tests {
             order_goods(&o, SchemaVersion(2.09)),
             ["beef-tape=1000", "ORDER_DELIVERY=999"]
         );
+    }
+
+    #[test]
+    fn removed_shipment_has_original_currency() {
+        let mut o = payment_shipment_210();
+        o.currency = s("руб");
+        let out = decode(&render(&[o], SchemaVersion(2.1), generated()));
+        let removed = out
+            .split("<Документ>")
+            .find(|d| d.contains("<ПометкаУдаления>true</ПометкаУдаления>"))
+            .unwrap();
+        assert!(removed.contains("<Валюта>RUB</Валюта>"), "{removed}");
+        assert!(out.contains("<Валюта>руб</Валюта>"));
     }
 
     #[test]

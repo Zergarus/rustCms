@@ -3,8 +3,8 @@
 //!
 //! Вход, сессия, право и журнал — в `exchange::http`. Состояние обмена в `state` сессии:
 //! `version` и `cml_version` из `init`, `mark` — метка последнего `query` для `success`,
-//! `sale_pos` — следующая группа документов файла при пошаговом `import`, `imported` —
-//! загруженные файлы.
+//! `sale_pos` — следующая группа документов файла при пошаговом `import`, `sale_stats` — итог
+//! прошлых шагов файла (входит в итог `success`), `imported` — загруженные файлы.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -315,24 +315,36 @@ pub(crate) async fn import(
     let start = fresh.state["sale_pos"][filename].as_u64().unwrap_or(0) as usize;
     let deadline = step.map(|step| Instant::now() + step);
     let hook = state.project.order_import_hook.as_deref();
-    let (stats, next) =
+    let (step_stats, next) =
         apply::apply_file(&state.db, &s, &map, &parsed, hook, start, deadline).await;
+    // Итог прошлых шагов файла (`progress`) — в итог `success`
+    let mut stats: SaleStats =
+        serde_json::from_value(fresh.state["sale_stats"][filename].clone()).unwrap_or_default();
+    stats.merge(step_stats.clone());
+    let saved = serde_json::to_value(&stats).unwrap_or_default();
     match next {
         Some(next) => sqlx::query(
             "UPDATE exchange_sessions
-             SET state = jsonb_set(state, '{sale_pos}',
-                     COALESCE(state->'sale_pos', '{}'::jsonb) || jsonb_build_object($2::text, $3::bigint))
+             SET state = jsonb_set(
+                     jsonb_set(state, '{sale_pos}',
+                               COALESCE(state->'sale_pos', '{}'::jsonb)
+                                   || jsonb_build_object($2::text, $3::bigint)),
+                     '{sale_stats}',
+                     COALESCE(state->'sale_stats', '{}'::jsonb) || jsonb_build_object($2::text, $4::jsonb))
              WHERE id = $1",
         )
         .bind(session.id)
         .bind(filename)
-        .bind(next as i64),
+        .bind(next as i64)
+        .bind(&saved),
         None => sqlx::query(
             "UPDATE exchange_sessions
              SET state = jsonb_set(
-                     jsonb_set(state, '{imported}',
-                               COALESCE(state->'imported', '[]'::jsonb) || to_jsonb($2::text)),
-                     '{sale_pos}', COALESCE(state->'sale_pos', '{}'::jsonb) - $2::text)
+                     jsonb_set(
+                         jsonb_set(state, '{imported}',
+                                   COALESCE(state->'imported', '[]'::jsonb) || to_jsonb($2::text)),
+                         '{sale_pos}', COALESCE(state->'sale_pos', '{}'::jsonb) - $2::text),
+                     '{sale_stats}', COALESCE(state->'sale_stats', '{}'::jsonb) - $2::text)
              WHERE id = $1",
         )
         .bind(session.id)
@@ -341,6 +353,8 @@ pub(crate) async fn import(
     .execute(&mut *tx)
     .await
     .map_err(db_err)?;
+    // `progress` — итог шага, `success` — итог всего файла
+    let stats = if next.is_some() { step_stats } else { stats };
     tx.commit().await.map_err(db_err)?;
 
     // Письма о смене статуса — после коммита, не задерживая ответ
@@ -848,13 +862,58 @@ mod tests {
             String::from_utf8(r.body).unwrap(),
             format!("success\nДокумент {b}: статус Q не найден")
         );
-        assert_eq!(r.stats["orders_updated"], 0);
+        // Итог success — по всему файлу, с первым шагом
+        assert_eq!(r.stats["orders_updated"], 1);
         let st: Value = sqlx::query_scalar("SELECT state FROM exchange_sessions")
             .fetch_one(&db)
             .await
             .unwrap();
         assert_eq!(st["sale_pos"], json!({}));
         assert_eq!(st["imported"], json!(["o.xml"]));
+    }
+
+    #[sqlx::test]
+    async fn stepwise_import_reports_errors_of_all_steps(db: PgPool) {
+        let user = sale_user(&db, "sale").await;
+        let f = order_fixture(&db).await;
+        statuses(&db).await;
+        SaleSettings {
+            change_status_from_1c: true,
+            ..SaleSettings::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+        let a = place_order(&db, &f, None).await;
+        let b = place_order(&db, &f, None).await;
+        let state = test_state(db.clone());
+        let (s, _) = session::start(&db, user, session::KIND_SALE).await.unwrap();
+        let dir = session::dir(&state.config.upload_dir, &s);
+        let data = cml(&[
+            status_doc(a, "1", "Q"),
+            status_doc(b, "1", "P"),
+            status_doc(a, "2", "P"),
+        ]);
+        session::append(&dir, "o.xml", data.as_bytes())
+            .await
+            .unwrap();
+        let step = || import(&state, &s, "o.xml", Step::Fixed(Duration::ZERO));
+        let r = step().await.unwrap();
+        assert!(String::from_utf8(r.body).unwrap().starts_with("progress"));
+        let r = step().await.unwrap();
+        assert!(String::from_utf8(r.body).unwrap().starts_with("progress"));
+        let r = step().await.unwrap();
+        assert_eq!(
+            String::from_utf8(r.body).unwrap(),
+            format!("success\nДокумент {a}: статус Q не найден")
+        );
+        assert_eq!(r.stats["orders_updated"], 2);
+        assert_eq!(r.stats["errors"].as_array().unwrap().len(), 1);
+        let st: Value = sqlx::query_scalar("SELECT state FROM exchange_sessions")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(st["sale_stats"], json!({}));
     }
 
     #[sqlx::test]

@@ -2,6 +2,8 @@
 //! создаёт новый (`CSaleOrderLoader::updateOrderWithoutShipmentsPayments` /
 //! `addOrderWithoutShipmentsPayments` Битрикса). Каждая группа документов (`Контейнер` или
 //! одиночный документ) — своя транзакция с меткой обмена; ошибка документа откатывает группу.
+//! Исключение — состав заказа в финальном состоянии: ошибка пишется в итог, остальное
+//! применяется (как у Битрикса).
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -43,7 +45,7 @@ pub struct SaleStats {
 }
 
 impl SaleStats {
-    fn merge(&mut self, o: SaleStats) {
+    pub(crate) fn merge(&mut self, o: SaleStats) {
         self.orders_created += o.orders_created;
         self.orders_updated += o.orders_updated;
         self.payments_created += o.payments_created;
@@ -179,20 +181,23 @@ pub async fn apply_file(
     for (i, group) in file.groups.iter().enumerate().skip(start) {
         match apply_group(&ctx, group).await {
             Ok(local) => stats.merge(local),
-            Err((doc, e)) => {
-                let id = if doc.id.is_empty() {
-                    &doc.id_1c
-                } else {
-                    &doc.id
-                };
-                stats.errors.push(format!("Документ {id}: {e:#}"));
-            }
+            Err((doc, e)) => stats.errors.push(doc_error(doc, &e)),
         }
         if i + 1 < file.groups.len() && deadline.is_some_and(|d| Instant::now() >= d) {
             return (stats, Some(i + 1));
         }
     }
     (stats, None)
+}
+
+/// Строка ошибки документа для итога: «Документ <Ид>: <текст>».
+pub(super) fn doc_error(doc: &DocumentIn, e: &dyn std::fmt::Display) -> String {
+    let id = if doc.id.is_empty() {
+        &doc.id_1c
+    } else {
+        &doc.id
+    };
+    format!("Документ {id}: {e:#}")
 }
 
 async fn apply_group<'g>(
@@ -269,15 +274,21 @@ async fn apply_order(
         stats.skipped += 1;
         return Ok(None);
     }
-    if ctx.s.update_basket_quantity && doc.items.iter().any(|i| i.kind == ItemKind::Product) {
-        update_basket(ctx, tx, id, doc).await?;
+    let kept = ctx.s.update_basket_quantity
+        && doc.items.iter().any(|i| i.kind == ItemKind::Product)
+        && !update_basket(ctx, tx, id, doc).await?;
+    if kept {
+        // Как Битрикс: ошибка документа, но статус и отмена применяются; без Номер1С и версии
+        // документ придёт снова
+        stats.errors.push(doc_error(doc, &FINAL_ORDER));
+    } else {
+        sqlx::query("UPDATE orders SET id_1c = $2, version_1c = $3 WHERE id = $1")
+            .bind(id)
+            .bind(&doc.id_1c)
+            .bind(&doc.version)
+            .execute(&mut *tx)
+            .await?;
     }
-    sqlx::query("UPDATE orders SET id_1c = $2, version_1c = $3 WHERE id = $1")
-        .bind(id)
-        .bind(&doc.id_1c)
-        .bind(&doc.version)
-        .execute(&mut *tx)
-        .await?;
     apply_flags(ctx, tx, id, doc, stats).await?;
     stats.orders_updated += 1;
     Ok(Some(id))
@@ -507,12 +518,13 @@ pub(super) async fn is_final(tx: &mut PgConnection, id: i64) -> sqlx::Result<boo
 pub(super) const FINAL_ORDER: &str = "заказ в финальном состоянии, состав не изменён";
 
 /// Состав по документу (`updateOrderWithoutShipmentsPayments`); строка-услуга — доставка.
+/// `false` — состав расходится, но заказ в финальном состоянии и не изменён.
 async fn update_basket(
     ctx: &Ctx<'_>,
     tx: &mut PgConnection,
     id: i64,
     doc: &DocumentIn,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let plan = plan_basket(tx, id, doc).await?;
     let current_delivery: f64 =
         sqlx::query_scalar("SELECT delivery_price::float8 FROM orders WHERE id = $1")
@@ -523,14 +535,14 @@ async fn update_basket(
         .map(|d| round(d.sum, 2))
         .filter(|p| !same(*p, current_delivery));
     if plan.is_empty() && delivery.is_none() {
-        return Ok(());
+        return Ok(true);
     }
     if is_final(tx, id).await? {
-        bail!(FINAL_ORDER);
+        return Ok(false);
     }
     apply_basket(ctx, tx, id, &plan).await?;
     recalc_totals_in(tx, id, delivery).await?;
-    Ok(())
+    Ok(true)
 }
 
 async fn insert_line(
@@ -1172,23 +1184,46 @@ mod tests {
             ]
         );
 
-        // Оплаченный заказ по составу не правится: документ откатывается целиком
+        // Оплаченный заказ по составу не правится: ошибка в итоге, но группа не откатывается —
+        // статус и отмена применяются, Номер1С и версия не пишутся (документ придёт снова)
+        statuses(&db).await;
         sqlx::query("UPDATE orders SET paid = TRUE, id_1c = '' WHERE id = $1")
             .bind(id)
             .execute(&db)
             .await
             .unwrap();
         d.version = "2".into();
-        let stats = run(&db, &SaleSettings::default(), &file(vec![d.clone()])).await;
-        assert_eq!(
-            stats.errors,
-            vec![format!(
-                "Документ {id}: заказ в финальном состоянии, состав не изменён"
-            )]
+        d = with(d, &[("Статуса заказа ИД", "P")]);
+        let s = SaleSettings {
+            change_status_from_1c: true,
+            ..SaleSettings::default()
+        };
+        let p = first_payment(&db, id).await;
+        let pay = with(
+            pay_doc(&p.to_string(), id, "1", PayOperation::Cash),
+            &[("Оплачен", "true")],
         );
-        assert_eq!(stats.orders_updated, 0);
-        assert_eq!(status(&db, id).await.1, "");
+        let sale = SaleFile {
+            agents: Vec::new(),
+            groups: vec![vec![d.clone(), pay]],
+        };
+        let stats = run(&db, &s, &sale).await;
+        let final_error = format!("Документ {id}: заказ в финальном состоянии, состав не изменён");
+        assert_eq!(stats.errors, vec![final_error.clone()]);
+        assert_eq!(stats.payments_updated, 1, "контейнер не откатился");
+        assert_eq!(status(&db, id).await, ("P".into(), "".into(), true, false));
+        let version: String = sqlx::query_scalar("SELECT version_1c FROM orders WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(version, "1");
         assert_eq!(lines(&db, id).await.len(), 2);
+        // Повтор не пропускается по версии; отмена применяется
+        d = with(d, &[("Отменен", "true")]);
+        let stats = run(&db, &s, &file(vec![d.clone()])).await;
+        assert_eq!((stats.errors, stats.skipped), (vec![final_error], 0));
+        assert!(status(&db, id).await.3);
 
         // Отгруженный — тоже; тот же состав — не ошибка
         sqlx::query("UPDATE orders SET paid = FALSE WHERE id = $1")
@@ -2263,7 +2298,11 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        let mut d = ship_doc(&sh.to_string(), id, "3");
+        // — ошибка в итоге, но прочие поля отгрузки применяются; версия не пишется
+        let mut d = with(
+            ship_doc(&sh.to_string(), id, "3"),
+            &[("Идентификатор отправления", "TR-F")],
+        );
         d.items = vec![item("tovar-1c", 100.0, 1.0)];
         let stats = run(&db, &SaleSettings::default(), &file(vec![d])).await;
         assert_eq!(
@@ -2273,6 +2312,83 @@ mod tests {
             )]
         );
         assert_eq!(lines(&db, id).await, vec![(f.product_id, 3.0, 100.0, true)]);
+        let row = shipment(&db, sh).await;
+        assert_eq!((row.4.as_str(), row.6.as_str()), ("TR-F", "2"));
+    }
+
+    #[sqlx::test]
+    async fn shipment_tracking_from_fixture(db: PgPool) {
+        let f = fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let sh = first_shipment(&db, id).await;
+        let data = std::fs::read("tests/fixtures/1c/sale/import_shipment.xml").unwrap();
+        let parsed = crate::exchange::sale::parse::parse(&data).unwrap();
+        let mut d = parsed.groups[0][0].clone();
+        d.base = id.to_string();
+        d.number = sh.to_string();
+        d.items.clear();
+        let stats = run(&db, &SaleSettings::default(), &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(shipment(&db, sh).await.4, "RR123456789RU");
+    }
+
+    /// Обмен берёт строку заказа раньше строки оплаты / отгрузки — как сайт (`set_paid_in`).
+    #[sqlx::test]
+    async fn payment_and_shipment_lock_order_first(db: PgPool) {
+        let f = fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let p = first_payment(&db, id).await;
+        let sh = first_shipment(&db, id).await;
+        let cases = [
+            (
+                "payments",
+                p,
+                with(
+                    pay_doc(&p.to_string(), id, "1", PayOperation::Cash),
+                    &[("Оплачен", "true")],
+                ),
+            ),
+            ("shipments", sh, ship_doc(&sh.to_string(), id, "1")),
+        ];
+        for (table, child, d) in cases {
+            let mut site = db.begin().await.unwrap();
+            sqlx::query("SELECT id FROM orders WHERE id = $1 FOR UPDATE")
+                .bind(id)
+                .execute(&mut *site)
+                .await
+                .unwrap();
+            let task = tokio::spawn({
+                let db = db.clone();
+                async move { run(&db, &SaleSettings::default(), &file(vec![d])).await }
+            });
+            // Обмен встал на блокировке заказа
+            let mut waited = 0;
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                     WHERE datname = current_database() AND wait_event_type = 'Lock')",
+                )
+                .fetch_one(&db)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                waited += 1;
+                assert!(waited < 500, "обмен не дошёл до блокировки");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let free = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT id FROM {table} WHERE id = $1 FOR UPDATE NOWAIT"
+            )))
+            .bind(child)
+            .execute(&mut *site)
+            .await;
+            assert!(free.is_ok(), "{table}: строка занята обменом до заказа");
+            site.commit().await.unwrap();
+            let stats = task.await.unwrap();
+            assert_eq!(stats.errors, Vec::<String>::new(), "{table}");
+        }
     }
 
     #[sqlx::test]

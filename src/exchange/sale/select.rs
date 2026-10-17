@@ -26,6 +26,9 @@ pub struct Batch {
 /// подтверждённой выгрузки, по фильтрам настроек; порядок `updated_at, id`. Выгрузка
 /// останавливается, когда истёк `interval` (0 — без остановки), но не внутри группы заказов с
 /// одинаковым `updated_at`: следующая выгрузка берёт заказы строго новее метки.
+/// Заказ, документ которого не собрался (в том числе из-за хука проекта), пропускается, а метка
+/// не заходит за его `updated_at`. Метка не заходит и за начало незавершённых транзакций: их
+/// изменения получат `updated_at` из прошлого, когда станут видны.
 /// Сгенерированный Ид контрагента сохраняется в `users.xml_id`.
 pub async fn query(
     db: &PgPool,
@@ -36,6 +39,15 @@ pub async fn query(
 ) -> anyhow::Result<Batch> {
     let started = Instant::now();
     let statuses = statuses_from(db, s.export_from_status.as_deref()).await?;
+    // Раньше отбора: транзакция, начатая до него, может закоммитить заказ с updated_at
+    // (now() её начала) ниже метки уже после отбора
+    let in_flight: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT min(xact_start) FROM pg_stat_activity
+         WHERE datname = current_database() AND pid <> pg_backend_pid()
+           AND xact_start IS NOT NULL AND backend_type = 'client backend'",
+    )
+    .fetch_one(db)
+    .await?;
     let candidates: Vec<(i64, DateTime<Utc>)> = sqlx::query_as(
         "SELECT o.id, o.updated_at FROM orders o
          WHERE NOT o.updated_1c AND NOT o.external
@@ -54,25 +66,37 @@ pub async fn query(
 
     let map = load_map(db).await?;
     let mut conn = db.acquire().await?;
-    let mut batch = Batch {
-        orders: Vec::new(),
-        mark: None,
-    };
+    let mut orders = Vec::new();
+    // Время изменения последнего обработанного заказа и самого раннего пропущенного
+    let mut last: Option<DateTime<Utc>> = None;
+    let mut skipped: Option<DateTime<Utc>> = None;
     for (id, updated_at) in candidates {
         // Хотя бы один заказ за вызов; группа с одним временем изменения — целиком
         let timed_out = !interval.is_zero() && started.elapsed() >= interval;
-        if timed_out && batch.mark.is_some_and(|m| m != updated_at) {
+        if timed_out && last.is_some_and(|m| m != updated_at) {
             break;
         }
-        batch
-            .orders
-            .push(build(&mut conn, id, s, &map, version, hook, true).await?);
-        batch.mark = Some(updated_at);
+        last = Some(updated_at);
+        match build(&mut conn, id, s, &map, version, hook, true).await {
+            Ok(order) => orders.push(order),
+            Err(e) => {
+                tracing::warn!(order_id = id, "заказ не выгружен в 1С: {e:#}");
+                skipped.get_or_insert(updated_at);
+            }
+        }
     }
-    Ok(batch)
+    let step = chrono::Duration::microseconds(1);
+    let mark = last.filter(|_| !orders.is_empty()).map(|m| {
+        [skipped, in_flight]
+            .into_iter()
+            .flatten()
+            .fold(m, |m, cap| m.min(cap - step))
+    });
+    Ok(Batch { orders, mark })
 }
 
 /// Статусы начиная с заданного по сортировке (`1C_EXPORT_FINAL_ORDERS`); `None` — без фильтра.
+/// Неизвестный статус — без фильтра с предупреждением в журнале.
 async fn statuses_from(db: &PgPool, from: Option<&str>) -> sqlx::Result<Option<Vec<String>>> {
     let Some(from) = from else {
         return Ok(None);
@@ -81,12 +105,14 @@ async fn statuses_from(db: &PgPool, from: Option<&str>) -> sqlx::Result<Option<V
         sqlx::query_scalar("SELECT code FROM order_statuses ORDER BY sort, code")
             .fetch_all(db)
             .await?;
-    Ok(Some(
-        all.iter()
-            .position(|c| c == from)
-            .map(|i| all[i..].to_vec())
-            .unwrap_or_default(),
-    ))
+    let Some(i) = all.iter().position(|c| c == from) else {
+        tracing::warn!(
+            status = from,
+            "статус «начиная со статуса» выгрузки в 1С не найден, выгрузка без фильтра по статусу"
+        );
+        return Ok(None);
+    };
+    Ok(Some(all[i..].to_vec()))
 }
 
 #[derive(FromRow)]
@@ -294,6 +320,7 @@ pub async fn build(
         .unwrap_or_default();
     let date = |dt: Option<DateTime<Utc>>| dt.map(|d| trait_date(d, version)).unwrap_or_default();
     let flag = |b: bool| if b { "true" } else { "false" }.to_string();
+    let original_currency = o.currency.clone();
     let currency = if s.replace_currency.is_empty() {
         o.currency.clone()
     } else {
@@ -485,6 +512,7 @@ pub async fn build(
         number: format!("{}{}", s.number_prefix, o.account_number),
         created_at: o.created_at,
         currency,
+        original_currency,
         sum: o.price,
         comment: to_text(&o.manager_comment),
         id_1c: o.id_1c.clone(),
@@ -1366,6 +1394,99 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn order_of_in_flight_transaction_is_exported_after_commit(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let a = place_order(&db, &f, None).await;
+        let b = place_order(&db, &f, None).await;
+        let (_, mark) = ids(&db).await;
+        commit_export(&db, mark.unwrap()).await.unwrap();
+
+        // T начался раньше query, а закоммитился позже: updated_at заказа a — время начала T
+        let mut t = db.begin().await.unwrap();
+        sqlx::query("UPDATE orders SET manager_comment = 'из T' WHERE id = $1")
+            .bind(a)
+            .execute(&mut *t)
+            .await
+            .unwrap();
+        exec(
+            &db,
+            "UPDATE orders SET manager_comment = 'позже' WHERE id = $1",
+            b,
+        )
+        .await;
+        let (got, mark) = ids(&db).await;
+        assert_eq!(got, vec![b]);
+        t.commit().await.unwrap();
+        commit_export(&db, mark.unwrap()).await.unwrap();
+        assert!(ids(&db).await.0.contains(&a), "заказ из T потерян");
+    }
+
+    #[sqlx::test]
+    async fn unknown_export_from_status_means_no_filter(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        SaleSettings {
+            export_from_status: Some("ZZ".into()),
+            ..SaleSettings::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+        assert_eq!(ids(&db).await.0, vec![id]);
+    }
+
+    /// Хук, падающий на заданном заказе, пока `fail` включён.
+    struct FailingHook {
+        order: i64,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl OrderExportHook for FailingHook {
+        fn traits<'a>(
+            &'a self,
+            _conn: &'a mut PgConnection,
+            order_id: i64,
+        ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
+            Box::pin(async move {
+                if order_id == self.order && self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                    anyhow::bail!("хук упал");
+                }
+                Ok(vec![])
+            })
+        }
+    }
+
+    #[sqlx::test]
+    async fn failing_order_is_skipped_but_not_lost(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let a = place_order(&db, &f, None).await;
+        let b = place_order(&db, &f, None).await;
+        let hook = FailingHook {
+            order: a,
+            fail: true.into(),
+        };
+        let s = SaleSettings::default();
+        let batch = query(&db, &s, V208, Duration::ZERO, Some(&hook))
+            .await
+            .unwrap();
+        assert_eq!(
+            batch.orders.iter().map(|o| o.id).collect::<Vec<_>>(),
+            vec![b]
+        );
+        commit_export(&db, batch.mark.unwrap()).await.unwrap();
+
+        hook.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        let s = SaleSettings::load(&db).await.unwrap();
+        let batch = query(&db, &s, V208, Duration::ZERO, Some(&hook))
+            .await
+            .unwrap();
+        assert!(
+            batch.orders.iter().any(|o| o.id == a),
+            "пропущенный заказ потерян"
+        );
+    }
+
+    #[sqlx::test]
     async fn builds_order_document(db: PgPool) {
         let f = order_fixture(&db).await;
         let id = place_order(&db, &f, None).await;
@@ -1434,6 +1555,7 @@ mod tests {
 
         assert_eq!(o.number, format!("TO-{id}"));
         assert_eq!(o.currency, "руб");
+        assert_eq!(o.original_currency, "RUB");
         assert_eq!(o.sum, 450.0);
         assert_eq!(o.comment, "Позвонить\nдо «10» утра");
         assert_eq!(o.items.len(), 1);

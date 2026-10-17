@@ -608,7 +608,7 @@ mod tests {
         assert_eq!(d.items[0].kind, ItemKind::Product);
         assert_eq!(d.items[1].kind, ItemKind::Service);
         assert_eq!(d.traits["Дата отгрузки по 1С"], "2026-10-16 10:30:00");
-        assert_eq!(d.traits["Номер отслеживания"], "RR123456789RU");
+        assert_eq!(d.traits["Идентификатор отправления"], "RR123456789RU");
         assert_eq!(d.traits["Доставка разрешена"], "true");
     }
 
