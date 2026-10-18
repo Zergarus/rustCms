@@ -87,6 +87,8 @@ pub struct ExportOrder {
     pub version_1c: String,
     pub agent: Agent,
     pub items: Vec<ExportItem>,
+    /// Скидка на заказ (`DISCOUNT_VALUE` заказа, `getXmlOrderDiscount`): выводится при > 0.
+    pub discount: f64,
     /// Строка доставки до 2.10; от 2.10 строки доставки заказа берутся из отгрузок.
     pub delivery: Option<ExportDelivery>,
     /// Склады отгрузок заказа (`getShipmentsStoreList` + `getXmlSaleStore`).
@@ -128,6 +130,8 @@ pub struct ExportItem {
     pub price: f64,
     pub quantity: f64,
     pub sum: f64,
+    /// Сумма скидки позиции (скидка на единицу × количество); выводится при > 0, наценка — нет.
+    pub discount: f64,
 }
 
 /// Склад (`CCatalogStore`: XML_ID, TITLE, ADDRESS, PHONE, EMAIL).
@@ -350,6 +354,7 @@ fn order_document(x: &mut Xml, o: &ExportOrder, v: SchemaVersion) {
     contragents(x, &o.agent, v);
     x.leaf("Время", &time(o.created_at));
     x.leaf("Комментарий", &o.comment);
+    discounts(x, "Скидка на заказ", o.discount, false);
     stores(x, &o.stores, v);
     // От 2.10 — строка доставки на каждую отгрузку, до — доставка заказа
     let deliveries: Vec<&ExportDelivery> = if v.documents() {
@@ -581,6 +586,7 @@ fn goods(x: &mut Xml, items: &[ExportItem], deliveries: &[&ExportDelivery], v: S
         x.leaf("ИдКаталога", &it.catalog_xml_id);
         x.leaf("Наименование", &it.name);
         unit(x, it, v);
+        discounts(x, "Скидка на товар", it.discount, true);
         x.leaf("ЦенаЗаЕдиницу", &num(it.price));
         x.leaf("Количество", &num(it.quantity));
         x.leaf("Сумма", &num(it.sum));
@@ -620,6 +626,21 @@ fn goods(x: &mut Xml, items: &[ExportItem], deliveries: &[&ExportDelivery], v: S
         x.close("Товар");
     }
     x.close("Товары");
+}
+
+/// `Скидки` с одной скидкой (`SALE_EXPORT_ITEM_DISCOUNT` позиции / `SALE_EXPORT_ORDER_DISCOUNT`
+/// заказа); при сумме ≤ 0 — ничего.
+fn discounts(x: &mut Xml, name: &str, sum: f64, in_price: bool) {
+    if sum <= 0.0 {
+        return;
+    }
+    x.open("Скидки");
+    x.open("Скидка");
+    x.leaf("Наименование", name);
+    x.leaf("Сумма", &num(sum));
+    x.leaf("УчтеноВСумме", if in_price { "true" } else { "false" });
+    x.close("Скидка");
+    x.close("Скидки");
 }
 
 /// `CSaleExport::DIVIDER_NUMBER_POSITION`.
@@ -939,6 +960,7 @@ mod tests {
             price,
             quantity: qty,
             sum,
+            discount: 0.0,
         }
     }
 
@@ -971,6 +993,7 @@ mod tests {
             version_1c: String::new(),
             agent,
             items,
+            discount: 0.0,
             delivery: None,
             stores: vec![],
             traits: vec![],
@@ -1364,6 +1387,57 @@ mod tests {
             );
             assert_eq!(tree(&out), tree(&expected), "{file}");
         }
+    }
+
+    #[test]
+    fn export_item_discount_element() {
+        let mut o = canceled_guest();
+        o.items[0].discount = 20.1;
+        o.discount = 5.0;
+        let path = format!(
+            "{}/tests/fixtures/1c/sale/export_discount.xml",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let expected = std::fs::read_to_string(&path).unwrap();
+        let out = decode(&render(&[o], SchemaVersion(2.09), generated()));
+        assert_eq!(tree(&out), tree(&expected));
+
+        // Наценка (скидка ≤ 0) — без элемента
+        let mut o = canceled_guest();
+        o.items[0].discount = -3.0;
+        o.discount = 0.0;
+        assert!(!decode(&render(&[o], SchemaVersion(2.09), generated())).contains("Скидки"));
+
+        // От 2.10 — и в позициях отгрузки; скидка на заказ — только в документе заказа
+        let mut o = payment_shipment_210();
+        o.items[0].discount = 100.0;
+        o.shipments[0].items[0].discount = 100.0;
+        o.discount = 7.0;
+        let root = tree(&decode(&render(&[o], SchemaVersion(2.1), generated())));
+        let docs: Vec<&Node> = root.children.iter().collect();
+        fn child<'a>(n: &'a Node, name: &str) -> Option<&'a Node> {
+            n.children.iter().find(|c| c.name == name)
+        }
+        let item_discount = |doc: &Node| {
+            let goods = child(doc, "Товары").unwrap();
+            let names: Vec<String> = goods.children[0]
+                .children
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            let at = names.iter().position(|n| n == "Скидки")?;
+            assert_eq!(names[at + 1], "ЦенаЗаЕдиницу");
+            let discount = child(&goods.children[0], "Скидки").unwrap();
+            Some(discount.children[0].children[1].text.clone())
+        };
+        assert_eq!(item_discount(docs[0]).as_deref(), Some("100"));
+        let ship = docs
+            .iter()
+            .find(|d| child(d, "ХозОперация").unwrap().text == "Отпуск товара")
+            .unwrap();
+        assert_eq!(item_discount(ship).as_deref(), Some("100"));
+        assert!(child(docs[0], "Скидки").is_some());
+        assert!(child(ship, "Скидки").is_none());
     }
 
     #[test]

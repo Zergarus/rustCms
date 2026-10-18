@@ -74,6 +74,39 @@ struct ApiElement {
         skip_serializing_if = "Option::is_none"
     )]
     catalog: Option<i16>,
+    /// Только у записей коллекций с каталогом, цену которых меняет правило работы с корзиной:
+    /// цена единицы основного типа после правил товара для гостя (`GetOptimalPrice`).
+    #[sqlx(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    price_discount: Option<f64>,
+}
+
+/// `price_discount` записей коллекции с каталогом: правила читаются один раз на запрос.
+async fn fill_price_discount(
+    state: &AppState,
+    collection: &Collection,
+    items: &mut [ApiElement],
+) -> AppResult<()> {
+    if !collection.is_catalog || items.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<i64> = items.iter().map(|i| i.id).collect();
+    let prices = crate::catalog::load_prices(&state.db, &ids).await?;
+    let base: Vec<(i64, f64)> = ids
+        .iter()
+        .filter_map(|id| Some((*id, crate::catalog::main_price(prices.get(id)?)?.price)))
+        .collect();
+    let discounted = crate::discount::catalog::discount_prices(
+        &state.db,
+        state.project.discount_condition_hook.as_deref(),
+        None,
+        &base,
+    )
+    .await?;
+    for item in items {
+        item.price_discount = discounted.get(&item.id).copied();
+    }
+    Ok(())
 }
 
 fn serialize_catalog<S: serde::Serializer>(
@@ -207,7 +240,8 @@ async fn list_items(
         .push_bind(per_page)
         .push(" OFFSET ")
         .push_bind((page - 1) * per_page);
-    let items: Vec<ApiElement> = qb.build_query_as().fetch_all(&state.db).await?;
+    let mut items: Vec<ApiElement> = qb.build_query_as().fetch_all(&state.db).await?;
+    fill_price_discount(&state, &iblock, &mut items).await?;
 
     let pagination = Pagination {
         page,
@@ -223,7 +257,7 @@ async fn get_item(
     Path((iblock_code, element_code)): Path<(String, String)>,
 ) -> AppResult<Json<ApiElement>> {
     let iblock = public_iblock(&state, &iblock_code).await?;
-    let element: ApiElement = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+    let mut element: ApiElement = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT id, code, name, sort, preview_text, detail_text, published_at, {} AS properties,
                 created_at, updated_at, product_id, {} AS catalog_type
          FROM collection_items
@@ -237,6 +271,7 @@ async fn get_item(
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
+    fill_price_discount(&state, &iblock, std::slice::from_mut(&mut element)).await?;
     Ok(Json(element))
 }
 
@@ -254,4 +289,149 @@ fn parse_positive(raw: Option<&String>, default: i64) -> i64 {
     raw.and_then(|s| s.parse::<i64>().ok())
         .filter(|n| *n >= 1)
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use serde_json::{Value, json};
+
+    async fn get(app: &axum::Router, path: &str) -> Value {
+        let (status, _, body) = crate::test_support::get_raw(app, path, "").await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// Каталог из `cart_fixture` открыт в API: товар `tovar` (1000), товар с предложениями
+    /// `maslo` (своей цены нет), предложение `maslo-1l` (500) — в коллекции `offers`.
+    async fn catalog(db: &sqlx::PgPool) -> crate::test_support::CartFixture {
+        let fx = crate::test_support::cart_fixture(db).await;
+        sqlx::query("UPDATE collections SET api_enabled = TRUE")
+            .execute(db)
+            .await
+            .unwrap();
+        fx
+    }
+
+    async fn insert_rule(db: &sqlx::PgPool, conditions: Value, actions: Value) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO discounts (name, conditions, actions) VALUES ('Скидка', $1, $2) RETURNING id",
+        )
+        .bind(conditions)
+        .bind(json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND"}, "CHILDREN": actions}))
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    fn always() -> Value {
+        json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": []})
+    }
+
+    fn perc(value: f64, filter: Value) -> Value {
+        json!([{
+            "CLASS_ID": "ActSaleBsktGrp",
+            "DATA": {"Type": "Discount", "Value": value, "Unit": "Perc", "Max": 0, "All": "AND", "True": "True"},
+            "CHILDREN": filter
+        }])
+    }
+
+    fn by_code<'a>(list: &'a Value, code: &str) -> &'a Value {
+        list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["code"] == code)
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn api_without_rules_unchanged(db: sqlx::PgPool) {
+        catalog(&db).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        // Правило с условием корзины и правило по купону в каталоге не участвуют
+        insert_rule(
+            &db,
+            json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": [
+                {"CLASS_ID": "CondSaleOrderSumm", "DATA": {"logic": "Great", "value": 1}}
+            ]}),
+            perc(10.0, json!([])),
+        )
+        .await;
+        let coupon = insert_rule(&db, always(), perc(20.0, json!([]))).await;
+        sqlx::query("UPDATE discounts SET use_coupons = TRUE WHERE id = $1")
+            .bind(coupon)
+            .execute(&db)
+            .await
+            .unwrap();
+        let list = get(&app, "/api/v1/iblocks/catalog/elements").await;
+        let detail = get(&app, "/api/v1/iblocks/catalog/elements/tovar").await;
+        let keys = |v: &Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        let want = [
+            "catalog",
+            "code",
+            "created_at",
+            "detail_text",
+            "id",
+            "name",
+            "preview_text",
+            "properties",
+            "published_at",
+            "sort",
+            "updated_at",
+        ];
+        assert_eq!(keys(by_code(&list, "tovar")), want);
+        assert_eq!(keys(&detail), want);
+        assert!(!list.to_string().contains("price_discount"));
+    }
+
+    #[sqlx::test]
+    async fn api_price_discount_only_with_rule(db: sqlx::PgPool) {
+        let fx = catalog(&db).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        // −10 % на `tovar`; −50 % для группы — гостю не положено
+        insert_rule(
+            &db,
+            always(),
+            perc(
+                10.0,
+                json!([{"CLASS_ID": "CondBsktFldProduct", "DATA": {"logic": "Equal", "value": fx.f.product_id}}]),
+            ),
+        )
+        .await;
+        let vip = insert_rule(&db, always(), perc(50.0, json!([]))).await;
+        let group: i64 = sqlx::query_scalar(
+            "INSERT INTO groups (code, name) VALUES ('vip', 'VIP') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO discount_groups (discount_id, group_id) VALUES ($1, $2)")
+            .bind(vip)
+            .bind(group)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let list = get(&app, "/api/v1/iblocks/catalog/elements").await;
+        assert_eq!(by_code(&list, "tovar")["price_discount"], json!(900.0));
+        // У товара с предложениями своей цены нет
+        assert!(by_code(&list, "maslo").get("price_discount").is_none());
+        let detail = get(&app, "/api/v1/iblocks/catalog/elements/tovar").await;
+        assert_eq!(detail["price_discount"], json!(900.0));
+        // Предложение: правило на `tovar` его не касается
+        let offers = get(&app, "/api/v1/iblocks/offers/elements").await;
+        assert!(by_code(&offers, "maslo-1l").get("price_discount").is_none());
+
+        // Правило на всё — и предложению
+        insert_rule(&db, always(), perc(20.0, json!([]))).await;
+        let offers = get(&app, "/api/v1/iblocks/offers/elements").await;
+        assert_eq!(by_code(&offers, "maslo-1l")["price_discount"], json!(400.0));
+        let list = get(&app, "/api/v1/iblocks/catalog/elements").await;
+        assert_eq!(by_code(&list, "tovar")["price_discount"], json!(720.0));
+    }
 }

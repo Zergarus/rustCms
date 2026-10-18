@@ -20,7 +20,12 @@ use crate::{collection::is_valid_code, state::AppState};
 
 const MAX_LIMIT: i64 = 200;
 
-pub async fn search(state: &AppState, api_code: &str, body: Map<String, Value>) -> BxResult {
+pub async fn search(
+    state: &AppState,
+    api_code: &str,
+    body: Map<String, Value>,
+    user_id: Option<i64>,
+) -> BxResult {
     let (snap, schema) = schema_for(state, api_code).await?;
     let query = body
         .get("query")
@@ -68,6 +73,7 @@ pub async fn search(state: &AppState, api_code: &str, body: Map<String, Value>) 
         snap: &snap,
         project: &state.project,
         image_resize: resize.as_deref(),
+        user_id,
     };
     let serialized = serialize(&env, &schema, &rows, &select, Mode::Related, 0).await?;
 

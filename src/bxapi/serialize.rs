@@ -87,6 +87,8 @@ pub struct Env<'a> {
     pub snap: &'a Snapshot,
     pub project: &'a Project,
     pub image_resize: Option<&'a [u32]>,
+    /// Посетитель с сессией — цена со скидкой по его группам (`Project::catalog_price_discount`).
+    pub user_id: Option<i64>,
 }
 
 /// Базовые поля, которые Битрикс отдаёт у элемента всегда.
@@ -291,8 +293,11 @@ struct Loaded {
     quantities: HashMap<i64, f64>,
     /// Тип товара (`catalog_products.type`) записей каталога страницы.
     types: HashMap<i64, i16>,
-    /// Товары с предложениями, у которых цена и остатки взяты из предложений.
-    from_offers: HashSet<i64>,
+    /// Товары с предложениями, у которых цена и остатки взяты из предложений: товар →
+    /// предложение, чья цена показана.
+    from_offers: HashMap<i64, i64>,
+    /// Цена основного типа со скидкой (`Project::catalog_price_discount`), только изменённые.
+    discounts: HashMap<i64, f64>,
 }
 
 /// Предложение, чья цена показывается у товара («от»): самая низкая основная цена среди
@@ -462,8 +467,38 @@ impl Loaded {
                 .await?;
                 loaded.quantities = qty.into_iter().collect();
             }
+            if env.project.catalog_price_discount && select.has("catalogPrice") {
+                loaded.load_discounts(env).await?;
+            }
         }
         Ok(loaded)
+    }
+
+    /// Цены со скидкой для `catalogPrice`: у товара с ценой «от» — скидка того предложения.
+    async fn load_discounts(&mut self, env: &Env<'_>) -> Result<(), BxError> {
+        let sources: Vec<(i64, i64, f64)> = self
+            .prices
+            .iter()
+            .filter_map(|(id, prices)| {
+                let source = self.from_offers.get(id).copied().unwrap_or(*id);
+                Some((*id, source, catalog::main_price(prices)?.price))
+            })
+            .collect();
+        let mut products: Vec<(i64, f64)> = sources.iter().map(|(_, src, p)| (*src, *p)).collect();
+        products.sort_by_key(|(id, _)| *id);
+        products.dedup_by_key(|(id, _)| *id);
+        let discounted = crate::discount::catalog::discount_prices(
+            &env.state.db,
+            env.project.discount_condition_hook.as_deref(),
+            env.user_id,
+            &products,
+        )
+        .await?;
+        self.discounts = sources
+            .into_iter()
+            .filter_map(|(id, src, _)| Some((id, *discounted.get(&src)?)))
+            .collect();
+        Ok(())
     }
 
     /// Типы товаров страницы и, для товаров с предложениями, цена «от» и суммарные
@@ -524,7 +559,7 @@ impl Loaded {
                 && let Some((_, _, prices)) = offers.into_iter().find(|(id, _, _)| *id == offer)
             {
                 self.prices.insert(product, prices);
-                self.from_offers.insert(product);
+                self.from_offers.insert(product, offer);
             }
             if let Some(sum) = sums.remove(&product) {
                 self.stocks.insert(product, sum.into_iter().collect());
@@ -771,7 +806,13 @@ impl Loaded {
             "formatted": format_price(main.price, snap.currencies.get(&main.currency)),
             "byType": by_type,
         });
-        if self.from_offers.contains(&item_id) {
+        if let Some(price) = self.discounts.get(&item_id) {
+            // Как `DISCOUNT_PRICE` у `GetOptimalPrice`: цена основного типа после скидок
+            value["discountValue"] = number_value(*price);
+            value["discountFormatted"] =
+                Value::from(format_price(*price, snap.currencies.get(&main.currency)));
+        }
+        if self.from_offers.contains_key(&item_id) {
             value["fromOffers"] = Value::Bool(true); // цена «от» — самого дешёвого предложения
         }
         value
@@ -945,5 +986,146 @@ mod tests {
         let unpriced = [(1, true, vec![]), (2, true, vec![price(50.0)])];
         assert_eq!(pick_from_offer(&unpriced), Some(2));
         assert_eq!(pick_from_offer(&[]), None);
+    }
+
+    async fn post(app: &axum::Router, path: &str, cookie: &str, body: Value) -> Value {
+        use tower::ServiceExt;
+        let req = axum::http::Request::post(path)
+            .header(axum::http::header::COOKIE, cookie)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK, "{path}");
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn rule_actions(value: f64) -> Value {
+        json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND"}, "CHILDREN": [{
+            "CLASS_ID": "ActSaleBsktGrp",
+            "DATA": {"Type": "Discount", "Value": value, "Unit": "Perc", "Max": 0, "All": "AND", "True": "True"},
+            "CHILDREN": []
+        }]})
+    }
+
+    #[sqlx::test]
+    async fn bxapi_catalog_price_discount_behind_flag(db: sqlx::PgPool) {
+        use std::sync::Arc;
+
+        let fx = crate::test_support::cart_fixture(&db).await;
+        sqlx::query("UPDATE collections SET api_enabled = TRUE")
+            .execute(&db)
+            .await
+            .unwrap();
+        let state = crate::test_support::test_state(db.clone());
+        let off = crate::app(state.clone());
+        let list = "/api/v1/iblock/catalog/element/list";
+        let detail = "/api/v1/iblock/catalog/element/slug/tovar";
+        let body = json!({"select": ["id", "code", "catalogPrice"], "order": {"id": "asc"}});
+        let before = post(&off, list, "", body.clone()).await;
+        let before_detail = post(&off, detail, "", body.clone()).await;
+
+        // −10 % всем, ещё −50 % группе VIP
+        sqlx::query("INSERT INTO discounts (name, actions) VALUES ('Всем', $1)")
+            .bind(rule_actions(10.0))
+            .execute(&db)
+            .await
+            .unwrap();
+        let vip: i64 = sqlx::query_scalar(
+            "INSERT INTO discounts (name, actions) VALUES ('VIP', $1) RETURNING id",
+        )
+        .bind(rule_actions(50.0))
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let group: i64 = sqlx::query_scalar(
+            "INSERT INTO groups (code, name) VALUES ('vip', 'VIP') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO discount_groups (discount_id, group_id) VALUES ($1, $2)")
+            .bind(vip)
+            .bind(group)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        // Без флага проекта — ответ прежний
+        assert_eq!(post(&off, list, "", body.clone()).await, before);
+        assert_eq!(post(&off, detail, "", body.clone()).await, before_detail);
+
+        let on = crate::app(crate::state::AppState {
+            project: Arc::new(crate::bxapi::project::Project {
+                catalog_price_discount: true,
+                ..Default::default()
+            }),
+            ..state
+        });
+        let items = post(&on, list, "", body.clone()).await["data"]["items"].clone();
+        let find = |items: &Value, id: i64| {
+            items
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["id"] == json!(id))
+                .unwrap()["catalogPrice"]
+                .clone()
+        };
+        let tovar = find(&items, fx.f.product_id);
+        assert_eq!(tovar["value"], json!(1000));
+        assert_eq!(tovar["discountValue"], json!(900));
+        assert_eq!(tovar["discountFormatted"], json!("900.00"));
+        // Цена «от» — со скидкой предложения
+        let maslo = find(&items, fx.parent_id);
+        assert_eq!(maslo["fromOffers"], json!(true));
+        assert_eq!(maslo["value"], json!(500));
+        assert_eq!(maslo["discountValue"], json!(450));
+        // Остальное — как без флага
+        let mut plain = tovar.clone();
+        let obj = plain.as_object_mut().unwrap();
+        obj.remove("discountValue");
+        obj.remove("discountFormatted");
+        assert_eq!(plain, find(&before["data"]["items"], fx.f.product_id));
+        let d = post(&on, detail, "", body.clone()).await;
+        assert_eq!(
+            d["data"]["item"]["catalogPrice"]["discountValue"],
+            json!(900)
+        );
+
+        // Посетитель из группы VIP — цена по его группам
+        let user: i64 = sqlx::query_scalar(
+            "INSERT INTO users (login, email, password_hash) VALUES ('vip', 'vip@e.x', '') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+            .bind(user)
+            .bind(group)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO site_sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 day')",
+        )
+        .bind(crate::cart::repo::token_hash("sess-vip"))
+        .bind(user)
+        .execute(&db)
+        .await
+        .unwrap();
+        let cookie = format!("{}=sess-vip", super::super::auth::COOKIE);
+        let items = post(&on, list, &cookie, body.clone()).await["data"]["items"].clone();
+        assert_eq!(find(&items, fx.f.product_id)["discountValue"], json!(450));
+
+        // Без правил — без полей скидки и при флаге
+        sqlx::query("DELETE FROM discounts")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(post(&on, list, "", body).await, before);
     }
 }

@@ -13,6 +13,7 @@ use super::document::{
 };
 use super::settings::{CONTRAGENT_CODES, Domain, MapEntry, MapSource, SaleSettings, load_map};
 use crate::bxapi::project::OrderExportHook;
+use crate::discount::model::round2;
 
 /// Заказы одного `query` и метка для `success`.
 #[derive(Debug, Clone, PartialEq)]
@@ -167,6 +168,8 @@ struct ItemRow {
     name: String,
     price: f64,
     quantity: f64,
+    /// Скидка на единицу (наценка — отрицательная).
+    discount_price: f64,
     xml_id: String,
     catalog_xml_id: String,
     unit: String,
@@ -524,6 +527,9 @@ pub async fn build(
             fields,
         },
         items: export_items,
+        // `DISCOUNT_VALUE` заказа: скидок вне позиций и доставки нет, скидка доставки уже в
+        // цене отгрузки (как `DISCOUNT_PRICE` отгрузки у Битрикса, которую выгрузка не пишет)
+        discount: 0.0,
         // До 2.10 — доставка заказа; от 2.10 строки доставки берутся из отгрузок
         delivery: Some(ExportDelivery {
             price: o.delivery_price,
@@ -592,6 +598,7 @@ fn export_item(it: &ItemRow) -> ExportItem {
         price: it.price,
         quantity: it.quantity,
         sum: it.price * it.quantity,
+        discount: round2(it.discount_price * it.quantity),
     }
 }
 
@@ -600,6 +607,7 @@ fn export_item(it: &ItemRow) -> ExportItem {
 async fn load_items(conn: &mut PgConnection, order_id: i64) -> sqlx::Result<Vec<ItemRow>> {
     sqlx::query_as(
         "SELECT c.id, c.name, COALESCE(c.price, 0)::float8 AS price, c.quantity::float8 AS quantity,
+                c.discount_price::float8 AS discount_price,
                 COALESCE(i.xml_id, '') AS xml_id, COALESCE(col.xml_id, '') AS catalog_xml_id,
                 COALESCE(NULLIF(COALESCE(
                     i.field_values ->> (SELECT f.code FROM collection_fields f
@@ -1666,5 +1674,43 @@ mod tests {
             to_text("a<script>x()</script>b<STYLE>p{}</style>c<br/>d &amp; &#8381; &bogus; 1 < 2"),
             "abc\nd & ₽ &bogus; 1 < 2"
         );
+    }
+
+    #[sqlx::test]
+    async fn select_fills_item_discount(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let o = one(&db, id).await;
+        assert_eq!(o.items[0].discount, 0.0);
+        assert_eq!(o.discount, 0.0);
+
+        // Скидка 6.70 на единицу × 3 шт.; скидка на доставку — уже в цене отгрузки
+        exec(
+            &db,
+            "UPDATE cart_items SET quantity = 3, base_price = 40, discount_price = 6.7, price = 33.3
+             WHERE order_id = $1",
+            id,
+        )
+        .await;
+        exec(
+            &db,
+            "UPDATE shipments SET base_price = price + 50 WHERE order_id = $1",
+            id,
+        )
+        .await;
+        let o = one(&db, id).await;
+        let it = &o.items[0];
+        assert_eq!((it.price, it.quantity, it.discount), (33.3, 3.0, 20.1));
+        assert_eq!(o.shipments[0].items[0].discount, 20.1);
+        assert_eq!(o.discount, 0.0);
+
+        // Наценка — отрицательная скидка, как есть (элемент не выводится)
+        exec(
+            &db,
+            "UPDATE cart_items SET discount_price = -2 WHERE order_id = $1",
+            id,
+        )
+        .await;
+        assert_eq!(one(&db, id).await.items[0].discount, -6.0);
     }
 }

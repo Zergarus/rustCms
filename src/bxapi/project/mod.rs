@@ -311,6 +311,9 @@ pub struct Project {
     /// Свои классы условий скидок (`None` — только штатные).
     #[allow(dead_code)] // читает расчёт скидок корзины (следующие задачи)
     pub discount_condition_hook: Option<Arc<dyn DiscountConditionHook>>,
+    /// Цена со скидкой в `catalogPrice` элементов (`discountValue`/`discountFormatted`, как
+    /// `DISCOUNT_PRICE` у `GetOptimalPrice`); по умолчанию выключено — ответ как у модуля bxapi.
+    pub catalog_price_discount: bool,
     pub cart: CartConfig,
     pub order: OrderConfig,
     pub profile: ProfileConfig,
@@ -416,6 +419,7 @@ impl Default for Project {
             order_export_hook: None,
             order_import_hook: None,
             discount_condition_hook: None,
+            catalog_price_discount: false,
             cart: CartConfig::default(),
             order: OrderConfig::default(),
             profile: ProfileConfig::default(),

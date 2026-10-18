@@ -262,6 +262,7 @@ async fn record_views(
             snap: &snap,
             project: &state.project,
             image_resize: (!widths.is_empty()).then_some(widths.as_slice()),
+            user_id: None,
         };
         let items = serialize(&env, &schema, &rows, &select, Mode::Related, 0).await?;
         for (row, item) in rows.iter().zip(items) {

@@ -141,51 +141,129 @@ pub async fn for_lines(
     coupons: Vec<Coupon>,
     order: OrderCtx,
 ) -> sqlx::Result<Context> {
-    let group_ids: Vec<i64> = match user_id {
+    let group_ids = user_group_ids(&mut *db, user_id).await?;
+    let mut buyable: Vec<(&crate::cart::CartItem, f64, f64)> = lines
+        .into_iter()
+        .map(|l| (l.item, l.base_price, l.stock))
+        .collect();
+    buyable.sort_by_key(|(it, _, _)| it.id);
+    let keys: Vec<i64> = buyable.iter().map(|(it, _, _)| it.id).collect();
+    let custom: HashMap<i64, Option<f64>> = if keys.is_empty() {
+        HashMap::new()
+    } else {
+        sqlx::query_as::<_, (i64, Option<f64>)>(
+            "SELECT id, price::float8 FROM cart_items WHERE id = ANY($1) AND custom_price",
+        )
+        .bind(&keys)
+        .fetch_all(&mut *db)
+        .await?
+        .into_iter()
+        .collect()
+    };
+    let raw = buyable
+        .into_iter()
+        .map(|(it, catalog_price, stock)| {
+            let custom_price = custom.get(&it.id);
+            RawItem {
+                key: it.id,
+                product_id: it.product_id,
+                name: it.name.clone(),
+                quantity: it.quantity,
+                base_price: custom_price.copied().flatten().unwrap_or(catalog_price),
+                custom_price: custom_price.is_some(),
+                stock,
+            }
+        })
+        .collect();
+    Ok(Context {
+        items: load_items(db, raw).await?,
+        user_id,
+        group_ids,
+        coupons,
+        order,
+        now: Utc::now(),
+    })
+}
+
+/// Группы пользователя; гость — без групп.
+pub async fn user_group_ids(
+    db: &mut sqlx::PgConnection,
+    user_id: Option<i64>,
+) -> sqlx::Result<Vec<i64>> {
+    match user_id {
         Some(u) => {
             sqlx::query_scalar(
                 "SELECT group_id FROM user_groups WHERE user_id = $1 ORDER BY group_id",
             )
             .bind(u)
             .fetch_all(&mut *db)
-            .await?
+            .await
         }
-        None => Vec::new(),
-    };
-    let mut ctx = Context {
-        items: Vec::new(),
-        user_id,
-        group_ids,
-        coupons,
-        order,
-        now: Utc::now(),
-    };
-
-    let mut buyable: Vec<(&crate::cart::CartItem, f64, f64)> = lines
-        .into_iter()
-        .map(|l| (l.item, l.base_price, l.stock))
-        .collect();
-    buyable.sort_by_key(|(it, _, _)| it.id);
-    if buyable.is_empty() {
-        return Ok(ctx);
+        None => Ok(Vec::new()),
     }
+}
 
-    let keys: Vec<i64> = buyable.iter().map(|(it, _, _)| it.id).collect();
-    let custom: HashMap<i64, Option<f64>> = sqlx::query_as::<_, (i64, Option<f64>)>(
-        "SELECT id, price::float8 FROM cart_items WHERE id = ANY($1) AND custom_price",
+/// Записи каталога для цены в каталоге: (запись, цена единицы до скидок) → позиция в 1 шт.
+/// с ключом — id записи и остатком `catalog_products.quantity`.
+pub async fn for_products(
+    db: &mut sqlx::PgConnection,
+    products: &[(i64, f64)],
+) -> sqlx::Result<Vec<CtxItem>> {
+    if products.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<i64> = products.iter().map(|(id, _)| *id).collect();
+    let stock: HashMap<i64, f64> = sqlx::query_as::<_, (i64, f64)>(
+        "SELECT item_id, quantity::float8 FROM catalog_products WHERE item_id = ANY($1)",
     )
-    .bind(&keys)
+    .bind(&ids)
     .fetch_all(&mut *db)
     .await?
     .into_iter()
     .collect();
+    let raw = products
+        .iter()
+        .map(|&(id, price)| RawItem {
+            key: id,
+            product_id: id,
+            name: String::new(),
+            quantity: 1.0,
+            base_price: price,
+            custom_price: false,
+            stock: stock.get(&id).copied().unwrap_or(0.0),
+        })
+        .collect();
+    load_items(db, raw).await
+}
+
+/// Позиция до чтения данных товара.
+struct RawItem {
+    key: i64,
+    product_id: i64,
+    /// Название, если записи нет или у неё пустое.
+    name: String,
+    quantity: f64,
+    base_price: f64,
+    custom_price: bool,
+    stock: f64,
+}
+
+/// Данные товаров позиций: запись, родитель предложения, разделы с предками, поля.
+async fn load_items(
+    db: &mut sqlx::PgConnection,
+    buyable: Vec<RawItem>,
+) -> sqlx::Result<Vec<CtxItem>> {
+    let mut items = Vec::new();
+    if buyable.is_empty() {
+        return Ok(items);
+    }
 
     const RECORD: &str =
         "SELECT i.id, i.collection_id, i.product_id, i.section_id, i.xml_id, i.name,
                 i.code, i.field_values, COALESCE(p.weight, 0)::float8 AS weight
          FROM collection_items i LEFT JOIN catalog_products p ON p.item_id = i.id
          WHERE i.id = ANY($1)";
-    let product_ids: Vec<i64> = buyable.iter().map(|(it, _, _)| it.product_id).collect();
+    let product_ids: Vec<i64> = buyable.iter().map(|it| it.product_id).collect();
     let mut records: HashMap<i64, RecordRow> = sqlx::query_as::<_, RecordRow>(RECORD)
         .bind(&product_ids)
         .fetch_all(&mut *db)
@@ -193,7 +271,7 @@ pub async fn for_lines(
         .into_iter()
         .map(|r| (r.id, r))
         .collect();
-    for (it, _, _) in &buyable {
+    for it in &buyable {
         records.entry(it.product_id).or_insert_with(|| RecordRow {
             id: it.product_id,
             collection_id: 0,
@@ -254,7 +332,7 @@ pub async fn for_lines(
             .and_then(|s| chains.get(&s).cloned())
             .unwrap_or_default()
     };
-    for (it, catalog_price, stock) in buyable {
+    for it in buyable {
         let Some(rec) = records.get(&it.product_id) else {
             continue;
         };
@@ -285,9 +363,8 @@ pub async fn for_lines(
                 field_ids.insert(*id, key);
             }
         }
-        let custom_price = custom.get(&it.id);
-        ctx.items.push(CtxItem {
-            key: it.id,
+        items.push(CtxItem {
+            key: it.key,
             product_id: it.product_id,
             collection_id: rec.collection_id,
             parent: parent.map(|p| CtxParent {
@@ -308,13 +385,13 @@ pub async fn for_lines(
             fields,
             field_ids,
             quantity: it.quantity,
-            base_price: custom_price.copied().flatten().unwrap_or(catalog_price),
-            custom_price: custom_price.is_some(),
+            base_price: it.base_price,
+            custom_price: it.custom_price,
             weight: rec.weight,
-            stock_quantity: stock,
+            stock_quantity: it.stock,
         });
     }
-    Ok(ctx)
+    Ok(items)
 }
 
 #[cfg(test)]

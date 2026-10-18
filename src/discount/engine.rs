@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::cond::{self, State};
-use super::context::Context;
+use super::context::{Context, CtxItem};
 use super::model::{Coupon, CouponKind, Node, Rule, as_num, round2};
 use crate::bxapi::project::DiscountConditionHook;
 
@@ -84,7 +84,7 @@ fn period(
 }
 
 /// Проверки `DiscountCouponsManager::checkBaseData`/`checkFullData`: `None` — купон годен.
-fn coupon_error(cp: &Coupon, rules: &[Rule], ctx: &Context) -> Option<CouponStatus> {
+fn coupon_error(cp: &Coupon, rules: &[&Rule], ctx: &Context) -> Option<CouponStatus> {
     if !cp.active {
         return Some(CouponStatus::Inactive);
     }
@@ -325,6 +325,11 @@ impl Calc<'_> {
 }
 
 pub fn calculate(rules: &[Rule], ctx: &Context, hook: Hook) -> DiscountResult {
+    let refs: Vec<&Rule> = rules.iter().collect();
+    calculate_refs(&refs, ctx, hook)
+}
+
+fn calculate_refs(rules: &[&Rule], ctx: &Context, hook: Hook) -> DiscountResult {
     let mut calc = Calc {
         ctx,
         hook,
@@ -342,6 +347,7 @@ pub fn calculate(rules: &[Rule], ctx: &Context, hook: Hook) -> DiscountResult {
     // Подходящие правила; у правила по купону — первый годный купон покупателя
     let mut list: Vec<(&Rule, Option<usize>)> = rules
         .iter()
+        .copied()
         .filter(|r| rule_active(r, ctx))
         .filter_map(|r| {
             if !r.use_coupons {
@@ -462,6 +468,48 @@ pub fn product_rules(rules: &[Rule]) -> Vec<&Rule> {
         .iter()
         .filter(|r| !r.use_coupons && !order_bound(&r.conditions))
         .collect()
+}
+
+/// Цена одной единицы товара в каталоге после правил `rules` (обычно [`product_rules`]) для
+/// покупателя с группами `group_ids` (гость — без групп: действуют правила без групп), как
+/// `CCatalogProduct::GetOptimalPrice`: позиция в 1 шт. одна в корзине, без купонов и данных
+/// заказа. `None` — правила цену не меняют.
+pub fn catalog_price(
+    rules: &[&Rule],
+    item: &CtxItem,
+    group_ids: &[i64],
+    now: DateTime<Utc>,
+) -> Option<f64> {
+    catalog_price_with(rules, item, group_ids, now, None)
+}
+
+/// [`catalog_price`] с классами условий проекта.
+pub fn catalog_price_with(
+    rules: &[&Rule],
+    item: &CtxItem,
+    group_ids: &[i64],
+    now: DateTime<Utc>,
+    hook: Hook,
+) -> Option<f64> {
+    if rules.is_empty() || item.custom_price {
+        return None;
+    }
+    let ctx = Context {
+        items: vec![CtxItem {
+            quantity: 1.0,
+            ..item.clone()
+        }],
+        user_id: None,
+        group_ids: group_ids.to_vec(),
+        coupons: Vec::new(),
+        order: Default::default(),
+        now,
+    };
+    let price = calculate_refs(rules, &ctx, hook)
+        .items
+        .get(&item.key)?
+        .price;
+    (price != item.base_price).then_some(price)
 }
 
 #[cfg(test)]
@@ -1383,5 +1431,37 @@ mod tests {
         ];
         let ids: Vec<i64> = product_rules(&rules).iter().map(|r| r.id).collect();
         assert_eq!(ids, vec![1, 6]);
+    }
+
+    #[test]
+    fn catalog_price_one_unit_product_rules() {
+        // Позиция товара 10: правило −10 % только на него, −15 руб. на все (CurAll → на 1 шт.)
+        let mut only_10 = rule(
+            1,
+            vec![bskt("Discount", 10.0, "Perc", 0.0, vec![product(10)])],
+        );
+        only_10.priority = 2;
+        let all = rule(2, vec![bskt("Discount", 15.0, "CurAll", 0.0, vec![])]);
+        let mut vip = rule(3, vec![bskt("Discount", 50.0, "Perc", 0.0, vec![])]);
+        vip.group_ids = vec![7];
+        let rules = [only_10, all, vip];
+        let refs: Vec<&Rule> = rules.iter().collect();
+        let it = item(1, 1000.0, 5.0);
+        // Количество позиции не важно — считается одна единица
+        assert_eq!(catalog_price(&refs, &it, &[], now()), Some(885.0));
+        // Группа покупателя включает правило по группам
+        assert_eq!(catalog_price(&refs, &it, &[7], now()), Some(442.5));
+        // Другой товар: только общее правило
+        assert_eq!(
+            catalog_price(&refs, &item(2, 1000.0, 1.0), &[], now()),
+            Some(985.0)
+        );
+        // Нет правил или цена не изменилась — None
+        assert_eq!(catalog_price(&[], &it, &[], now()), None);
+        let zero = rule(4, vec![bskt("Discount", 0.0, "Perc", 0.0, vec![])]);
+        assert_eq!(catalog_price(&[&zero], &it, &[], now()), None);
+        // Наценка тоже меняет цену
+        let extra = rule(5, vec![bskt("Extra", 10.0, "Perc", 0.0, vec![])]);
+        assert_eq!(catalog_price(&[&extra], &it, &[], now()), Some(1100.0));
     }
 }

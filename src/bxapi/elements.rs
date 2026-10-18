@@ -137,7 +137,12 @@ pub fn build_list_query(
     Ok(qb)
 }
 
-pub async fn list(state: &AppState, api_code: &str, body: Map<String, Value>) -> BxResult {
+pub async fn list(
+    state: &AppState,
+    api_code: &str,
+    body: Map<String, Value>,
+    user_id: Option<i64>,
+) -> BxResult {
     let (snap, schema) = schema_for(state, api_code).await?;
     let req = ListRequest::parse(&body, &state.project, &schema.collection.code)?;
     let mut qb = build_list_query(&snap, &schema, state, &req)?;
@@ -147,6 +152,7 @@ pub async fn list(state: &AppState, api_code: &str, body: Map<String, Value>) ->
         snap: &snap,
         project: &state.project,
         image_resize: req.image_resize.as_deref(),
+        user_id,
     };
     let items = serialize(&env, &schema, &rows, &req.select, Mode::List, 0).await?;
     Ok(success(json!({ "items": items })))
@@ -158,6 +164,7 @@ pub async fn detail(
     api_code: &str,
     key: Key<'_>,
     body: Map<String, Value>,
+    user_id: Option<i64>,
 ) -> BxResult {
     let (snap, schema) = schema_for(state, api_code).await?;
     let select = Select::parse(body.get("select"), &state.project, &schema.collection.code);
@@ -193,6 +200,7 @@ pub async fn detail(
         snap: &snap,
         project: &state.project,
         image_resize: resize.as_deref(),
+        user_id,
     };
     let item = serialize(
         &env,

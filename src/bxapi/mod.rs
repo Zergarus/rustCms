@@ -33,6 +33,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use axum_extra::extract::CookieJar;
 use serde_json::{Map, Value, json};
 
 use crate::state::AppState;
@@ -204,21 +205,29 @@ async fn csrf_token() -> Response {
 async fn dispatch_post(
     State(state): State<AppState>,
     Path(rest): Path<String>,
+    jar: CookieJar,
     body: Bytes,
 ) -> BxResult {
     let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
     let body = parse_body(&body)?;
+    // Сессия нужна только для цены со скидкой по группам посетителя
+    let user_id = if state.project.catalog_price_discount {
+        auth::current_user_id(&state, &jar).await?
+    } else {
+        None
+    };
     match segments.as_slice() {
-        [api_code, "element", "list"] => elements::list(&state, api_code, body).await,
+        [api_code, "element", "list"] => elements::list(&state, api_code, body, user_id).await,
         [api_code, "element", "slug", slug] => {
-            elements::detail(&state, api_code, elements::Key::Slug(slug), body).await
+            let key = elements::Key::Slug(slug);
+            elements::detail(&state, api_code, key, body, user_id).await
         }
         [api_code, "element", id] if id.bytes().all(|b| b.is_ascii_digit()) => {
             let id = id.parse().map_err(|_| BxError::not_found())?;
-            elements::detail(&state, api_code, elements::Key::Id(id), body).await
+            elements::detail(&state, api_code, elements::Key::Id(id), body, user_id).await
         }
         [api_code, "section", "list"] => sections::list(&state, api_code, body).await,
-        [api_code, "search"] => search::search(&state, api_code, body).await,
+        [api_code, "search"] => search::search(&state, api_code, body, user_id).await,
         _ => Err(BxError::not_found()),
     }
 }
