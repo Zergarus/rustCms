@@ -697,6 +697,10 @@ pub async fn add_coupon(State(state): State<AppState>, jar: CookieJar, body: Byt
         .trim()
         .to_string();
     let user_id = current_user_id(&state, &jar).await?;
+    // Негодный купон — ошибка до создания покупателя и cookie
+    if let Err(check) = discount_repo::valid_coupon(&state.db, &code, user_id).await? {
+        return Err(coupon_error(&code, check));
+    }
     let (owner, jar) = match owner(&state, &jar).await? {
         Some(o) => (o, jar),
         None => {
@@ -1181,5 +1185,129 @@ mod tests {
             "первая доставка — со скидкой"
         );
         assert_eq!(form["basket"]["totalPrice"], json!(2250));
+    }
+
+    #[sqlx::test]
+    async fn failed_coupon_add_creates_no_buyer(db: sqlx::PgPool) {
+        let _fx = crate::test_support::cart_fixture(&db).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let buyers = || async {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM buyers")
+                .fetch_one(&db)
+                .await
+                .unwrap()
+        };
+        let before = buyers().await;
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/api/v1/cart/coupon/add",
+            "",
+            Some(json!({"coupon": "NOPE"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(buyers().await, before, "покупатель без cookie не создан");
+    }
+
+    #[sqlx::test]
+    async fn coupon_code_is_case_insensitive(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let rule = insert_rule(&db, 10.0, 0.0, true).await;
+        insert_coupon(&db, rule, "sale10").await;
+        let dup =
+            sqlx::query("INSERT INTO discount_coupons (discount_id, coupon) VALUES ($1, 'SALE10')")
+                .bind(rule)
+                .execute(&db)
+                .await;
+        assert!(dup.is_err(), "код уникален без учёта регистра");
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/api/v1/cart/coupon/add",
+            &fx.cookie,
+            Some(json!({"coupon": "SALE10"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let cart = data(&body);
+        assert_eq!(cart["items"][0]["price"], json!(900));
+        assert_eq!(cart["coupons"][0]["coupon"], "sale10");
+        let (_, body) = send(
+            &app,
+            "POST",
+            "/api/v1/cart/coupon/remove",
+            &fx.cookie,
+            Some(json!({"coupon": "Sale10"})),
+        )
+        .await;
+        assert!(data(&body).get("coupons").is_none());
+    }
+
+    #[sqlx::test]
+    async fn guest_coupons_move_to_user_on_login(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let rule = insert_rule(&db, 10.0, 0.0, true).await;
+        insert_coupon(&db, rule, "ALL").await;
+        let personal = insert_coupon(&db, rule, "PERS").await;
+        for code in ["ALL", "PERS"] {
+            let (status, body) = send(
+                &app,
+                "POST",
+                "/api/v1/cart/coupon/add",
+                &fx.cookie,
+                Some(json!({"coupon": code})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{code}: {body}");
+        }
+        // Пока купон лежал в корзине гостя, его сделали личным купоном другого пользователя
+        let (other, _) = crate::test_support::user_cookie(&db, "other", false).await;
+        sqlx::query("UPDATE discount_coupons SET user_id = $2 WHERE id = $1")
+            .bind(personal)
+            .bind(other)
+            .execute(&db)
+            .await
+            .unwrap();
+        crate::test_support::user_cookie(&db, "buyer", false).await;
+        // Вход с cookie гостя: корзина и купоны переходят пользователю
+        let session = {
+            use tower::ServiceExt;
+            let req = axum::http::Request::post("/api/v1/auth/login")
+                .header(axum::http::header::COOKIE, &fx.cookie)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    json!({"login": "buyer", "password": "password123"}).to_string(),
+                ))
+                .unwrap();
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            res.headers()
+                .get_all(axum::http::header::SET_COOKIE)
+                .iter()
+                .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string())
+                .find(|c| c.starts_with("CMS_SID="))
+                .unwrap()
+        };
+        let guests: i64 = sqlx::query_scalar("SELECT count(*) FROM buyers WHERE id = $1")
+            .bind(fx.f.buyer_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(guests, 0, "покупатель-гость удалён при входе");
+
+        let (status, body) = send(&app, "GET", "/api/v1/cart", &session, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let cart = data(&body);
+        assert_eq!(
+            cart["coupons"],
+            json!([
+                {"coupon": "ALL", "status": "APPLYED", "text": "применен"},
+                {"coupon": "PERS", "status": "BAD", "text": "неверный владелец купона"},
+            ])
+        );
+        assert_eq!(cart["items"][0]["price"], json!(900));
     }
 }

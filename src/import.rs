@@ -1828,9 +1828,9 @@ async fn write_discounts(tx: &mut sqlx::PgConnection, data: &Data) -> anyhow::Re
     .await?
     .into_iter()
     .collect();
-    // Код купона уникален: занятый купоном с другим id не перезаписываем
+    // Код купона уникален без учёта регистра: занятый купоном с другим id не перезаписываем
     let taken: HashMap<String, i64> =
-        sqlx::query_as::<_, (String, i64)>("SELECT coupon, id FROM discount_coupons")
+        sqlx::query_as::<_, (String, i64)>("SELECT lower(coupon), id FROM discount_coupons")
             .fetch_all(&mut *tx)
             .await?
             .into_iter()
@@ -1847,7 +1847,11 @@ async fn write_discounts(tx: &mut sqlx::PgConnection, data: &Data) -> anyhow::Re
             warnings.push(skip(&format!("неизвестный тип {}", c.kind)));
             continue;
         };
-        if code.is_empty() || !seen.insert(code) || taken.get(code).is_some_and(|id| *id != c.id) {
+        let key = code.to_lowercase();
+        if code.is_empty()
+            || !seen.insert(key.clone())
+            || taken.get(&key).is_some_and(|id| *id != c.id)
+        {
             warnings.push(skip("код пуст или уже занят"));
             continue;
         }

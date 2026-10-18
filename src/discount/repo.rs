@@ -231,11 +231,9 @@ pub async fn check_coupon(
     ))
 }
 
-/// Добавляет купон покупателю (`DiscountCouponsManager::add`); негодный не сохраняется,
-/// повторный — без дубля.
-pub async fn add_buyer_coupon(
+/// Купон по коду (без учёта регистра), годный для пользователя `user_id` сейчас.
+pub async fn valid_coupon(
     db: &PgPool,
-    buyer_id: i64,
     code: &str,
     user_id: Option<i64>,
 ) -> sqlx::Result<Result<Coupon, CouponCheck>> {
@@ -244,7 +242,7 @@ pub async fn add_buyer_coupon(
         return Ok(Err(CouponCheck::not_found()));
     }
     let row: Option<CouponRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COUPON_COLS} FROM discount_coupons c WHERE c.coupon = $1"
+        "SELECT {COUPON_COLS} FROM discount_coupons c WHERE lower(c.coupon) = lower($1)"
     )))
     .bind(code)
     .fetch_optional(db)
@@ -252,9 +250,24 @@ pub async fn add_buyer_coupon(
     let Some(cp) = row.map(Coupon::from) else {
         return Ok(Err(CouponCheck::not_found()));
     };
-    if let Some(problem) = check_coupon(db, &cp, user_id, Utc::now()).await? {
-        return Ok(Err(problem));
-    }
+    Ok(match check_coupon(db, &cp, user_id, Utc::now()).await? {
+        Some(problem) => Err(problem),
+        None => Ok(cp),
+    })
+}
+
+/// Добавляет купон покупателю (`DiscountCouponsManager::add`); негодный не сохраняется,
+/// повторный — без дубля.
+pub async fn add_buyer_coupon(
+    db: &PgPool,
+    buyer_id: i64,
+    code: &str,
+    user_id: Option<i64>,
+) -> sqlx::Result<Result<Coupon, CouponCheck>> {
+    let cp = match valid_coupon(db, code, user_id).await? {
+        Ok(cp) => cp,
+        Err(problem) => return Ok(Err(problem)),
+    };
     sqlx::query(
         "INSERT INTO buyer_coupons (buyer_id, coupon_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
     )
@@ -269,7 +282,7 @@ pub async fn add_buyer_coupon(
 pub async fn remove_buyer_coupon(db: &PgPool, buyer_id: i64, code: &str) -> sqlx::Result<bool> {
     let done = sqlx::query(
         "DELETE FROM buyer_coupons b USING discount_coupons c
-         WHERE b.coupon_id = c.id AND b.buyer_id = $1 AND c.coupon = $2",
+         WHERE b.coupon_id = c.id AND b.buyer_id = $1 AND lower(c.coupon) = lower($2)",
     )
     .bind(buyer_id)
     .bind(code.trim())

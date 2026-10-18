@@ -363,6 +363,16 @@ pub async fn merge_guest_into_user(
         .bind(user_buyer)
         .execute(&mut *tx)
         .await?;
+    // Купоны гостя — пользователю (годность проверяется при каждом пересчёте)
+    sqlx::query(
+        "INSERT INTO buyer_coupons (buyer_id, coupon_id, added_at)
+         SELECT $2, coupon_id, added_at FROM buyer_coupons WHERE buyer_id = $1
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(guest_id)
+    .bind(user_buyer)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM buyers WHERE id = $1")
         .bind(guest_id)
         .execute(&mut *tx)

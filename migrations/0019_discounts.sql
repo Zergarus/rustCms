@@ -40,7 +40,7 @@ CREATE INDEX discount_groups_group_idx ON discount_groups (group_id);
 CREATE TABLE discount_coupons (
     id          BIGSERIAL PRIMARY KEY,
     discount_id BIGINT NOT NULL REFERENCES discounts (id) ON DELETE CASCADE,
-    coupon      TEXT NOT NULL UNIQUE,
+    coupon      TEXT NOT NULL,
     active      BOOLEAN NOT NULL DEFAULT TRUE,
     active_from TIMESTAMPTZ,
     active_to   TIMESTAMPTZ,
@@ -54,6 +54,8 @@ CREATE TABLE discount_coupons (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX discount_coupons_discount_idx ON discount_coupons (discount_id);
+-- Код купона — без учёта регистра, как в Битриксе на MySQL
+CREATE UNIQUE INDEX discount_coupons_coupon_idx ON discount_coupons (lower(coupon));
 
 -- Купоны, введённые покупателем до оформления заказа
 CREATE TABLE buyer_coupons (

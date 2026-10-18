@@ -256,27 +256,21 @@ pub fn payments(s: &SaleSettings, cfg: &OrderConfig) -> Vec<Value> {
 
 /// Строки итогов: товары по базовой цене, «Скидка» (только при скидке > 0, как
 /// `BitrixSaleOrderSummarySource`), доставка (уже со скидкой), итого (с названием платёжки).
-/// При наценке (скидка < 0) строки «Скидка» нет — товары по цене с наценкой.
+/// При наценке (скидка ≤ 0) строки «Скидка» нет, итого включает наценку.
 pub fn summary(
     goods_base: f64,
     discount: f64,
     delivery: f64,
     payment_name: Option<&str>,
 ) -> Vec<Value> {
-    let round = |x: f64| (x * 100.0).round() / 100.0;
-    let goods = if discount > 0.0 {
-        goods_base
-    } else {
-        round(goods_base - discount)
-    };
-    let discount = discount.max(0.0);
-    let total = round(goods - discount + delivery);
+    let total = ((goods_base - discount + delivery) * 100.0).round() / 100.0;
     let mut total_line =
         json!({"label": "Итого", "value": total, "type": "total", "format": "price"});
     if let Some(name) = payment_name {
         total_line["hint"] = json!(name);
     }
-    let mut lines = vec![json!({"label": "Стоимость товаров", "value": goods, "format": "price"})];
+    let mut lines =
+        vec![json!({"label": "Стоимость товаров", "value": goods_base, "format": "price"})];
     if discount > 0.0 {
         lines.push(json!({"label": "Скидка", "value": -discount, "format": "price"}));
     }
@@ -584,10 +578,10 @@ mod tests {
                 json!({"label": "Итого", "value": 2450.0, "hint": "Счёт", "type": "total", "format": "price"}),
             ]
         );
-        // Наценка (скидка < 0): строки «Скидка» нет, товары — по цене с наценкой
+        // Наценка (скидка < 0): строки «Скидка» нет, товары — по базовой цене, итого — с наценкой
         let lines = summary(1000.0, -100.0, 0.0, None);
         assert_eq!(lines.len(), 3);
-        assert_eq!(lines[0]["value"], 1100.0);
+        assert_eq!(lines[0]["value"], 1000.0);
         assert_eq!(lines[2]["value"], 1100.0);
     }
 }
