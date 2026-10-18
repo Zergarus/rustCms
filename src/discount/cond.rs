@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use serde_json::{Map, Value};
 
 use super::context::{Context, CtxItem};
-use super::model::{Node, as_num, prop_class};
+use super::model::{Node, as_num, prop_class, round2};
 use crate::bxapi::project::DiscountConditionHook;
 
 /// Текущее состояние расчёта.
@@ -293,10 +293,6 @@ fn order_price(ctx: &Context) -> f64 {
         .map(|it| round2(it.base_price * it.quantity))
         .sum();
     basket + ctx.order.delivery_price.unwrap_or(0.0)
-}
-
-fn round2(x: f64) -> f64 {
-    (x * 100.0).round() / 100.0
 }
 
 fn leaf(node: &Node, item: Option<&CtxItem>, st: &State) -> bool {

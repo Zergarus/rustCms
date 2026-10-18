@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::cond::{self, State};
 use super::context::Context;
-use super::model::{Coupon, CouponKind, Node, Rule, as_num};
+use super::model::{Coupon, CouponKind, Node, Rule, as_num, round2};
 use crate::bxapi::project::DiscountConditionHook;
 
 /// Итог по позиции.
@@ -62,11 +62,6 @@ type Hook<'a> = Option<&'a dyn DiscountConditionHook>;
 
 /// `Sale\Discount\Actions::VALUE_EPS`.
 const EPS: f64 = 1e-5;
-
-/// `Sale\PriceMaths::roundPrecision`: до копеек.
-fn round2(x: f64) -> f64 {
-    (x * 100.0).round() / 100.0
-}
 
 /// `Actions::roundZeroValue`.
 fn round_zero(x: f64) -> f64 {
@@ -234,8 +229,10 @@ impl Calc<'_> {
     }
 
     /// `CurAll` (`VALUE_TYPE_SUMM`): сумма — процент от текущей стоимости позиций
-    /// (`getPercentByValue`), на единицу с округлением; остаток копеек — на последней позиции,
-    /// чтобы сумма по позициям была ровно `value`.
+    /// (`getPercentByValue`), на единицу с округлением, как Битрикс. Затем расхождение с
+    /// `value` (в копейках) забирают позиции по возрастанию количества (из равных — с конца):
+    /// каждая — целыми копейками на единицу, не ниже нуля по цене; если остаток так не делится,
+    /// первая из них берёт ближайшую копейку на единицу.
     fn cur_all(&self, rows: &[(i64, f64)], value: f64) -> Option<Vec<f64>> {
         let sum: f64 = rows.iter().map(|&(k, q)| self.price(k) * q).sum();
         let percent = round_zero(if sum > 0.0 { value * 100.0 / sum } else { 0.0 });
@@ -243,18 +240,45 @@ impl Calc<'_> {
         if (value < 0.0 && !(-100.0..0.0).contains(&percent)) || (value > 0.0 && percent <= 0.0) {
             return None;
         }
-        let mut out = Vec::with_capacity(rows.len());
-        let mut spread = 0.0;
-        for (i, &(key, qty)) in rows.iter().enumerate() {
-            let unit = if i + 1 == rows.len() && qty > 0.0 {
-                round2((value - spread) / qty)
+        let cents = |x: f64| (round2(x) * 100.0).round() as i64;
+        // Копейки на единицу по позициям
+        let mut units: Vec<i64> = rows
+            .iter()
+            .map(|&(k, _)| cents(self.price(k) * percent / 100.0))
+            .collect();
+        let row_total = |units: &[i64]| -> i64 {
+            rows.iter()
+                .zip(units)
+                .map(|(&(_, q), &u)| cents(u as f64 * q / 100.0))
+                .sum()
+        };
+        let target = cents(value);
+        // Изменение на единицу не выводит цену ниже нуля и не меняет знак действия
+        let clamp = |i: usize, u: i64| -> i64 {
+            if value < 0.0 {
+                u.clamp(-cents(self.price(rows[i].0)), 0)
             } else {
-                round2(self.price(key) * percent / 100.0)
-            };
-            spread += round2(unit * qty);
-            out.push(unit);
+                u.max(0)
+            }
+        };
+        let mut order: Vec<usize> = (0..rows.len()).filter(|&i| rows[i].1 > 0.0).collect();
+        order.sort_by(|&a, &b| rows[a].1.total_cmp(&rows[b].1).then(b.cmp(&a)));
+        for &i in &order {
+            let diff = target - row_total(&units);
+            if diff == 0 {
+                break;
+            }
+            let adj = (diff as f64 / rows[i].1).trunc() as i64;
+            units[i] = clamp(i, units[i] + adj);
         }
-        Some(out)
+        let diff = target - row_total(&units);
+        if diff != 0
+            && let Some(&i) = order.first()
+        {
+            let adj = (diff as f64 / rows[i].1).round() as i64;
+            units[i] = clamp(i, units[i] + adj);
+        }
+        Some(units.into_iter().map(|u| u as f64 / 100.0).collect())
     }
 
     /// `ActSaleDelivery::Generate` + `Actions::applyToDelivery`.
@@ -689,8 +713,9 @@ mod tests {
             &c,
             None,
         );
-        let total: f64 = r.applied[0].items.iter().map(|(_, s)| s).sum();
-        assert_eq!((total * 100.0).round() / 100.0, 300.0);
+        // По процентам 100.00 / 100.00 / 100.01 = 300.01; лишняя копейка снимается с позиции
+        // с наименьшим количеством (из равных — с последней)
+        assert_eq!(r.applied[0].items, vec![(1, 100.0), (2, 100.0), (3, 100.0)]);
         assert_eq!(r.applied[0].sum, 300.0);
         assert_eq!(price(&r, 1), 0.0);
         assert_eq!(price(&r, 2), 0.0);
@@ -724,6 +749,48 @@ mod tests {
         );
         assert_eq!(r.applied[0].sum, -10.0);
 
+        // Остаток берёт позиция с количеством 1, а не последняя (кол-во 3): по процентам
+        // 0.25 + 0.25 × 3 = 1.00, копейка — на первую
+        let c = ctx(vec![item(1, 3.33, 1.0), item(2, 3.33, 3.0)]);
+        let r = calculate(
+            &[rule(1, vec![bskt("Discount", 1.01, "CurAll", 0.0, vec![])])],
+            &c,
+            None,
+        );
+        assert_eq!(r.applied[0].items, vec![(1, 0.26), (2, 0.75)]);
+        assert_eq!(r.applied[0].sum, 1.01);
+
+        // Все количества по 2, остаток 1 копейка не делится — ближайшая копейка на единицу
+        // у позиции-поглотителя (последней из равных): 0.50 + 0.52 = 1.02
+        let c = ctx(vec![item(1, 3.33, 2.0), item(2, 3.33, 2.0)]);
+        let r = calculate(
+            &[rule(1, vec![bskt("Discount", 1.01, "CurAll", 0.0, vec![])])],
+            &c,
+            None,
+        );
+        assert_eq!(r.applied[0].items, vec![(1, 0.5), (2, 0.52)]);
+        assert_eq!(r.applied[0].sum, 1.02);
+
+        // Почти вся корзина (20.44, скидка 20.40): по процентам 2.58 / 9.75 / 7.97 / 0.09 =
+        // 20.39; копейка не влезает в 0.09 — её берёт следующая позиция, ни одна не пропущена
+        let c = ctx(vec![
+            item(1, 2.59, 1.0),
+            item(2, 9.77, 1.0),
+            item(3, 7.99, 1.0),
+            item(4, 0.09, 1.0),
+        ]);
+        let r = calculate(
+            &[rule(1, vec![bskt("Discount", 20.4, "CurAll", 0.0, vec![])])],
+            &c,
+            None,
+        );
+        assert_eq!(
+            r.applied[0].items,
+            vec![(1, 2.58), (2, 9.75), (3, 7.98), (4, 0.09)]
+        );
+        assert_eq!(r.applied[0].sum, 20.4);
+        assert_eq!(price(&r, 4), 0.0);
+
         // Скидка больше суммы позиций — не применяется (как Битрикс: процент > 100)
         let r = calculate(
             &[rule(
@@ -734,6 +801,44 @@ mod tests {
             None,
         );
         assert!(r.applied.is_empty());
+    }
+
+    /// Округление — как `round($v, 2)` PHP: 0.145 → 0.15, 0.285 → 0.29, −0.565 → −0.57.
+    #[test]
+    fn percent_rounds_like_php() {
+        let c = ctx(vec![
+            item(1, 1.45, 1.0),
+            item(2, 1.9, 1.0),
+            item(3, 5.65, 1.0),
+        ]);
+        let r = calculate(
+            &[rule(
+                1,
+                vec![bskt("Discount", 10.0, "Perc", 0.0, vec![product(10)])],
+            )],
+            &c,
+            None,
+        );
+        assert_eq!(price(&r, 1), 1.3);
+        let r = calculate(
+            &[rule(
+                1,
+                vec![bskt("Discount", 15.0, "Perc", 0.0, vec![product(20)])],
+            )],
+            &c,
+            None,
+        );
+        assert_eq!(price(&r, 2), 1.61);
+        let r = calculate(
+            &[rule(
+                1,
+                vec![bskt("Discount", 10.0, "Perc", 0.0, vec![product(30)])],
+            )],
+            &c,
+            None,
+        );
+        assert_eq!(price(&r, 3), 5.08);
+        assert_eq!(r.applied[0].items, vec![(3, 0.57)]);
     }
 
     #[test]

@@ -34,7 +34,8 @@ pub struct Rule {
     pub sort: i32,
     /// Прекратить дальнейшее применение правил.
     pub last_discount: bool,
-    /// Не применять правила с меньшим приоритетом.
+    /// Прекратить применение остальных правил того же приоритета (`LAST_LEVEL_DISCOUNT`
+    /// Битрикса: «на текущем уровне приоритетов»); правила с меньшим приоритетом применяются.
     pub last_level_discount: bool,
     /// Только по купону.
     pub use_coupons: bool,
@@ -555,6 +556,19 @@ fn choice(
 }
 
 /// Число как в PHP-serialize: `i:`/`d:` или числовая строка.
+/// Деньги до копеек, как `round($v, 2)` PHP (`Sale\PriceMaths::roundPrecision`):
+/// значение × 100 предокругляется до 15 значащих цифр (как `_php_math_round`), затем
+/// половина округляется от нуля.
+pub(super) fn round2(x: f64) -> f64 {
+    let scaled = x * 100.0;
+    if !scaled.is_finite() {
+        return x;
+    }
+    // 15 значащих цифр: мантисса с 14 знаками после точки
+    let pre: f64 = format!("{scaled:.14e}").parse().unwrap_or(scaled);
+    pre.round() / 100.0
+}
+
 pub(super) fn as_num(v: &Value) -> Option<f64> {
     match v {
         Value::Number(n) => n.as_f64(),
@@ -638,6 +652,21 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// `round($v, 2)` PHP (`Sale\PriceMaths::roundPrecision`): предокругление до 15 значащих
+    /// цифр, половина — от нуля.
+    #[test]
+    fn round2_matches_php() {
+        assert_eq!(round2(1.45 * 10.0 / 100.0), 0.15);
+        assert_eq!(round2(1.9 * 15.0 / 100.0), 0.29);
+        assert_eq!(round2(-(5.65 * 10.0 / 100.0)), -0.57);
+        assert_eq!(round2(1.005), 1.01);
+        assert_eq!(round2(-1.005), -1.01);
+        assert_eq!(round2(2.675), 2.68);
+        assert_eq!(round2(0.0), 0.0);
+        assert_eq!(round2(1234567.891), 1234567.89);
+        assert_eq!(round2(0.004999), 0.0);
+    }
 
     fn node(v: Value) -> Node {
         serde_json::from_value(v).unwrap()
