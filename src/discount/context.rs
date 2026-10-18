@@ -13,6 +13,8 @@ use super::model::Coupon;
 /// (`PARENT_*` у Битрикса).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CtxParent {
+    /// id товара.
+    pub id: i64,
     pub collection_id: i64,
     pub xml_id: String,
     pub name: String,
@@ -26,10 +28,10 @@ pub struct CtxItem {
     pub key: i64,
     /// Запись коллекции (у предложения — само предложение).
     pub product_id: i64,
-    /// Товар предложения.
-    pub parent_id: Option<i64>,
     pub collection_id: i64,
-    /// Данные родителя; у предложения без загруженного родителя — `None`.
+    /// Товар предложения — единственный источник данных о родителе; построитель контекста
+    /// заполняет его для предложений, у товаров — `None`. Разделы и поля предложения
+    /// (`section_ids`, `fields`, `field_ids`) уже включают родительские.
     pub parent: Option<CtxParent>,
     /// Разделы записи и всех их предков; у предложения — и родителя.
     pub section_ids: Vec<i64>,

@@ -214,7 +214,7 @@ fn order(a: &Value, b: &Value) -> Option<Ordering> {
 }
 
 fn contains(a: &Value, b: &Value) -> bool {
-    text(a).to_lowercase().contains(&text(b).to_lowercase())
+    text(a).contains(&text(b))
 }
 
 /// Сравнение значений поля `fields` (у одиночного — одно) со значениями условия: «равно» —
@@ -352,7 +352,7 @@ fn item_leaf(class: &str, d: &Map<String, Value>, it: &CtxItem, st: &State) -> b
             L_EQ,
             true,
             Value::from(it.product_id),
-            it.parent_id.map(Value::from),
+            parent.map(|p| Value::from(p.id)),
         ),
         "CondIBIBlock" => with_parent(
             d,
@@ -436,7 +436,6 @@ mod tests {
         CtxItem {
             key: 1,
             product_id: 10,
-            parent_id: None,
             collection_id: 4,
             parent: None,
             section_ids: vec![3, 1],
@@ -465,9 +464,9 @@ mod tests {
         CtxItem {
             key: 2,
             product_id: 20,
-            parent_id: Some(11),
             collection_id: 5,
             parent: Some(CtxParent {
+                id: 11,
                 collection_id: 4,
                 xml_id: "X-11".to_string(),
                 name: "Диск".to_string(),
@@ -697,7 +696,7 @@ mod tests {
                 "CondBsktSubGroup",
                 json!({"All": all, "True": t}),
                 vec![
-                    leaf("CondBsktFldName", "Contain", json!("r16")),
+                    leaf("CondBsktFldName", "Contain", json!("R16")),
                     leaf("CondBsktFldName", "Equal", json!("x")),
                 ],
             )
@@ -733,9 +732,26 @@ mod tests {
             &leaf("CondBsktFldName", "Equal", json!("Шина Летняя")),
             GOODS
         ));
-        assert!(f.item(&leaf("CondBsktFldName", "Contain", json!("летняя")), GOODS));
-        assert!(!f.item(&leaf("CondBsktFldName", "NotCont", json!("ЛЕТНЯЯ")), GOODS));
+        assert!(f.item(&leaf("CondBsktFldName", "Contain", json!("Летняя")), GOODS));
+        assert!(!f.item(&leaf("CondBsktFldName", "NotCont", json!("Летняя")), GOODS));
+        // С учётом регистра, как mb_strpos Битрикса
+        assert!(!f.item(&leaf("CondBsktFldName", "Contain", json!("летняя")), GOODS));
+        assert!(f.item(&leaf("CondBsktFldName", "NotCont", json!("ЛЕТНЯЯ")), GOODS));
         assert!(!f.item(&leaf("CondBsktFldName", "Not", json!("Шина Летняя")), GOODS));
+    }
+
+    #[test]
+    fn contain_is_case_sensitive() {
+        let mut oil = goods();
+        oil.name = "Масло моторное".to_string();
+        let fx = Fixture::new(Context {
+            items: vec![oil],
+            ..ctx()
+        });
+        assert!(fx.item(&leaf("CondBsktFldName", "Contain", json!("Масло")), 0));
+        assert!(!fx.item(&leaf("CondBsktFldName", "Contain", json!("масло")), 0));
+        assert!(fx.item(&leaf("CondIBName", "NotCont", json!("масло")), 0));
+        assert!(!fx.item(&leaf("CondIBName", "Contain", json!("МАСЛО")), 0));
     }
 
     #[test]
@@ -806,14 +822,16 @@ mod tests {
         let f = f();
         assert!(f.item(&leaf("CondIBXmlID", "Equal", json!("X-11")), OFFER));
         assert!(!f.item(&leaf("CondIBXmlID", "Equal", json!("X-11")), GOODS));
-        assert!(f.item(&leaf("CondIBXmlID", "Contain", json!("x-1")), GOODS));
+        assert!(f.item(&leaf("CondIBXmlID", "Contain", json!("X-1")), GOODS));
+        assert!(!f.item(&leaf("CondIBXmlID", "Contain", json!("x-1")), GOODS));
     }
 
     #[test]
     fn cond_ib_name() {
         let f = f();
-        assert!(f.item(&leaf("CondIBName", "Contain", json!("диск")), OFFER));
-        assert!(!f.item(&leaf("CondIBName", "NotCont", json!("диск")), OFFER));
+        assert!(f.item(&leaf("CondIBName", "Contain", json!("Диск")), OFFER));
+        assert!(!f.item(&leaf("CondIBName", "NotCont", json!("Диск")), OFFER));
+        assert!(!f.item(&leaf("CondIBName", "Contain", json!("диск")), OFFER));
         assert!(f.item(&leaf("CondIBName", "Equal", json!("Диск")), OFFER));
         assert!(!f.item(&leaf("CondIBName", "Equal", json!("Диск")), GOODS));
     }
@@ -833,8 +851,10 @@ mod tests {
         let p =
             |field: i64, logic: &str, v: Value| leaf(&format!("CondIBProp:4:{field}"), logic, v);
         assert!(f.item(&p(56, "Equal", json!("Nokian")), GOODS));
-        assert!(f.item(&p(56, "Contain", json!("nok")), GOODS));
-        assert!(!f.item(&p(56, "NotCont", json!("NOK")), GOODS));
+        assert!(f.item(&p(56, "Contain", json!("Nok")), GOODS));
+        assert!(!f.item(&p(56, "NotCont", json!("Nok")), GOODS));
+        assert!(!f.item(&p(56, "Contain", json!("nok")), GOODS));
+        assert!(f.item(&p(56, "NotCont", json!("NOK")), GOODS));
         assert!(f.item(&p(57, "Great", json!(200)), GOODS));
         assert!(!f.item(&p(57, "Less", json!(200)), GOODS));
         // Множественное — любое из значений

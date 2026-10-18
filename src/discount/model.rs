@@ -159,7 +159,16 @@ fn is_supported(class_id: &str) -> bool {
 /// Классы, которых движок не знает: уникальные, в порядке обхода (сначала условия, затем
 /// действия). Детей неизвестного узла не обходим — их смысл задаёт сам узел.
 pub fn unsupported_classes(conditions: &Node, actions: &Node) -> Vec<String> {
-    fn walk(node: &Node, out: &mut Vec<String>) {
+    unsupported_classes_with(conditions, actions, &[])
+}
+
+/// То же с классами модуля проекта (`DiscountConditionHook::class_ids`): они известны,
+/// их детей не обходим — смысл узла задаёт модуль.
+pub fn unsupported_classes_with(conditions: &Node, actions: &Node, extra: &[&str]) -> Vec<String> {
+    fn walk(node: &Node, extra: &[&str], out: &mut Vec<String>) {
+        if extra.contains(&node.class_id.as_str()) {
+            return;
+        }
         if !is_supported(&node.class_id) {
             if !out.contains(&node.class_id) {
                 out.push(node.class_id.clone());
@@ -167,12 +176,12 @@ pub fn unsupported_classes(conditions: &Node, actions: &Node) -> Vec<String> {
             return;
         }
         for child in &node.children {
-            walk(child, out);
+            walk(child, extra, out);
         }
     }
     let mut out = Vec::new();
-    walk(conditions, &mut out);
-    walk(actions, &mut out);
+    walk(conditions, extra, &mut out);
+    walk(actions, extra, &mut out);
     out
 }
 
@@ -385,6 +394,12 @@ fn is_group(class_id: &str) -> bool {
 /// существующие сущности. Путь узла — индексы от корня: корень `0`, его второй потомок `0.1`.
 /// Дерево с ошибками остаётся загружаемым — правило с ними просто показывается в админке.
 pub fn validate(node: &Node, refs: &Refs) -> Vec<(String, String)> {
+    validate_with(node, refs, &[])
+}
+
+/// То же с классами модуля проекта: такой узел допустим в любой группе, его `DATA` и детей
+/// проверяет сам модуль.
+pub fn validate_with(node: &Node, refs: &Refs, extra: &[&str]) -> Vec<(String, String)> {
     let mut errs = Vec::new();
     if node.class_id != "CondGroup" {
         errs.push((
@@ -392,12 +407,15 @@ pub fn validate(node: &Node, refs: &Refs) -> Vec<(String, String)> {
             "в корне допустим только «CondGroup»".to_string(),
         ));
     }
-    check(node, "0", refs, &mut errs);
+    check(node, "0", refs, extra, &mut errs);
     errs
 }
 
-fn check(node: &Node, path: &str, refs: &Refs, errs: &mut Vec<(String, String)>) {
+fn check(node: &Node, path: &str, refs: &Refs, extra: &[&str], errs: &mut Vec<(String, String)>) {
     let class = node.class_id.as_str();
+    if extra.contains(&class) {
+        return;
+    }
     if !is_supported(class) {
         errs.push((path.to_string(), format!("неизвестный элемент «{class}»")));
         return;
@@ -410,13 +428,18 @@ fn check(node: &Node, path: &str, refs: &Refs, errs: &mut Vec<(String, String)>)
     errs.extend(e.into_iter().map(|m| (path.to_string(), m)));
     for (i, child) in node.children.iter().enumerate() {
         let child_path = format!("{path}.{i}");
-        if is_supported(&child.class_id) && !allowed_in(class, &child.class_id, path == "0") {
+        let hooked = extra.contains(&child.class_id.as_str());
+        if (hooked && !is_group(class))
+            || (!hooked
+                && is_supported(&child.class_id)
+                && !allowed_in(class, &child.class_id, path == "0"))
+        {
             errs.push((
                 child_path.clone(),
                 format!("«{}» нельзя вложить в «{class}»", child.class_id),
             ));
         }
-        check(child, &child_path, refs, errs);
+        check(child, &child_path, refs, extra, errs);
     }
 }
 
@@ -788,6 +811,59 @@ mod tests {
                     "недопустимое значение Unit «CurEach»".to_string()
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn hook_classes_are_supported() {
+        let conditions = node(json!({
+            "CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"},
+            "CHILDREN": [
+                {"CLASS_ID": "CondProjVip", "DATA": {"anything": [1, 2]}, "CHILDREN": [
+                    {"CLASS_ID": "CondFoo", "DATA": {}}
+                ]},
+                {"CLASS_ID": "CondBsktCntGroup", "DATA": {"logic": "EqGr", "Value": 1, "All": "AND"}, "CHILDREN": [
+                    {"CLASS_ID": "CondProjVip", "DATA": {}}
+                ]},
+                {"CLASS_ID": "CondBsktFldPrice", "DATA": {"logic": "Great", "value": 1}, "CHILDREN": []}
+            ]
+        }));
+        let actions = node(rule24_actions());
+        let extra = ["CondProjVip"];
+        assert!(unsupported_classes_with(&conditions, &actions, &extra).is_empty());
+        // Без модуля проекта — неизвестный класс
+        assert_eq!(
+            unsupported_classes(&conditions, &actions),
+            vec!["CondProjVip"]
+        );
+        // DATA и дети класса проекта не проверяются; вложенность в лист — ошибка
+        let leaf_parent = node(json!({
+            "CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"},
+            "CHILDREN": [{"CLASS_ID": "CondSalePaySystem", "DATA": {"logic": "Equal", "value": []}, "CHILDREN": [
+                {"CLASS_ID": "CondProjVip", "DATA": {}}
+            ]}]
+        }));
+        assert_eq!(
+            validate_with(&conditions, &transopt_refs(), &extra),
+            vec![(
+                "0.2".to_string(),
+                "«CondBsktFldPrice» нельзя вложить в «CondGroup»".to_string()
+            )]
+        );
+        assert_eq!(
+            validate(&conditions, &transopt_refs())[0],
+            (
+                "0.0".to_string(),
+                "неизвестный элемент «CondProjVip»".to_string()
+            )
+        );
+        let errs = validate_with(&leaf_parent, &transopt_refs(), &extra);
+        assert!(
+            errs.contains(&(
+                "0.0.0".to_string(),
+                "«CondProjVip» нельзя вложить в «CondSalePaySystem»".to_string()
+            )),
+            "{errs:?}"
         );
     }
 
