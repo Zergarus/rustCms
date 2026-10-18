@@ -46,6 +46,8 @@ pub fn router() -> Router<AppState> {
         .route("/cart/items/{id}/store", post(cart::set_store))
         .route("/cart/items/{id}/remove", post(cart::remove_item))
         .route("/cart/clear", post(cart::clear))
+        .route("/cart/coupon/add", post(cart::add_coupon))
+        .route("/cart/coupon/remove", post(cart::remove_coupon))
         .route("/order/form", get(order::form))
         .route("/order/summary", post(order::summary))
         .route("/order/submit", post(order::submit))

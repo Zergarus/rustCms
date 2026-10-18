@@ -46,12 +46,14 @@ pub fn store_json(store: &StoreInfo) -> Map<String, Value> {
     obj
 }
 
-/// Снимок корзины в формате bxapi (`BasketSnapshot`).
+/// Снимок корзины в формате bxapi (`BasketSnapshot`). `prices` — цена единицы позиции после
+/// скидок (как `getPrice` Битрикса); позиции без неё — по основной цене товара.
 pub fn build_snapshot(
     items: &[CartItem],
     info: &HashMap<i64, PurchaseInfo>,
     views: &HashMap<i64, ProductView>,
     stores: &[StoreInfo],
+    prices: &HashMap<i64, f64>,
     config: &SnapshotConfig,
 ) -> Value {
     let mut sorted: Vec<&CartItem> = items.iter().collect();
@@ -69,7 +71,10 @@ pub fn build_snapshot(
         let price = product.and_then(|p| main_price(&p.prices));
         let available =
             product.is_some_and(|p| crate::catalog::sellable(p) && p.available) && price.is_some();
-        let unit = price.map_or(0.0, |p| p.price);
+        let unit = match prices.get(&item.id) {
+            Some(&discounted) if price.is_some() => discounted,
+            _ => price.map_or(0.0, |p| p.price),
+        };
         if currency.is_none() {
             currency = price.map(|p| p.currency.clone());
         }
@@ -216,7 +221,7 @@ mod tests {
     ) -> serde_json::Value {
         let infos: HashMap<i64, PurchaseInfo> = infos.into_iter().collect();
         let views: HashMap<i64, ProductView> = HashMap::new();
-        build_snapshot(items, &infos, &views, stores, cfg)
+        build_snapshot(items, &infos, &views, stores, &HashMap::new(), cfg)
     }
 
     #[test]
@@ -339,5 +344,31 @@ mod tests {
         }
         let ok = run(&items, vec![info(10, Some(100.0), &[])], &[], &config());
         assert_eq!(ok["canCheckout"], json!(true));
+    }
+
+    #[test]
+    fn discounted_prices() {
+        let items = [item(1, 10, None, 2.0), item(2, 20, None, 1.0)];
+        let infos: HashMap<i64, PurchaseInfo> =
+            [info(10, Some(1000.0), &[]), info(20, Some(500.0), &[])]
+                .into_iter()
+                .collect();
+        let plain = build_snapshot(
+            &items,
+            &infos,
+            &HashMap::new(),
+            &[],
+            &HashMap::new(),
+            &config(),
+        );
+        let prices = HashMap::from([(1, 899.5)]);
+        let s = build_snapshot(&items, &infos, &HashMap::new(), &[], &prices, &config());
+        assert_eq!(s["items"][0]["price"], json!(899.5));
+        assert_eq!(s["items"][0]["sum"], json!(1799));
+        assert_eq!(s["items"][1]["price"], json!(500));
+        assert_eq!(s["totalPrice"], json!(2299));
+        assert_ne!(s["snapshot"], plain["snapshot"]);
+        assert_ne!(s["items"][0]["snapshot"], plain["items"][0]["snapshot"]);
+        assert_eq!(s["items"][1]["snapshot"], plain["items"][1]["snapshot"]);
     }
 }

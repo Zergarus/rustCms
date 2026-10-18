@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use super::{
     BxError, BxResult,
     auth::current_user_id,
-    cart::{CartState, cart_state},
+    cart::{CartBase, CartState, cart_base, cart_state, priced},
     parse_body,
     query::number,
     success,
@@ -21,6 +21,7 @@ use super::{
 use crate::{
     cart::CartItem,
     catalog,
+    discount::context::OrderCtx,
     sale::{
         self, Delivery, SaleSettings,
         form::{self, Profile},
@@ -57,14 +58,39 @@ fn allowed_deliveries(
     state: &AppState,
     settings: &SaleSettings,
     items: &[CartItem],
-    cart: &CartState,
+    info: &HashMap<i64, catalog::PurchaseInfo>,
 ) -> Option<HashSet<i64>> {
     state
         .project
         .order
         .delivery_filter
         .as_ref()
-        .map(|f| f.allowed(&settings.deliveries, items, &cart.info))
+        .map(|f| f.allowed(&settings.deliveries, items, info))
+}
+
+/// Итоги по корзине со скидками: товары до скидок, скидка на товары, доставка со скидкой.
+fn cart_summary(cart: &CartState, delivery_price: f64, payment_name: Option<&str>) -> Vec<Value> {
+    let goods = goods_total(&cart.snapshot);
+    let discount = ((cart.goods_base - goods) * 100.0).round() / 100.0;
+    let delivery = cart.discounts.delivery_price.unwrap_or(delivery_price);
+    form::summary(cart.goods_base, discount, delivery, payment_name)
+}
+
+/// Скидки с данными заказа: тип плательщика, оплата, доставка и её цена.
+async fn priced_for(
+    state: &AppState,
+    base: CartBase,
+    person_type: Option<i64>,
+    payment: Option<i64>,
+    delivery: Option<(i64, f64)>,
+) -> Result<CartState, BxError> {
+    let order = OrderCtx {
+        person_type_id: person_type,
+        pay_system_id: payment,
+        delivery_id: delivery.map(|d| d.0),
+        delivery_price: delivery.map(|d| d.1),
+    };
+    priced(state, base, order).await
 }
 
 async fn profile(state: &AppState, user_id: Option<i64>) -> Result<Option<Profile>, BxError> {
@@ -106,7 +132,7 @@ pub async fn form(
 ) -> BxResult {
     let settings = sale::load_settings(&state.db).await?;
     let cfg = &state.project.order;
-    let cart = cart_state(&state, &jar).await?;
+    let base = cart_base(&state, &jar).await?;
     let user_id = current_user_id(&state, &jar).await?;
     let types = form::person_types(&settings, cfg);
     let Some(person_type) =
@@ -118,15 +144,21 @@ pub async fn form(
         ));
     };
     let profile = profile(&state, user_id).await?;
-    let allowed = allowed_deliveries(&state, &settings, &cart.items, &cart);
-    let deliveries = form::deliveries(&settings, cfg, allowed.as_ref(), &cart.stores);
+    let allowed = allowed_deliveries(&state, &settings, &base.items, &base.info);
+    let deliveries = form::deliveries(&settings, cfg, allowed.as_ref(), &base.stores);
     let payments = form::payments(&settings, cfg);
     let delivery_price = deliveries
         .first()
         .and_then(|d| d["price"].as_f64())
         .unwrap_or(0.0);
+    let delivery = deliveries
+        .first()
+        .and_then(|d| d["id"].as_i64())
+        .map(|id| (id, delivery_price));
     let payment_name = payments.first().and_then(|p| p["name"].as_str());
-    let summary = form::summary(goods_total(&cart.snapshot), delivery_price, payment_name);
+    let payment_id = payments.first().and_then(|p| p["id"].as_i64());
+    let cart = priced_for(&state, base, Some(person_type), payment_id, delivery).await?;
+    let summary = cart_summary(&cart, delivery_price, payment_name);
     Ok(success(json!({
         "personTypes": types
             .iter()
@@ -147,16 +179,25 @@ pub async fn summary(State(state): State<AppState>, jar: CookieJar, body: Bytes)
     let body = parse_body(&body)?;
     let settings = sale::load_settings(&state.db).await?;
     let cfg = &state.project.order;
-    let cart = cart_state(&state, &jar).await?;
-    let allowed = allowed_deliveries(&state, &settings, &cart.items, &cart);
-    let delivery_price = number(body.get("deliveryId"))
-        .and_then(|id| form::find_delivery(&settings, cfg, allowed.as_ref(), id))
-        .map_or(0.0, |d| d.price);
-    let payment_name = number(body.get("paymentId"))
-        .and_then(|id| form::find_payment(&settings, cfg, id))
-        .map(|p| p.name.as_str());
+    let base = cart_base(&state, &jar).await?;
+    let allowed = allowed_deliveries(&state, &settings, &base.items, &base.info);
+    let delivery = number(body.get("deliveryId"))
+        .and_then(|id| form::find_delivery(&settings, cfg, allowed.as_ref(), id));
+    let delivery_price = delivery.map_or(0.0, |d| d.price);
+    let payment =
+        number(body.get("paymentId")).and_then(|id| form::find_payment(&settings, cfg, id));
+    let payment_name = payment.map(|p| p.name.as_str());
+    let person_type = number(body.get("personTypeId"));
+    let cart = priced_for(
+        &state,
+        base,
+        person_type,
+        payment.map(|p| p.id),
+        delivery.map(|d| (d.id, d.price)),
+    )
+    .await?;
     Ok(success(json!({
-        "summary": form::summary(goods_total(&cart.snapshot), delivery_price, payment_name),
+        "summary": cart_summary(&cart, delivery_price, payment_name),
         "submitButtonText": SUBMIT_TEXT,
     })))
 }
@@ -199,7 +240,7 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
     let selected_owned: Vec<CartItem> = selected.iter().map(|i| (*i).clone()).collect();
 
     // 2. Доставка
-    let allowed = allowed_deliveries(&state, &settings, &selected_owned, &cart);
+    let allowed = allowed_deliveries(&state, &settings, &selected_owned, &cart.info);
     let delivery = number(body.get("deliveryId"))
         .and_then(|id| form::find_delivery(&settings, cfg, allowed.as_ref(), id))
         .ok_or_else(|| fail(SubmitError::new("invalid_delivery", "Нет такой доставки")))?;

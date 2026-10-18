@@ -117,7 +117,14 @@ pub async fn list(
         .iter()
         .map(|b| {
             let items = &items_by_buyer[&b.id];
-            let snap = build_snapshot(items, &info, &HashMap::new(), &stores, &config);
+            let snap = build_snapshot(
+                items,
+                &info,
+                &HashMap::new(),
+                &stores,
+                &HashMap::new(),
+                &config,
+            );
             CartRow {
                 id: b.id,
                 buyer: buyer_label(b.login.as_deref(), b.name.as_deref()),
@@ -154,7 +161,14 @@ pub async fn view(
     let product_ids: Vec<i64> = items.iter().map(|i| i.product_id).collect();
     let info = catalog::load(&state.db, &product_ids).await?;
     let stores = stores(&state).await?;
-    let snap = build_snapshot(&items, &info, &HashMap::new(), &stores, &snapshot_config());
+    let snap = build_snapshot(
+        &items,
+        &info,
+        &HashMap::new(),
+        &stores,
+        &HashMap::new(),
+        &snapshot_config(),
+    );
     let label = buyer_label(buyer.login.as_deref(), buyer.name.as_deref());
     render(
         &state,

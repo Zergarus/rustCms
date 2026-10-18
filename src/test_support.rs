@@ -287,3 +287,124 @@ pub async fn permitted_cookie(db: &PgPool, login: &str, permissions: &[&str]) ->
         .unwrap();
     cookie
 }
+
+/// Корзина для проверки скидок через bxapi: фикстура заказа, базовая цена товара 1000,
+/// позиция 2 шт. на складе 1, второй товар — предложение (цена 500, 1 шт.) с родителем в
+/// разделе, доставка 1 (300) и платёжка 1. Гость с cookie `CMS_BUYER=tok`.
+pub struct CartFixture {
+    pub f: Fixture,
+    pub cookie: String,
+    pub offer_id: i64,
+    pub offer_item_id: i64,
+    pub parent_id: i64,
+    pub section_id: i64,
+}
+
+pub async fn cart_fixture(db: &PgPool) -> CartFixture {
+    let f = order_fixture(db).await;
+    let exec = |sql: &'static str| sqlx::query(sql);
+    sqlx::query("UPDATE buyers SET token_hash = $2 WHERE id = $1")
+        .bind(f.buyer_id)
+        .bind(crate::cart::repo::token_hash("tok"))
+        .execute(db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE cart_items SET quantity = 2 WHERE id = $1")
+        .bind(f.item_id)
+        .execute(db)
+        .await
+        .unwrap();
+    exec("INSERT INTO catalog_price_types (id, code, name, is_base, sort) VALUES (1, 'BASE', 'Розница', TRUE, 100)")
+        .execute(db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO catalog_prices (item_id, price_type_id, price, currency) VALUES ($1, 1, 1000, 'RUB')")
+        .bind(f.product_id)
+        .execute(db)
+        .await
+        .unwrap();
+    // Коллекция предложений: товар-родитель в разделе, предложение — в корзине
+    let offers: i64 = sqlx::query_scalar(
+        "INSERT INTO collections (code, name, is_catalog) VALUES ('offers', 'Предложения', TRUE) RETURNING id",
+    )
+    .fetch_one(db)
+    .await
+    .unwrap();
+    let catalog: i64 =
+        sqlx::query_scalar("SELECT collection_id FROM collection_items WHERE id = $1")
+            .bind(f.product_id)
+            .fetch_one(db)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE collections SET product_collection_id = $2 WHERE id = $1")
+        .bind(offers)
+        .bind(catalog)
+        .execute(db)
+        .await
+        .unwrap();
+    let section_id: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_sections (collection_id, code, name) VALUES ($1, 'oils', 'Масла') RETURNING id",
+    )
+    .bind(catalog)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    let parent_id: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_items (collection_id, code, name, section_id, xml_id)
+         VALUES ($1, 'maslo', 'Масло', $2, 'P-1') RETURNING id",
+    )
+    .bind(catalog)
+    .bind(section_id)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    let offer_id: i64 = sqlx::query_scalar(
+        "INSERT INTO collection_items (collection_id, code, name, product_id)
+         VALUES ($1, 'maslo-1l', 'Масло 1 л', $2) RETURNING id",
+    )
+    .bind(offers)
+    .bind(parent_id)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO catalog_products (item_id, quantity, quantity_trace, can_buy_zero, type) VALUES ($1, 10, TRUE, FALSE, 3) ON CONFLICT (item_id) DO NOTHING")
+        .bind(parent_id)
+        .execute(db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO catalog_products (item_id, quantity, quantity_trace, can_buy_zero, type) VALUES ($1, 10, TRUE, FALSE, 4)
+                 ON CONFLICT (item_id) DO UPDATE SET quantity = 10, type = 4")
+        .bind(offer_id)
+        .execute(db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO catalog_prices (item_id, price_type_id, price, currency) VALUES ($1, 1, 500, 'RUB')")
+        .bind(offer_id)
+        .execute(db)
+        .await
+        .unwrap();
+    let offer_item_id: i64 = sqlx::query_scalar(
+        "INSERT INTO cart_items (buyer_id, item_id, quantity, name) VALUES ($1, $2, 1, 'Масло 1 л') RETURNING id",
+    )
+    .bind(f.buyer_id)
+    .bind(offer_id)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    exec("INSERT INTO deliveries (id, name, sort, price) VALUES (1, 'Курьер', 10, 300)")
+        .execute(db)
+        .await
+        .unwrap();
+    exec("INSERT INTO pay_systems (id, name, sort, api_type) VALUES (1, 'Счёт', 10, 'document')")
+        .execute(db)
+        .await
+        .unwrap();
+    CartFixture {
+        f,
+        cookie: "CMS_BUYER=tok".into(),
+        offer_id,
+        offer_item_id,
+        parent_id,
+        section_id,
+    }
+}
