@@ -483,7 +483,8 @@ pub(super) async fn apply_basket(
         .await?;
     for (line, quantity, price, _) in &plan.updates {
         sqlx::query(
-            "UPDATE cart_items SET quantity = $2, price = $3, custom_price = TRUE, updated_at = now()
+            "UPDATE cart_items SET quantity = $2, price = $3, base_price = $3, discount_price = 0,
+                 custom_price = TRUE, updated_at = now()
              WHERE id = $1",
         )
         .bind(line)
@@ -556,8 +557,9 @@ async fn insert_line(
 ) -> sqlx::Result<()> {
     let props = crate::collection::sku::basket_props(ctx.db, product_id).await?;
     sqlx::query(
-        "INSERT INTO cart_items (item_id, quantity, name, price, currency, order_id, custom_price, props)
-         SELECT $1, $2, $3, $4, currency, id, TRUE, $5 FROM orders WHERE id = $6",
+        "INSERT INTO cart_items (item_id, quantity, name, price, base_price, currency, order_id,
+                                 custom_price, props)
+         SELECT $1, $2, $3, $4, $4, currency, id, TRUE, $5 FROM orders WHERE id = $6",
     )
     .bind(product_id)
     .bind(quantity)
@@ -704,7 +706,8 @@ async fn create_order(
             None => String::new(),
         };
         sqlx::query(
-            "INSERT INTO shipments (order_id, delivery_id, delivery_name, price) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO shipments (order_id, delivery_id, delivery_name, price, base_price)
+             VALUES ($1, $2, $3, $4, $4)",
         )
         .bind(id)
         .bind(ctx.s.default_delivery)

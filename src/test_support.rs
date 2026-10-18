@@ -104,8 +104,16 @@ pub async fn place_order(db: &PgPool, f: &Fixture, user_id: Option<i64>) -> i64 
         properties: Vec::new(),
         delivery: (1, "Самовывоз".into(), 0.0, Some(1)),
         payment: (1, "QR".into()),
-        items: vec![(item_id, 1.0, 100.0, "Товар".into())],
+        delivery_base_price: 0.0,
+        items: vec![crate::sale::repo::NewItem::plain(
+            item_id,
+            1.0,
+            100.0,
+            "Товар",
+        )],
         stock: Vec::new(),
+        discounts: Vec::new(),
+        coupons: Vec::new(),
     };
     let mut tx = db.begin().await.unwrap();
     let id = create(&mut tx, &order).await.unwrap();

@@ -21,7 +21,11 @@ use super::{
 use crate::{
     cart::CartItem,
     catalog,
-    discount::context::OrderCtx,
+    discount::{
+        context::{self, OrderCtx},
+        engine::{self, Applied, CouponStatus, ItemResult},
+        repo as discount_repo,
+    },
     sale::{
         self, Delivery, SaleSettings,
         form::{self, Profile},
@@ -295,8 +299,8 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         .ok_or_else(|| fail(SubmitError::new("empty_basket", "Корзина пуста")))?;
     let snapshot_items = basket["items"].as_array().cloned().unwrap_or_default();
     let mut order_items = Vec::new();
+    let mut ordered = Vec::new();
     let mut lines = Vec::new();
-    let mut goods = 0.0;
     for item in selected.iter().filter(|i| ids.contains(&i.id)) {
         let snap = snapshot_items
             .iter()
@@ -304,15 +308,14 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
             .ok_or_else(|| fail(SubmitError::basket_changed()))?;
         let price = snap["price"].as_f64().unwrap_or(0.0);
         let name = snap["name"].as_str().unwrap_or(&item.name).to_string();
-        goods += price * item.quantity;
-        order_items.push((item.id, item.quantity, price, name));
+        order_items.push(repo::NewItem::plain(item.id, item.quantity, price, name));
+        ordered.push((*item).clone());
         lines.push(StockLine {
             product_id: item.product_id,
             store_id: item.store_id,
             quantity: item.quantity,
         });
     }
-    let goods = (goods * 100.0).round() / 100.0;
     let status = settings
         .default_status()
         .map(|s| s.code.clone())
@@ -362,6 +365,31 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         .filter(|(_, i)| i.quantity_trace)
         .map(|(id, _)| *id)
         .collect();
+    let order_ctx = OrderCtx {
+        person_type_id: Some(person_type),
+        pay_system_id: Some(payment.id),
+        delivery_id: Some(delivery.id),
+        delivery_price: Some(delivery.price),
+    };
+    let pricing = price_order(
+        &state,
+        &mut tx,
+        &cart,
+        (cart_buyer, buyer),
+        &ordered,
+        &info,
+        order_ctx,
+    )
+    .await?;
+    for it in &mut order_items {
+        if let Some((base, r)) = pricing.items.get(&it.id) {
+            it.base_price = *base;
+            it.discount = r.discount;
+            it.price = r.price;
+        }
+    }
+    let goods = round2(order_items.iter().map(|i| i.price * i.quantity).sum());
+    let delivery_price = round2(pricing.delivery_price.unwrap_or(delivery.price));
     let property_values = values
         .iter()
         .filter_map(|(id, value)| {
@@ -376,7 +404,7 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         status,
         currency: currency(&basket),
         goods_price: goods,
-        delivery_price: delivery.price,
+        delivery_price,
         user_comment: body
             .get("comment")
             .and_then(Value::as_str)
@@ -387,12 +415,15 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         delivery: (
             delivery.id,
             delivery.name.clone(),
-            delivery.price,
+            delivery_price,
             shipment_store(delivery, &selected),
         ),
         payment: (payment.id, payment.name.clone()),
+        delivery_base_price: delivery.price,
         items: order_items,
         stock: stock::plan(&[], &lines, &traced),
+        discounts: pricing.applied,
+        coupons: pricing.coupons,
     };
     let order_id = match repo::create(&mut tx, &new_order).await {
         Ok(id) => id,
@@ -415,8 +446,8 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         sale::mail::notify(&mail_state, "SALE_NEW_ORDER", order_id).await;
     });
 
-    let total = ((goods + delivery.price) * 100.0).round() / 100.0;
-    Ok(success(json!({
+    let total = round2(goods + delivery_price);
+    let mut data = json!({
         "orderId": order_id,
         "accountNumber": order_id.to_string(),
         "total": total,
@@ -428,7 +459,87 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
             "type": form::payment_type(payment, cfg),
         },
         "deliveryStores": form::delivery_stores(delivery, &cart.stores),
-    })))
+    });
+    // Только если есть что сказать — иначе ответ прежний байт в байт
+    if !pricing.messages.is_empty() {
+        data["messages"] = json!(pricing.messages);
+    }
+    Ok(success(data))
+}
+
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
+/// Скидки заказа, посчитанные в транзакции оформления.
+struct OrderPricing {
+    /// Позиция → (цена до скидок, итог).
+    items: HashMap<i64, (f64, ItemResult)>,
+    delivery_price: Option<f64>,
+    applied: Vec<Applied>,
+    /// Применённые купоны — к отметке использованными.
+    coupons: Vec<i64>,
+    /// Купоны, которые были применены в корзине, но к заказу уже не годны.
+    messages: Vec<String>,
+}
+
+/// Скидки с данными заказа внутри его транзакции. Купоны покупателя блокируются и
+/// проверяются заново (`saveApplied` Битрикса): занятый параллельным оформлением купон
+/// дождётся его и, если тот купон израсходовал, заказ считается без него — с сообщением.
+/// Купон, правило которого не сработало, не применяется и не расходуется.
+async fn price_order(
+    state: &AppState,
+    tx: &mut sqlx::PgConnection,
+    cart: &CartState,
+    (cart_buyer, user_id): (i64, i64),
+    items: &[CartItem],
+    info: &HashMap<i64, catalog::PurchaseInfo>,
+    order: OrderCtx,
+) -> Result<OrderPricing, BxError> {
+    let now = chrono::Utc::now();
+    let mut coupons = Vec::new();
+    let mut messages = Vec::new();
+    for locked in discount_repo::lock_buyer_coupons(tx, cart_buyer).await? {
+        let cp = locked.coupon;
+        match discount_repo::save_problem(&cp, locked.rule, Some(user_id), now) {
+            None => coupons.push(cp),
+            Some(text) => {
+                let was_applied = cart.discounts.coupons.iter().any(|(code, st)| {
+                    *st == CouponStatus::Applied && code.eq_ignore_ascii_case(&cp.coupon)
+                });
+                if was_applied {
+                    messages.push(format!("Купон {}: {text}", cp.coupon));
+                }
+            }
+        }
+    }
+    let rules = discount_repo::active_rules(&state.db, now).await?;
+    let ctx = context::for_cart(&state.db, items, info, Some(user_id), coupons, order).await?;
+    let hook = state.project.discount_condition_hook.as_deref();
+    let result = engine::calculate(&rules, &ctx, hook);
+    let used: Vec<i64> = ctx
+        .coupons
+        .iter()
+        .filter(|cp| {
+            result
+                .applied
+                .iter()
+                .any(|a| a.coupon.as_deref() == Some(cp.coupon.as_str()))
+        })
+        .map(|cp| cp.id)
+        .collect();
+    let items = ctx
+        .items
+        .iter()
+        .filter_map(|it| Some((it.key, (it.base_price, result.items.get(&it.key)?.clone()))))
+        .collect();
+    Ok(OrderPricing {
+        items,
+        delivery_price: result.delivery_price,
+        applied: result.applied,
+        coupons: used,
+        messages,
+    })
 }
 
 #[cfg(test)]
@@ -462,5 +573,414 @@ mod tests {
         assert!(e.custom.is_none());
         let e = to_bx(SubmitError::new("user_provision_failed", "x"), None);
         assert_eq!(e.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    async fn send(
+        app: &axum::Router,
+        method: &str,
+        path: &str,
+        cookie: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        use tower::ServiceExt;
+        let mut req = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header(axum::http::header::COOKIE, cookie);
+        if body.is_some() {
+            req = req.header(axum::http::header::CONTENT_TYPE, "application/json");
+        }
+        let req = req
+            .body(axum::body::Body::from(
+                body.map(|b| b.to_string()).unwrap_or_default(),
+            ))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// Правило «−`perc` % на позиции» (и `delivery` руб. с доставки) с условиями `conditions`.
+    async fn rule(
+        db: &sqlx::PgPool,
+        perc: f64,
+        delivery: f64,
+        use_coupons: bool,
+        conditions: Option<Value>,
+    ) -> i64 {
+        let mut acts = vec![json!({
+            "CLASS_ID": "ActSaleBsktGrp",
+            "DATA": {"Type": "Discount", "Value": perc, "Unit": "Perc", "Max": 0, "All": "AND", "True": "True"},
+            "CHILDREN": []
+        })];
+        if delivery > 0.0 {
+            acts.push(json!({"CLASS_ID": "ActSaleDelivery", "DATA": {"Type": "Discount", "Value": delivery, "Unit": "Cur"}}));
+        }
+        let conditions = conditions.unwrap_or_else(
+            || json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": []}),
+        );
+        sqlx::query_scalar(
+            "INSERT INTO discounts (name, use_coupons, conditions, actions)
+             VALUES ('Скидка ' || $1::text || '%', $2, $3, $4) RETURNING id",
+        )
+        .bind(perc.to_string())
+        .bind(use_coupons)
+        .bind(conditions)
+        .bind(json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND"}, "CHILDREN": acts}))
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    /// Купон правила (`extra` — доп. присваивания `SET`), введённый покупателями `buyers`.
+    async fn coupon(db: &sqlx::PgPool, rule: i64, code: &str, extra: &str, buyers: &[i64]) -> i64 {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO discount_coupons (discount_id, coupon) VALUES ($1, $2) RETURNING id",
+        )
+        .bind(rule)
+        .bind(code)
+        .fetch_one(db)
+        .await
+        .unwrap();
+        if !extra.is_empty() {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE discount_coupons SET {extra} WHERE id = $1"
+            )))
+            .bind(id)
+            .execute(db)
+            .await
+            .unwrap();
+        }
+        for b in buyers {
+            sqlx::query("INSERT INTO buyer_coupons (buyer_id, coupon_id) VALUES ($1, $2)")
+                .bind(b)
+                .bind(id)
+                .execute(db)
+                .await
+                .unwrap();
+        }
+        id
+    }
+
+    /// Пользователь `login` — владелец покупателя `buyer`, с сессией bxapi; Cookie сессии.
+    async fn login(db: &sqlx::PgPool, buyer: i64, login: &str) -> (i64, String) {
+        let user: i64 = sqlx::query_scalar(
+            "INSERT INTO users (login, email, password_hash) VALUES ($1, $1 || '@e.x', '') RETURNING id",
+        )
+        .bind(login)
+        .fetch_one(db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE buyers SET user_id = $2 WHERE id = $1")
+            .bind(buyer)
+            .bind(user)
+            .execute(db)
+            .await
+            .unwrap();
+        let token = format!("sess-{login}");
+        sqlx::query(
+            "INSERT INTO site_sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 day')",
+        )
+        .bind(crate::cart::repo::token_hash(&token))
+        .bind(user)
+        .execute(db)
+        .await
+        .unwrap();
+        (user, format!("{}={token}", super::super::auth::COOKIE))
+    }
+
+    /// Оформление всей корзины: доставка 1, платёжка 1.
+    async fn checkout(app: &axum::Router, cookie: &str, person_type: i64) -> Value {
+        let (_, cart) = send(app, "GET", "/api/v1/cart", cookie, None).await;
+        let (status, body) = send(
+            app,
+            "POST",
+            "/api/v1/order/submit",
+            cookie,
+            Some(
+                json!({"personTypeId": person_type, "deliveryId": 1, "paymentId": 1,
+                        "basketSnapshot": cart["data"]["snapshot"]}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "success", "{body}");
+        body["data"].clone()
+    }
+
+    async fn line(db: &sqlx::PgPool, id: i64) -> (f64, f64, f64) {
+        sqlx::query_as(
+            "SELECT base_price::float8, discount_price::float8, price::float8 FROM cart_items WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    async fn coupon_state(db: &sqlx::PgPool, id: i64) -> (bool, i32) {
+        sqlx::query_as("SELECT active, use_count FROM discount_coupons WHERE id = $1")
+            .bind(id)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn order_fixes_discounted_prices(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let (_, cookie) = login(&db, fx.f.buyer_id, "ivan").await;
+        let rule_id = rule(&db, 10.0, 100.0, false, None).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let data = checkout(&app, &cookie, fx.f.person_type_id).await;
+        assert_eq!(data["total"], json!(2450.0));
+        assert!(data.get("messages").is_none(), "без сообщений ключа нет");
+        let order_id = data["orderId"].as_i64().unwrap();
+
+        assert_eq!(line(&db, fx.f.item_id).await, (1000.0, 100.0, 900.0));
+        assert_eq!(line(&db, fx.offer_item_id).await, (500.0, 50.0, 450.0));
+        let shipment: (f64, f64) = sqlx::query_as(
+            "SELECT base_price::float8, price::float8 FROM shipments WHERE order_id = $1",
+        )
+        .bind(order_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(shipment, (300.0, 200.0));
+        let totals: (f64, f64, f64, f64) = sqlx::query_as(
+            "SELECT o.goods_price::float8, o.delivery_price::float8, o.price::float8, p.sum::float8
+             FROM orders o JOIN payments p ON p.order_id = o.id WHERE o.id = $1",
+        )
+        .bind(order_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(totals, (2250.0, 200.0, 2450.0, 2450.0));
+        let applied: Vec<(Option<i64>, String, String, Value, f64)> = sqlx::query_as(
+            "SELECT discount_id, name, coupon, applied, sum::float8 FROM order_discounts WHERE order_id = $1",
+        )
+        .bind(order_id)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(applied.len(), 1);
+        let (id, name, coupon, json_applied, sum) = &applied[0];
+        assert_eq!(*id, Some(rule_id));
+        assert_eq!(name, "Скидка 10%");
+        assert_eq!(coupon, "");
+        assert_eq!(*sum, 350.0);
+        assert_eq!(
+            *json_applied,
+            json!({"items": [{"cart_item_id": fx.f.item_id, "value": 200.0},
+                             {"cart_item_id": fx.offer_item_id, "value": 50.0}],
+                   "delivery": 100.0})
+        );
+    }
+
+    #[sqlx::test]
+    async fn coupon_consumed_on_order(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let (_, cookie) = login(&db, fx.f.buyer_id, "ivan").await;
+        let b = fx.f.buyer_id;
+        let basket = coupon(
+            &db,
+            rule(&db, 5.0, 0.0, true, None).await,
+            "ROW",
+            "kind = 'basket'",
+            &[b],
+        )
+        .await;
+        let order = coupon(
+            &db,
+            rule(&db, 4.0, 0.0, true, None).await,
+            "ONE",
+            "kind = 'order'",
+            &[b],
+        )
+        .await;
+        let last = coupon(
+            &db,
+            rule(&db, 3.0, 0.0, true, None).await,
+            "LAST",
+            "kind = 'multi', max_use = 2, use_count = 1",
+            &[b],
+        )
+        .await;
+        let multi = coupon(
+            &db,
+            rule(&db, 2.0, 0.0, true, None).await,
+            "MANY",
+            "kind = 'multi'",
+            &[b],
+        )
+        .await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let data = checkout(&app, &cookie, fx.f.person_type_id).await;
+        assert!(data.get("messages").is_none(), "{data}");
+        let order_id = data["orderId"].as_i64().unwrap();
+
+        assert_eq!(coupon_state(&db, basket).await, (false, 1), "на позицию");
+        assert_eq!(coupon_state(&db, order).await, (false, 1), "на заказ");
+        assert_eq!(
+            coupon_state(&db, last).await,
+            (false, 2),
+            "последнее использование"
+        );
+        assert_eq!(coupon_state(&db, multi).await, (true, 1), "многоразовый");
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM buyer_coupons")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(left, 0, "купоны покупателя очищены");
+        let mut coupons: Vec<String> =
+            sqlx::query_scalar("SELECT coupon FROM order_discounts WHERE order_id = $1")
+                .bind(order_id)
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        coupons.sort();
+        assert_eq!(coupons, ["LAST", "MANY", "ONE", "ROW"]);
+    }
+
+    #[sqlx::test]
+    async fn coupon_without_effect_is_not_consumed(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let (_, cookie) = login(&db, fx.f.buyer_id, "ivan").await;
+        let b = fx.f.buyer_id;
+        // Заказ дороже 2000: в корзине 2500, после уменьшения — 1500 + доставка 300
+        let summ = json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"},
+            "CHILDREN": [{"CLASS_ID": "CondSaleOrderSumm", "DATA": {"logic": "Great", "value": 2000}}]});
+        let cond = coupon(
+            &db,
+            rule(&db, 10.0, 0.0, true, Some(summ)).await,
+            "BIG",
+            "",
+            &[b],
+        )
+        .await;
+        let expiring = coupon(&db, rule(&db, 5.0, 0.0, true, None).await, "SOON", "", &[b]).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let (_, cart) = send(&app, "GET", "/api/v1/cart", &cookie, None).await;
+        let statuses: Vec<&str> = cart["data"]["coupons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["status"].as_str().unwrap())
+            .collect();
+        assert_eq!(statuses, ["APPLYED", "APPLYED"], "{cart}");
+
+        sqlx::query("UPDATE cart_items SET quantity = 1 WHERE id = $1")
+            .bind(fx.f.item_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE discount_coupons SET active_to = now() - interval '1 minute' WHERE id = $1",
+        )
+        .bind(expiring)
+        .execute(&db)
+        .await
+        .unwrap();
+        let data = checkout(&app, &cookie, fx.f.person_type_id).await;
+        assert_eq!(data["total"], json!(1800.0), "по ценам без скидки");
+        assert!(data.get("messages").is_none(), "{data}");
+        assert_eq!(coupon_state(&db, cond).await, (true, 0));
+        assert_eq!(coupon_state(&db, expiring).await, (true, 0));
+        let applied: i64 = sqlx::query_scalar("SELECT count(*) FROM order_discounts")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(applied, 0);
+        assert_eq!(line(&db, fx.f.item_id).await, (1000.0, 0.0, 1000.0));
+    }
+
+    /// Два оформления с одним одноразовым купоном, пока строка купона занята: скидку
+    /// получает ровно одно, второе — по ценам без купона и с сообщением Битрикса.
+    #[sqlx::test]
+    async fn one_time_coupon_race(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        // Второй покупатель — с предложением, первый — с товаром (разные строки товаров)
+        let other: i64 =
+            sqlx::query_scalar("INSERT INTO buyers (token_hash) VALUES ('other') RETURNING id")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        sqlx::query("UPDATE cart_items SET buyer_id = $2 WHERE id = $1")
+            .bind(fx.offer_item_id)
+            .bind(other)
+            .execute(&db)
+            .await
+            .unwrap();
+        let (_, first) = login(&db, fx.f.buyer_id, "first").await;
+        let (_, second) = login(&db, other, "second").await;
+        let once = coupon(
+            &db,
+            rule(&db, 10.0, 0.0, true, None).await,
+            "ONCE",
+            "kind = 'order'",
+            &[fx.f.buyer_id, other],
+        )
+        .await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+
+        let mut hold = db.begin().await.unwrap();
+        sqlx::query("SELECT id FROM discount_coupons WHERE id = $1 FOR UPDATE")
+            .bind(once)
+            .execute(&mut *hold)
+            .await
+            .unwrap();
+        let pt = fx.f.person_type_id;
+        let (a, b) = (app.clone(), app.clone());
+        let one = tokio::spawn(async move { checkout(&a, &first, pt).await });
+        let two = tokio::spawn(async move { checkout(&b, &second, pt).await });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        hold.commit().await.unwrap();
+        let results = [one.await.unwrap(), two.await.unwrap()];
+
+        // Без скидки: товар 2000 + 300, предложение 500 + 300
+        let full = [2300.0, 800.0];
+        let discounted = [2100.0, 750.0];
+        let winners: Vec<usize> = (0..2)
+            .filter(|&i| results[i]["total"] == json!(discounted[i]))
+            .collect();
+        assert_eq!(winners.len(), 1, "{results:?}");
+        let loser = 1 - winners[0];
+        assert_eq!(results[loser]["total"], json!(full[loser]), "{results:?}");
+        assert_eq!(
+            results[loser]["messages"],
+            json!(["Купон ONCE: купон на один заказ уже использован"])
+        );
+        assert!(results[winners[0]].get("messages").is_none());
+        assert_eq!(coupon_state(&db, once).await, (false, 1));
+        let used: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM order_discounts WHERE coupon = 'ONCE'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(used, 1);
+    }
+
+    #[sqlx::test]
+    async fn profile_history_base_price(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let (_, cookie) = login(&db, fx.f.buyer_id, "ivan").await;
+        rule(&db, 10.0, 0.0, false, None).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        checkout(&app, &cookie, fx.f.person_type_id).await;
+        let (status, body) = send(&app, "GET", "/api/v1/profile/orders", &cookie, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let items = body["data"]["orders"][0]["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let item = items
+            .iter()
+            .find(|i| i["id"] == json!(fx.f.item_id))
+            .unwrap();
+        assert_eq!(item["price"], json!(900.0));
+        assert_eq!(item["basePrice"], json!(1000.0));
     }
 }

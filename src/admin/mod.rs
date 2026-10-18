@@ -90,6 +90,10 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/shop/orders/{id}/paid", post(shop::orders::set_paid))
         .route("/shop/orders/{id}/cancel", post(shop::orders::set_canceled))
         .route(
+            "/shop/orders/{id}/discounts",
+            post(shop::orders::recalculate_discounts),
+        )
+        .route(
             "/shop/orders/{id}/props",
             post(shop::orders::save_properties),
         )

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool, types::Json};
+use sqlx::{FromRow, PgConnection, PgPool, types::Json};
 
 use super::engine::CouponStatus;
 use super::model::{Coupon, CouponKind, Node, Rule};
@@ -151,7 +151,7 @@ pub async fn buyer_coupons(db: &PgPool, buyer_id: i64) -> sqlx::Result<Vec<Coupo
 }
 
 /// Активность и даты правила купона.
-type RuleDates = (bool, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+pub type RuleDates = (bool, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
 
 /// Проверки `DiscountCouponsManager::checkFullData` (режим покупателя): все не пройденные —
 /// текстами через запятую (как `fillCouponHints`), статус — по первой.
@@ -289,6 +289,121 @@ pub async fn remove_buyer_coupon(db: &PgPool, buyer_id: i64, code: &str) -> sqlx
     .execute(db)
     .await?;
     Ok(done.rows_affected() > 0)
+}
+
+/// Купон покупателя под блокировкой строки с активностью и датами его правила.
+pub struct LockedCoupon {
+    pub coupon: Coupon,
+    pub rule: Option<RuleDates>,
+}
+
+#[derive(FromRow)]
+struct LockedRow {
+    #[sqlx(flatten)]
+    coupon: CouponRow,
+    rule_active: Option<bool>,
+    rule_from: Option<DateTime<Utc>>,
+    rule_to: Option<DateTime<Utc>>,
+    added_at: DateTime<Utc>,
+}
+
+/// Купоны покупателя в транзакции оформления: строки `discount_coupons` блокируются
+/// (`FOR UPDATE`, по id — без взаимных блокировок), данные — после ожидания чужого
+/// оформления. Порядок — порядок добавления, как у [`buyer_coupons`].
+pub async fn lock_buyer_coupons(
+    tx: &mut PgConnection,
+    buyer_id: i64,
+) -> sqlx::Result<Vec<LockedCoupon>> {
+    let mut rows: Vec<LockedRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COUPON_COLS}, d.active AS rule_active, d.active_from AS rule_from,
+                d.active_to AS rule_to, b.added_at
+         FROM buyer_coupons b
+         JOIN discount_coupons c ON c.id = b.coupon_id
+         LEFT JOIN discounts d ON d.id = c.discount_id
+         WHERE b.buyer_id = $1 ORDER BY c.id FOR UPDATE OF c"
+    )))
+    .bind(buyer_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    rows.sort_by_key(|r| (r.added_at, r.coupon.id));
+    Ok(rows
+        .into_iter()
+        .map(|r| LockedCoupon {
+            rule: r.rule_active.map(|a| (a, r.rule_from, r.rule_to)),
+            coupon: Coupon::from(r.coupon),
+        })
+        .collect())
+}
+
+/// Почему купон нельзя отметить использованным при оформлении (`None` — можно): проверки
+/// и тексты `Internals\DiscountCouponTable::saveApplied` Битрикса, по порядку.
+pub fn save_problem(
+    cp: &Coupon,
+    rule: Option<RuleDates>,
+    user_id: Option<i64>,
+    now: DateTime<Utc>,
+) -> Option<&'static str> {
+    let (rule_active, rule_from, rule_to) = rule.unwrap_or((false, None, None));
+    let outside = |from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>| {
+        from.is_some_and(|f| f > now) || to.is_some_and(|t| t < now)
+    };
+    if !rule_active {
+        return Some("правило корзины деактивировано");
+    }
+    if outside(rule_from, rule_to) {
+        return Some("дата оформления заказа не попадает в период действия правила корзины");
+    }
+    if cp.user_id.is_some_and(|u| u > 0 && Some(u) != user_id) {
+        return Some("купон является именным и не принадлежит владельцу заказа");
+    }
+    if outside(cp.active_from, cp.active_to) {
+        return Some("дата оформления заказа не попадает в период действия купона");
+    }
+    if !cp.active {
+        return Some(match cp.kind {
+            CouponKind::Basket => "купон на одну позицию заказа уже использован",
+            CouponKind::Order => "купон на один заказ уже использован",
+            CouponKind::Multi => "купон неактивен",
+        });
+    }
+    if cp.kind == CouponKind::Multi && cp.max_use > 0 && cp.use_count >= cp.max_use {
+        return Some("превышено число использований многоразового купона");
+    }
+    None
+}
+
+/// Отмечает купоны использованными: `use_count + 1`; одноразовые (`basket`, `order`) и
+/// многоразовые, дошедшие до лимита, выключаются.
+pub async fn consume_coupons(tx: &mut PgConnection, ids: &[i64]) -> sqlx::Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE discount_coupons
+         SET use_count = use_count + 1,
+             active = CASE WHEN kind IN ('basket', 'order') THEN FALSE
+                           WHEN max_use > 0 AND use_count + 1 >= max_use THEN FALSE
+                           ELSE active END
+         WHERE id = ANY($1)",
+    )
+    .bind(ids)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// Купоны по кодам (без учёта регистра), в порядке кодов; ненайденные — мимо.
+pub async fn coupons_by_code(tx: &mut PgConnection, codes: &[String]) -> sqlx::Result<Vec<Coupon>> {
+    let lower: Vec<String> = codes.iter().map(|c| c.to_lowercase()).collect();
+    let rows: Vec<CouponRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COUPON_COLS} FROM discount_coupons c WHERE lower(c.coupon) = ANY($1)"
+    )))
+    .bind(&lower)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut out: Vec<Coupon> = rows.into_iter().map(Coupon::from).collect();
+    out.sort_by_key(|c| lower.iter().position(|l| *l == c.coupon.to_lowercase()));
+    Ok(out)
 }
 
 #[cfg(test)]

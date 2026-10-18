@@ -417,6 +417,7 @@ pub(super) async fn apply_shipment(
     sqlx::query(
         "UPDATE shipments SET
              price = COALESCE($2, price),
+             base_price = COALESCE($2, base_price),
              deducted_at = CASE WHEN $3 THEN CASE WHEN deducted THEN deducted_at ELSE now() END END,
              deducted = $3,
              allow_delivery_at = CASE WHEN COALESCE($4, allow_delivery)
@@ -480,8 +481,8 @@ async fn create_shipment(
         None => String::new(),
     };
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO shipments (order_id, delivery_id, delivery_name, updated_1c)
-         VALUES ($1, $2, $3, TRUE) RETURNING id",
+        "INSERT INTO shipments (order_id, delivery_id, delivery_name, price, base_price, updated_1c)
+         VALUES ($1, $2, $3, 0, 0, TRUE) RETURNING id",
     )
     .bind(order_id)
     .bind(ctx.s.default_delivery)

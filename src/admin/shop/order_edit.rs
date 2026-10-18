@@ -285,7 +285,11 @@ pub async fn save_composition(
         match l.item_id {
             Some(item) => {
                 sqlx::query(
+                    // Своя цена — без скидки; прочие позиции скидки сохраняют (правка их не
+                    // пересчитывает)
                     "UPDATE cart_items SET quantity = $3, store_id = $4, price = $5, custom_price = $6,
+                         base_price = CASE WHEN $6 THEN $5 ELSE COALESCE(base_price, $5) END,
+                         discount_price = CASE WHEN $6 THEN 0 ELSE discount_price END,
                          updated_at = now()
                      WHERE id = $1 AND order_id = $2",
                 )
@@ -302,8 +306,8 @@ pub async fn save_composition(
                 let props = crate::collection::sku::basket_props(db, l.product_id).await?;
                 sqlx::query(
                     "INSERT INTO cart_items (buyer_id, item_id, store_id, quantity, name, price,
-                                             currency, order_id, custom_price, props)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, $9)",
+                                             base_price, currency, order_id, custom_price, props)
+                     VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, FALSE, $9)",
                 )
                 .bind(buyer)
                 .bind(l.product_id)
@@ -322,7 +326,11 @@ pub async fn save_composition(
     let composition = Composition { lines, ..c.clone() };
     let (goods, delivery_price, total) = totals(&composition);
     sqlx::query(
-        "UPDATE shipments SET delivery_id = $2, delivery_name = $3, price = $4 WHERE order_id = $1",
+        // Доставка или её цена изменены вручную — без скидки
+        "UPDATE shipments SET delivery_id = $2, delivery_name = $3, price = $4,
+             base_price = CASE WHEN price IS DISTINCT FROM $4 OR delivery_id IS DISTINCT FROM $2
+                               THEN $4 ELSE base_price END
+         WHERE order_id = $1",
     )
     .bind(order_id)
     .bind(c.delivery_id)

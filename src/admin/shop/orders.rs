@@ -394,11 +394,19 @@ pub(crate) async fn card(
         .fetch_optional(&state.db)
         .await?
         .unwrap_or_default();
+    let discounts = repo::order_discounts(&state.db, id).await?;
+    let shipment_base: Option<f64> = sqlx::query_scalar(
+        "SELECT base_price::float8 FROM shipments WHERE order_id = $1 ORDER BY id LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
     render(
         state,
         "shop/order.html",
         context! { user, order, fields, file_fields, extra, stores, statuses, person_type, error, notice,
-        store_list, deliveries, pay_systems, version, onec, onec_payments, onec_shipments },
+        store_list, deliveries, pay_systems, version, onec, onec_payments, onec_shipments, discounts,
+        shipment_base },
     )
 }
 
@@ -538,6 +546,23 @@ pub async fn set_canceled(
         send(&state, "SALE_ORDER_CANCEL".into(), id);
     }
     Ok(back(id))
+}
+
+/// «Пересчитать скидки»: текущие правила к позициям заказа (правка состава скидки не
+/// пересчитывает). Оплаченный заказ — ошибка в карточке.
+pub async fn recalculate_discounts(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+) -> AppResult<Response> {
+    require_orders(&user)?;
+    let hook = state.project.discount_condition_hook.as_deref();
+    let (error, notice) = match repo::recalculate_discounts_with(&state.db, id, hook).await {
+        Ok(()) => (None, Some("Скидки пересчитаны".to_string())),
+        Err(e) if e.downcast_ref::<sqlx::Error>().is_some() => return Err(e.into()),
+        Err(e) => (Some(e.to_string()), None),
+    };
+    Ok(card(&state, user, id, error, notice).await?.into_response())
 }
 
 /// Свойства (`prop_<код>`) и комментарий менеджера.
@@ -835,5 +860,94 @@ mod tests {
         let (status, _, _) =
             get_raw(&app, &format!("/admin/shop/orders/{id}/xml1c"), &manager).await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    #[sqlx::test]
+    async fn recalculate_discounts_admin(db: sqlx::PgPool) {
+        use crate::smoke_tests::post_form;
+        let f = order_fixture(&db).await;
+        sqlx::query("INSERT INTO catalog_price_types (id, code, name, is_base, sort) VALUES (1, 'BASE', 'Розница', TRUE, 100)")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO catalog_prices (item_id, price_type_id, price, currency) VALUES ($1, 1, 120, 'RUB')")
+            .bind(f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let id = place_order(&db, &f, None).await;
+        let rule: i64 = sqlx::query_scalar(
+            "INSERT INTO discounts (name, actions) VALUES ('Минус 10%', $1) RETURNING id",
+        )
+        .bind(serde_json::json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND"}, "CHILDREN": [{
+            "CLASS_ID": "ActSaleBsktGrp",
+            "DATA": {"Type": "Discount", "Value": 10, "Unit": "Perc", "Max": 0, "All": "AND", "True": "True"},
+            "CHILDREN": []}]}))
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let path = format!("/admin/shop/orders/{id}/discounts");
+        let (status, html) = post_form(&app, &path, &cookie, "").await;
+        assert!(
+            status.is_success() || status.is_redirection(),
+            "{status} {html}"
+        );
+
+        // Базовая цена позиции — из заказа (100), не текущая в каталоге (120)
+        let line: (f64, f64, f64) = sqlx::query_as(
+            "SELECT base_price::float8, discount_price::float8, price::float8 FROM cart_items WHERE order_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(line, (100.0, 10.0, 90.0));
+        let totals: (f64, f64, f64) = sqlx::query_as(
+            "SELECT o.goods_price::float8, o.price::float8, p.sum::float8
+             FROM orders o JOIN payments p ON p.order_id = o.id WHERE o.id = $1",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(totals, (90.0, 90.0, 90.0));
+        let applied: Vec<(Option<i64>, f64)> = sqlx::query_as(
+            "SELECT discount_id, sum::float8 FROM order_discounts WHERE order_id = $1",
+        )
+        .bind(id)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(applied, [(Some(rule), 10.0)]);
+        let (_, card) = get(&app, &format!("/admin/shop/orders/{id}"), &cookie).await;
+        assert!(card.contains("Скидки"), "блок скидок");
+        assert!(card.contains("Минус 10%"));
+        assert!(card.contains(&path), "кнопка «Пересчитать скидки»");
+
+        // Оплаченный заказ — ошибка, ничего не меняется
+        sqlx::query("UPDATE discounts SET actions = jsonb_set(actions, '{CHILDREN,0,DATA,Value}', '50') WHERE id = $1")
+            .bind(rule)
+            .execute(&db)
+            .await
+            .unwrap();
+        crate::sale::repo::set_paid(&db, id, true).await.unwrap();
+        let (_, html) = post_form(&app, &path, &cookie, "").await;
+        assert!(html.contains("заказ оплачен"), "{html}");
+        assert_eq!(
+            crate::sale::repo::recalculate_discounts(&db, id)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "заказ оплачен"
+        );
+        let price: f64 =
+            sqlx::query_scalar("SELECT price::float8 FROM cart_items WHERE order_id = $1")
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(price, 90.0);
     }
 }

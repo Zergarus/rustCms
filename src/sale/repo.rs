@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use sqlx::{PgConnection, PgPool};
 
 use super::stock::{self, StockChange, StockLine, apply};
-use crate::{catalog, collection::sku::ItemProp};
+use crate::{catalog, collection::sku::ItemProp, discount::engine::Applied};
 
 /// Значение свойства заказа (флаги — из справочника свойств, если он ещё есть).
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -30,6 +30,10 @@ pub struct OrderItem {
     pub store_id: Option<i64>,
     pub quantity: f64,
     pub price: f64,
+    /// Цена единицы до скидок (`COALESCE(base_price, price)`).
+    pub base_price: f64,
+    /// Скидка на единицу (наценка — отрицательная).
+    pub discount_price: f64,
     pub name: String,
     pub custom_price: bool,
     /// Свойства позиции (у предложения — объём, цвет и т.п.), снимок на момент добавления.
@@ -116,14 +120,49 @@ pub struct NewOrder {
     pub user_comment: String,
     /// (id свойства, код, название, значение)
     pub properties: Vec<(i64, String, String, String)>,
-    /// (id службы, название, цена, склад самовывоза)
+    /// (id службы, название, цена со скидкой, склад самовывоза)
     pub delivery: (i64, String, f64, Option<i64>),
+    /// Цена доставки до скидок.
+    pub delivery_base_price: f64,
     /// (id платёжки, название)
     pub payment: (i64, String),
-    /// (id позиции корзины, количество по снимку, цена, название)
-    pub items: Vec<(i64, f64, f64, String)>,
+    pub items: Vec<NewItem>,
     /// Списание остатков.
     pub stock: Vec<StockChange>,
+    /// Сработавшие правила — в `order_discounts`.
+    pub discounts: Vec<Applied>,
+    /// Применённые купоны (id) — отмечаются использованными.
+    pub coupons: Vec<i64>,
+}
+
+/// Позиция корзины, которая становится позицией заказа.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewItem {
+    /// id позиции корзины.
+    pub id: i64,
+    /// Количество по снимку.
+    pub quantity: f64,
+    /// Цена единицы до скидок.
+    pub base_price: f64,
+    /// Скидка на единицу.
+    pub discount: f64,
+    /// Цена единицы со скидкой.
+    pub price: f64,
+    pub name: String,
+}
+
+impl NewItem {
+    /// Позиция без скидки.
+    pub fn plain(id: i64, quantity: f64, price: f64, name: impl Into<String>) -> NewItem {
+        NewItem {
+            id,
+            quantity,
+            base_price: price,
+            discount: 0.0,
+            price,
+            name: name.into(),
+        }
+    }
 }
 
 fn round2(v: f64) -> f64 {
@@ -182,13 +221,14 @@ pub async fn create(tx: &mut PgConnection, o: &NewOrder) -> Result<i64, CreateEr
     }
     let (delivery_id, delivery_name, delivery_price, store_id) = &o.delivery;
     sqlx::query(
-        "INSERT INTO shipments (order_id, delivery_id, delivery_name, price, store_id)
-         VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO shipments (order_id, delivery_id, delivery_name, price, base_price, store_id)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(id)
     .bind(delivery_id)
     .bind(delivery_name)
     .bind(delivery_price)
+    .bind(o.delivery_base_price)
     .bind(store_id)
     .execute(&mut *tx)
     .await?;
@@ -207,18 +247,21 @@ pub async fn create(tx: &mut PgConnection, o: &NewOrder) -> Result<i64, CreateEr
         .bind(&o.status)
         .execute(&mut *tx)
         .await?;
-    for (item_id, quantity, price, name) in &o.items {
+    for it in &o.items {
         let moved = sqlx::query(
-            "UPDATE cart_items SET order_id = $2, price = $3, name = $4, currency = $5, updated_at = now()
+            "UPDATE cart_items SET order_id = $2, price = $3, base_price = $8, discount_price = $9,
+                 name = $4, currency = $5, updated_at = now()
              WHERE id = $1 AND order_id IS NULL AND buyer_id = $6 AND quantity = $7",
         )
-        .bind(item_id)
+        .bind(it.id)
         .bind(id)
-        .bind(price)
-        .bind(name)
+        .bind(it.price)
+        .bind(&it.name)
         .bind(&o.currency)
         .bind(o.buyer_id)
-        .bind(quantity)
+        .bind(it.quantity)
+        .bind(it.base_price)
+        .bind(it.discount)
         .execute(&mut *tx)
         .await?
         .rows_affected();
@@ -227,7 +270,60 @@ pub async fn create(tx: &mut PgConnection, o: &NewOrder) -> Result<i64, CreateEr
         }
     }
     apply(tx, &o.stock).await?;
+    write_order_discounts(tx, id, &o.discounts).await?;
+    crate::discount::repo::consume_coupons(tx, &o.coupons).await?;
+    sqlx::query("DELETE FROM buyer_coupons WHERE buyer_id = $1")
+        .bind(o.buyer_id)
+        .execute(&mut *tx)
+        .await?;
     Ok(id)
+}
+
+/// Записывает сработавшие правила заказа: `applied` — `{items: [{cart_item_id, value}], delivery}`.
+async fn write_order_discounts(
+    tx: &mut PgConnection,
+    order_id: i64,
+    applied: &[Applied],
+) -> sqlx::Result<()> {
+    for a in applied {
+        let items: Vec<Value> = a
+            .items
+            .iter()
+            .map(|(key, value)| serde_json::json!({"cart_item_id": key, "value": value}))
+            .collect();
+        sqlx::query(
+            "INSERT INTO order_discounts (order_id, discount_id, name, coupon, applied, sum)
+             VALUES ($1, (SELECT id FROM discounts WHERE id = $2), $3, $4, $5, $6)",
+        )
+        .bind(order_id)
+        .bind(a.discount_id)
+        .bind(&a.name)
+        .bind(a.coupon.as_deref().unwrap_or_default())
+        .bind(serde_json::json!({"items": items, "delivery": a.delivery}))
+        .bind(a.sum)
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Правило, применённое к заказу (блок «Скидки» карточки).
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct OrderDiscount {
+    pub discount_id: Option<i64>,
+    pub name: String,
+    pub coupon: String,
+    pub sum: f64,
+}
+
+pub async fn order_discounts(db: &PgPool, order_id: i64) -> sqlx::Result<Vec<OrderDiscount>> {
+    sqlx::query_as(
+        "SELECT discount_id, name, coupon, sum::float8 AS sum FROM order_discounts
+         WHERE order_id = $1 ORDER BY id",
+    )
+    .bind(order_id)
+    .fetch_all(db)
+    .await
 }
 
 /// Заказ со свойствами, позициями, отгрузкой, оплатой и историей.
@@ -264,7 +360,9 @@ pub async fn load(db: &PgPool, id: i64) -> sqlx::Result<Option<OrderView>> {
     .await?;
     order.items = sqlx::query_as(
         "SELECT id, item_id AS product_id, store_id, quantity::float8 AS quantity,
-                COALESCE(price, 0)::float8 AS price, name, custom_price, props
+                COALESCE(price, 0)::float8 AS price,
+                COALESCE(base_price, price, 0)::float8 AS base_price,
+                discount_price::float8 AS discount_price, name, custom_price, props
          FROM cart_items WHERE order_id = $1 ORDER BY id",
     )
     .bind(id)
@@ -448,8 +546,9 @@ pub async fn recalc_totals_in(
     .execute(&mut *tx)
     .await?;
     if delivery_price.is_some() {
+        // Цена доставки задана явно (1С) — без скидки
         sqlx::query(
-            "UPDATE shipments SET price = $2
+            "UPDATE shipments SET price = $2, base_price = $2
              WHERE id = (SELECT min(id) FROM shipments WHERE order_id = $1)",
         )
         .bind(order_id)
@@ -466,6 +565,145 @@ pub async fn recalc_totals_in(
     .execute(&mut *tx)
     .await?;
     Ok(total)
+}
+
+/// «Пересчитать скидки»: текущие правила к позициям заказа (купоны — те, что уже в
+/// `order_discounts`), цены позиций и доставки, суммы заказа и единственной неоплаченной
+/// оплаты, `order_discounts`. Базовые цены — из заказа. Оплаченный заказ — ошибка.
+/// Без проектного условия правил; карточка заказа зовёт [`recalculate_discounts_with`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub async fn recalculate_discounts(db: &PgPool, order_id: i64) -> anyhow::Result<()> {
+    recalculate_discounts_with(db, order_id, None).await
+}
+
+/// [`recalculate_discounts`] с проектным условием правил.
+pub async fn recalculate_discounts_with(
+    db: &PgPool,
+    order_id: i64,
+    hook: Option<&dyn crate::bxapi::project::DiscountConditionHook>,
+) -> anyhow::Result<()> {
+    use crate::discount::{context, engine, repo as discount_repo};
+
+    let mut tx = db.begin().await?;
+    let Some((paid, person_type, user_id)): Option<(bool, i64, Option<i64>)> =
+        sqlx::query_as("SELECT paid, person_type_id, user_id FROM orders WHERE id = $1 FOR UPDATE")
+            .bind(order_id)
+            .fetch_optional(&mut *tx)
+            .await?
+    else {
+        anyhow::bail!("заказ не найден");
+    };
+    anyhow::ensure!(!paid, "заказ оплачен");
+
+    let rows: Vec<(i64, i64, Option<i64>, f64, String, f64)> = sqlx::query_as(
+        "SELECT id, item_id, store_id, quantity::float8, name,
+                COALESCE(base_price, price, 0)::float8
+         FROM cart_items WHERE order_id = $1 ORDER BY id",
+    )
+    .bind(order_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let items: Vec<crate::cart::CartItem> = rows
+        .iter()
+        .map(
+            |(id, product_id, store_id, quantity, name, _)| crate::cart::CartItem {
+                id: *id,
+                product_id: *product_id,
+                store_id: *store_id,
+                quantity: *quantity,
+                name: name.clone(),
+            },
+        )
+        .collect();
+    let bases: std::collections::HashMap<i64, f64> = rows.iter().map(|r| (r.0, r.5)).collect();
+    let shipment: Option<(i64, Option<i64>, f64)> = sqlx::query_as(
+        "SELECT id, delivery_id, base_price::float8 FROM shipments WHERE order_id = $1
+         ORDER BY id LIMIT 1",
+    )
+    .bind(order_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let pay_system: Option<i64> = sqlx::query_scalar(
+        "SELECT pay_system_id FROM payments WHERE order_id = $1 ORDER BY id LIMIT 1",
+    )
+    .bind(order_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .flatten();
+    let codes: Vec<String> = sqlx::query_scalar(
+        "SELECT coupon FROM order_discounts WHERE order_id = $1 AND coupon <> '' ORDER BY id",
+    )
+    .bind(order_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    // Купоны заказа уже его: проверки покупателя (активность, лимит, даты) к ним не относятся
+    let coupons: Vec<_> = discount_repo::coupons_by_code(&mut tx, &codes)
+        .await?
+        .into_iter()
+        .map(|mut c| {
+            c.active = true;
+            c.active_from = None;
+            c.active_to = None;
+            c.max_use = 0;
+            c.use_count = 0;
+            c.user_id = None;
+            c
+        })
+        .collect();
+
+    let ids: Vec<i64> = items.iter().map(|i| i.product_id).collect();
+    let info = catalog::load(db, &ids).await?;
+    let order = context::OrderCtx {
+        person_type_id: Some(person_type),
+        pay_system_id: pay_system,
+        delivery_id: shipment.and_then(|s| s.1),
+        delivery_price: shipment.map(|s| s.2),
+    };
+    let mut ctx = context::for_cart(db, &items, &info, user_id, coupons, order).await?;
+    for it in ctx.items.iter_mut().filter(|it| !it.custom_price) {
+        if let Some(base) = bases.get(&it.key) {
+            it.base_price = *base;
+        }
+    }
+    let rules = discount_repo::active_rules(db, Utc::now()).await?;
+    let result = engine::calculate(&rules, &ctx, hook);
+
+    for it in &ctx.items {
+        let Some(r) = result.items.get(&it.key) else {
+            continue;
+        };
+        sqlx::query(
+            "UPDATE cart_items SET base_price = $2, discount_price = $3, price = $4, updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(it.key)
+        .bind(it.base_price)
+        .bind(r.discount)
+        .bind(r.price)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if let Some((shipment_id, _, base)) = shipment {
+        let price = round2(result.delivery_price.unwrap_or(base));
+        sqlx::query("UPDATE shipments SET price = $2 WHERE id = $1")
+            .bind(shipment_id)
+            .bind(price)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE orders SET delivery_price = $2 WHERE id = $1")
+            .bind(order_id)
+            .bind(price)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("DELETE FROM order_discounts WHERE order_id = $1")
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    write_order_discounts(&mut tx, order_id, &result.applied).await?;
+    recalc_totals_in(&mut tx, order_id, None).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Позиции заказа для расчёта остатков.
@@ -764,8 +1002,11 @@ mod tests {
             properties: Vec::new(),
             delivery: (1, "Самовывоз".into(), 0.0, Some(1)),
             payment: (1, "QR".into()),
-            items: vec![(f.item_id, quantity, 100.0, "Товар".into())],
+            delivery_base_price: 0.0,
+            items: vec![NewItem::plain(f.item_id, quantity, 100.0, "Товар")],
             stock: plan(&[], &lines, &[f.product_id].into_iter().collect()),
+            discounts: Vec::new(),
+            coupons: Vec::new(),
         }
     }
 
@@ -932,5 +1173,72 @@ mod tests {
             .unwrap();
         assert_eq!(value(&db, id, many.id).await.as_deref(), Some("1"));
         assert_eq!(value(&db, id, 500).await.as_deref(), Some("Иван"));
+    }
+
+    #[sqlx::test]
+    async fn cancel_does_not_return_coupon(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let rule: i64 = sqlx::query_scalar(
+            "INSERT INTO discounts (name, use_coupons) VALUES ('По купону', TRUE) RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let coupon: i64 = sqlx::query_scalar(
+            "INSERT INTO discount_coupons (discount_id, coupon, kind) VALUES ($1, 'ONE', 'order') RETURNING id",
+        )
+        .bind(rule)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO buyer_coupons (buyer_id, coupon_id) VALUES ($1, $2)")
+            .bind(f.buyer_id)
+            .bind(coupon)
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut order = new_order(&f, 1.0);
+        order.items[0].base_price = 110.0;
+        order.items[0].discount = 10.0;
+        order.discounts = vec![crate::discount::engine::Applied {
+            discount_id: rule,
+            name: "По купону".into(),
+            coupon: Some("ONE".into()),
+            items: vec![(f.item_id, 10.0)],
+            delivery: 0.0,
+            sum: 10.0,
+        }];
+        order.coupons = vec![coupon];
+        let mut tx = db.begin().await.unwrap();
+        let id = create(&mut tx, &order).await.unwrap();
+        tx.commit().await.unwrap();
+        let state = || async {
+            sqlx::query_as::<_, (bool, i32, i64, i64)>(
+                "SELECT c.active, c.use_count,
+                        (SELECT count(*) FROM order_discounts WHERE order_id = $2),
+                        (SELECT count(*) FROM buyer_coupons)
+                 FROM discount_coupons c WHERE c.id = $1",
+            )
+            .bind(coupon)
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        assert_eq!(state().await, (false, 1, 1, 0));
+        let line: (f64, f64, f64) = sqlx::query_as(
+            "SELECT base_price::float8, discount_price::float8, price::float8 FROM cart_items WHERE id = $1",
+        )
+        .bind(f.item_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(line, (110.0, 10.0, 100.0));
+        assert!(set_canceled(&db, id, true, "передумал").await.unwrap());
+        assert_eq!(
+            state().await,
+            (false, 1, 1, 0),
+            "отмена купон не возвращает"
+        );
     }
 }

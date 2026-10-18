@@ -2459,8 +2459,16 @@ async fn offer_order(db: &PgPool, app: &Router, offer: i64) -> i64 {
         properties: Vec::new(),
         delivery: (1, "Самовывоз".into(), 0.0, Some(1)),
         payment: (1, "QR".into()),
-        items: vec![(cart_item, 1.0, 900.0, "Масло ATF (4 л)".into())],
+        delivery_base_price: 0.0,
+        items: vec![crate::sale::repo::NewItem::plain(
+            cart_item,
+            1.0,
+            900.0,
+            "Масло ATF (4 л)",
+        )],
         stock: Vec::new(),
+        discounts: Vec::new(),
+        coupons: Vec::new(),
     };
     let mut tx = db.begin().await.unwrap();
     let order_id = create(&mut tx, &order).await.unwrap();

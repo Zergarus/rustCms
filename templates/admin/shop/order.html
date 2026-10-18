@@ -80,7 +80,7 @@
         <td><a href="/admin/items/{{ i.product_id }}">{{ i.name }}</a>{% if i.custom_price %} <span class="muted">(своя цена)</span>{% endif %}{% for p in i.props %}{% if p.code != "PRODUCT.XML_ID" and p.code != "CATALOG.XML_ID" %}<br><span class="muted">{{ p.name }}: {{ p.value }}</span>{% endif %}{% endfor %}</td>
         <td><select name="item_{{ i.id }}_store"><option value="">—</option>{% for st in store_list %}<option value="{{ st[0] }}" {% if i.store_id == st[0] %}selected{% endif %}>{{ st[1] }}</option>{% endfor %}</select></td>
         <td><input name="item_{{ i.id }}_quantity" value="{{ i.quantity }}" inputmode="decimal" size="5"></td>
-        <td><input name="item_{{ i.id }}_price" value="{{ i.price }}" inputmode="decimal" size="8"></td>
+        <td><input name="item_{{ i.id }}_price" value="{{ i.price }}" inputmode="decimal" size="8">{% if i.discount_price %}<br><span class="muted">без скидки {{ i.base_price }}</span>{% endif %}</td>
         <td>{{ (i.price * i.quantity)|round(2) }}</td>
         <td><input type="checkbox" name="item_{{ i.id }}_remove"></td>
       </tr>
@@ -109,6 +109,31 @@
   </div>
   <div class="form-actions"><button class="btn primary" type="submit">Сохранить состав</button>{% if order.canceled %} <span class="muted">Заказ отменён — остатки не меняются</span>{% endif %}</div>
 </form>
+
+<div class="card table-wrap">
+  <h2>Скидки</h2>
+  {% if discounts %}
+  <table>
+    <thead><tr><th>Правило</th><th>Купон</th><th>Сумма</th></tr></thead>
+    <tbody>
+      {% for d in discounts %}
+      <tr>
+        <td>{{ d.name }}{% if not d.discount_id %} <span class="muted">(правило удалено)</span>{% endif %}</td>
+        <td>{{ d.coupon or "—" }}</td>
+        <td>{{ d.sum }} {{ order.currency }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Скидки к заказу не применялись.</p>
+  {% endif %}
+  {% if order.shipment and shipment_base is not none and shipment_base != order.shipment.price %}<p>Доставка без скидки: {{ shipment_base }} {{ order.currency }}</p>{% endif %}
+  <form method="post" action="/admin/shop/orders/{{ order.id }}/discounts">
+    <button class="btn" type="submit" {% if order.paid %}disabled title="заказ оплачен"{% endif %}>Пересчитать скидки</button>
+    <span class="muted">текущие правила к позициям заказа; правка состава скидки не пересчитывает</span>
+  </form>
+</div>
 
 <form class="card form" method="post" action="/admin/shop/orders/{{ order.id }}/props">
   <h2>Свойства заказа</h2>

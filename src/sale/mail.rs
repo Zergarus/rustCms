@@ -65,8 +65,15 @@ pub fn order_fields(o: &OrderView, sale_email: &str) -> HashMap<String, String> 
             } else {
                 format!("{} ({})", i.name, props.join("; "))
             };
+            // Поля скидки в `SALE_NEW_ORDER` Битрикса нет — скидка позиции в её строке
+            let discount = i.discount_price * i.quantity;
+            let discount = if discount > 0.005 {
+                format!(" (скидка {})", money(discount, &o.currency))
+            } else {
+                String::new()
+            };
             format!(
-                "{} - {} шт.: {}",
+                "{} - {} шт.: {}{discount}",
                 title,
                 quantity(i.quantity),
                 money(i.price, &o.currency)
@@ -138,6 +145,8 @@ mod tests {
             store_id: None,
             quantity: 1.0,
             price,
+            base_price: price,
+            discount_price: 0.0,
             name: name.into(),
             custom_price: false,
             props: Vec::new(),
@@ -247,5 +256,19 @@ mod tests {
         let f = order_fields(&v, "");
         assert_eq!(f["EMAIL"], "user@b.ru");
         assert_eq!(f["ORDER_USER"], "Профиль");
+    }
+
+    /// В `SALE_NEW_ORDER` Битрикса поля скидки нет — скидка позиции в строке состава.
+    #[test]
+    fn mail_has_discount() {
+        let mut v = view();
+        v.items[0].quantity = 2.0;
+        v.items[0].base_price = 694.22;
+        v.items[0].discount_price = 100.0;
+        let f = order_fields(&v, "");
+        assert_eq!(
+            f["ORDER_LIST"],
+            "Фильтр АКПП - 2 шт.: 594.22 руб. (скидка 200 руб.)\nКомплект шариков - 1 шт.: 500 руб."
+        );
     }
 }
