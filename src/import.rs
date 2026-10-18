@@ -1752,6 +1752,15 @@ async fn write_discounts(tx: &mut sqlx::PgConnection, data: &Data) -> anyhow::Re
         }
         // Ограничение по группам, которых нет в CMS: выключаем, а не открываем всем
         let mut active = r.active;
+        // Битрикс выбирает правила по группам покупателя (DiscountGroupTable): правило без
+        // групп не действует ни для кого — у нас оно было бы для всех
+        if bitrix_groups.is_empty() && active {
+            active = false;
+            warnings.push(format!(
+                "правило {} «{}» выключено: правило не назначено ни одной группе",
+                r.id, r.name
+            ));
+        }
         if !lost.is_empty() {
             if groups.is_empty() && active {
                 active = false;
@@ -4611,6 +4620,8 @@ mod tests {
     }
     /// `ACTIONS` правила №24 трансопта «+10%» из `b_sale_discount`.
     const RULE24_ACTIONS: &str = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:1:{s:3:"All";s:3:"AND";}s:8:"CHILDREN";a:1:{i:0;a:3:{s:8:"CLASS_ID";s:14:"ActSaleBsktGrp";s:4:"DATA";a:6:{s:4:"Type";s:5:"Extra";s:5:"Value";d:10;s:4:"Unit";s:4:"Perc";s:3:"Max";i:0;s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:1:{i:0;a:2:{s:8:"CLASS_ID";s:15:"CondIBProp:4:55";s:4:"DATA";a:2:{s:5:"logic";s:5:"Equal";s:5:"value";i:32;}}}}}}"#;
+    /// Условие накопительной скидки (3б): движок его не знает.
+    const CUMULATIVE_CONDITIONS: &str = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:2:{s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:1:{i:0;a:3:{s:8:"CLASS_ID";s:19:"CondCumulativeGroup";s:4:"DATA";a:2:{s:5:"logic";s:4:"EqGr";s:5:"Value";d:1000;}s:8:"CHILDREN";a:0:{}}}}"#;
     const RULE24_CONDITIONS: &str = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:2:{s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:0:{}}"#;
 
     #[test]
@@ -4731,72 +4742,74 @@ mod tests {
             description: String::new(),
         };
         let mut data = Data {
-        discounts: Discounts {
-            rules: vec![
-                DiscountRow {
-                    last_discount: true,
-                    xml_id: "plus10".into(),
-                    ..rule(24, "+10%")
-                },
-                // Накопительная скидка (3б) — переносится, но не применяется
-                DiscountRow {
-                    conditions: r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:2:{s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:1:{i:0;a:3:{s:8:"CLASS_ID";s:19:"CondCumulativeGroup";s:4:"DATA";a:2:{s:5:"logic";s:4:"EqGr";s:5:"Value";d:1000;}s:8:"CHILDREN";a:0:{}}}}"#.into(),
-                    priority: 5,
-                    sort: 50,
-                    last_level_discount: true,
-                    ..rule(27, "Накопительная")
-                },
-                DiscountRow {
-                    use_coupons: true,
-                    active: false,
-                    active_from: Some(from),
-                    active_to: Some(to),
-                    ..rule(28, "По купону")
-                },
-                // Только для группы, которой нет в CMS: не должна открыться всем
-                rule(29, "Пропавшая группа"),
-                // Группа 2 Битрикса — «все пользователи»
-                rule(30, "Всем"),
-                // Неразбираемые условия — правило пропускается
-                DiscountRow {
-                    conditions: "a:1:{".into(),
-                    ..rule(31, "Сломанное")
-                },
-            ],
-            groups: vec![(24, 16), (29, 77), (30, 2), (30, 16)],
-            coupons: vec![
-                CouponRow {
-                    active_from: Some(from),
-                    active_to: Some(to),
-                    description: "на позицию".into(),
-                    ..coupon(1, "BASKET-1", 1)
-                },
-                CouponRow {
-                    user_id: Some(10),
-                    ..coupon(2, "ORDER-1", 2)
-                },
-                CouponRow {
-                    max_use: 5,
-                    use_count: 2,
-                    active: false,
-                    ..coupon(3, "MULTI-1", 4)
-                },
-                // Пользователь не перенесён — купон не становится общим
-                CouponRow {
-                    user_id: Some(999),
-                    ..coupon(4, "LOST-USER", 2)
-                },
-                // Неизвестный тип, купон пропущенного правила
-                coupon(5, "WEIRD", 3),
-                CouponRow {
-                    discount_id: 31,
-                    ..coupon(6, "BROKEN", 2)
-                },
-            ],
-            catalog: vec![(7, "Старая скидка каталога".into())],
-        },
-..Data::default()
-};
+            discounts: Discounts {
+                rules: vec![
+                    DiscountRow {
+                        last_discount: true,
+                        xml_id: "plus10".into(),
+                        ..rule(24, "+10%")
+                    },
+                    // Накопительная скидка (3б) — переносится, но не применяется
+                    DiscountRow {
+                        conditions: CUMULATIVE_CONDITIONS.into(),
+                        priority: 5,
+                        sort: 50,
+                        last_level_discount: true,
+                        ..rule(27, "Накопительная")
+                    },
+                    DiscountRow {
+                        use_coupons: true,
+                        active: false,
+                        active_from: Some(from),
+                        active_to: Some(to),
+                        ..rule(28, "По купону")
+                    },
+                    // Только для группы, которой нет в CMS: не должна открыться всем
+                    rule(29, "Пропавшая группа"),
+                    // Группа 2 Битрикса — «все пользователи»
+                    rule(30, "Всем"),
+                    // В Битриксе правило без групп не действует ни для кого
+                    rule(32, "Без групп"),
+                    // Неразбираемые условия — правило пропускается
+                    DiscountRow {
+                        conditions: "a:1:{".into(),
+                        ..rule(31, "Сломанное")
+                    },
+                ],
+                groups: vec![(24, 16), (27, 16), (28, 16), (29, 77), (30, 2), (30, 16)],
+                coupons: vec![
+                    CouponRow {
+                        active_from: Some(from),
+                        active_to: Some(to),
+                        description: "на позицию".into(),
+                        ..coupon(1, "BASKET-1", 1)
+                    },
+                    CouponRow {
+                        user_id: Some(10),
+                        ..coupon(2, "ORDER-1", 2)
+                    },
+                    CouponRow {
+                        max_use: 5,
+                        use_count: 2,
+                        active: false,
+                        ..coupon(3, "MULTI-1", 4)
+                    },
+                    // Пользователь не перенесён — купон не становится общим
+                    CouponRow {
+                        user_id: Some(999),
+                        ..coupon(4, "LOST-USER", 2)
+                    },
+                    // Неизвестный тип, купон пропущенного правила
+                    coupon(5, "WEIRD", 3),
+                    CouponRow {
+                        discount_id: 31,
+                        ..coupon(6, "BROKEN", 2)
+                    },
+                ],
+                catalog: vec![(7, "Старая скидка каталога".into())],
+            },
+            ..Data::default()
+        };
 
         let props = resolve_properties(&mut data);
         let mut tx = db.begin().await.unwrap();
@@ -4861,6 +4874,7 @@ mod tests {
                 r(28, "По купону", false, 1, 100, [false, false, true], "", ""),
                 r(29, "Пропавшая группа", false, 1, 100, [false; 3], "", ""),
                 r(30, "Всем", true, 1, 100, [false; 3], "", ""),
+                r(32, "Без групп", false, 1, 100, [false; 3], "", ""),
             ]
         );
         let (conditions, actions, from_db, to_db): (
@@ -4891,7 +4905,7 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(groups, vec![(24, group16)]);
+        assert_eq!(groups, vec![(24, group16), (27, group16), (28, group16)]);
 
         type C = (
             i64,
@@ -4969,10 +4983,15 @@ mod tests {
         .fetch_one(&db)
         .await
         .unwrap();
-        assert_eq!(counts, (5, 1, 3));
+        assert_eq!(counts, (6, 3, 3));
         let joined = warnings.join("\n");
         assert!(joined.contains("b_catalog_discount"), "{joined}");
         assert!(joined.contains("7 «Старая скидка каталога»"), "{joined}");
+        assert!(
+            joined
+                .contains("правило 32 «Без групп» выключено: правило не назначено ни одной группе"),
+            "{joined}"
+        );
         for needle in ["29", "31", "LOST-USER", "WEIRD", "BROKEN"] {
             assert!(joined.contains(needle), "{needle}: {joined}");
         }
@@ -4983,7 +5002,7 @@ mod tests {
         .fetch_one(&db)
         .await
         .unwrap();
-        assert_eq!(next, (31, 4));
+        assert_eq!(next, (33, 4));
     }
 
     #[test]
