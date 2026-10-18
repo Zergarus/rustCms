@@ -162,6 +162,52 @@ struct Data {
     sku_links: Vec<(i64, i64, i64)>,
     /// Признаки свойств `b_iblock_property_feature`: (свойство, `IN_BASKET` | `OFFER_TREE`).
     property_features: Vec<(i64, String)>,
+    discounts: Discounts,
+}
+
+/// Правила работы с корзиной модуля `sale` и их купоны.
+#[derive(Default)]
+struct Discounts {
+    rules: Vec<DiscountRow>,
+    /// `b_sale_discount_group`: (правило, группа Битрикса).
+    groups: Vec<(i64, i64)>,
+    coupons: Vec<CouponRow>,
+    /// `b_catalog_discount`: (id, название) — старые скидки каталога, не переносятся.
+    catalog: Vec<(i64, String)>,
+}
+
+/// Строка `b_sale_discount`; деревья — как в базе, PHP-serialize.
+struct DiscountRow {
+    id: i64,
+    name: String,
+    active: bool,
+    active_from: Option<DateTime<Utc>>,
+    active_to: Option<DateTime<Utc>>,
+    priority: i32,
+    sort: i32,
+    last_discount: bool,
+    last_level_discount: bool,
+    use_coupons: bool,
+    conditions: String,
+    actions: String,
+    xml_id: String,
+}
+
+/// Строка `b_sale_discount_coupon`.
+struct CouponRow {
+    id: i64,
+    discount_id: i64,
+    active: bool,
+    active_from: Option<DateTime<Utc>>,
+    active_to: Option<DateTime<Utc>>,
+    coupon: String,
+    /// `TYPE`: 1 — на позицию, 2 — на заказ, 4 — многоразовый.
+    kind: i64,
+    max_use: i32,
+    use_count: i32,
+    /// Пользователь Битрикса.
+    user_id: Option<i64>,
+    description: String,
 }
 
 /// Настройки оформления заказа (модуль `sale`).
@@ -518,6 +564,7 @@ pub async fn run(db: &PgPool, opts: Options) -> anyhow::Result<()> {
     stage("местоположения", read_locations(&my, &mut data)).await?;
     stage("почтовые шаблоны и настройки", read_mail(&my, &mut data)).await?;
     stage("настройки заказов", read_sale(&my, &mut data)).await?;
+    stage("скидки", read_discounts(&my, &mut data)).await?;
 
     let props = resolve_properties(&mut data);
     let (linked, missing) = link_files(&data, &opts)?;
@@ -545,6 +592,8 @@ pub async fn run(db: &PgPool, opts: Options) -> anyhow::Result<()> {
         groups = data.groups.len(),
         locations = data.locations.len(),
         prices = data.catalog.prices.len(),
+        discounts = data.discounts.rules.len(),
+        coupons = data.discounts.coupons.len(),
         store_amounts = data.catalog.amounts.len(),
         files_linked = linked,
         files_missing = missing,
@@ -1451,6 +1500,387 @@ fn php_value(raw: &str) -> Option<Value> {
     }
     let mut i = 0;
     parse(raw, &mut i)
+}
+
+/// Полный разбор PHP-`serialize`: `i:` → целое, `d:` → дробное, `b:` → bool, `N;` → null,
+/// `s:` → строка (длина — в байтах), `a:` → массив JSON, если ключи — 0..n по порядку, иначе
+/// объект (порядок ключей сохраняется). Объекты PHP и хвост после значения — ошибка.
+fn php_unserialize(raw: &str) -> Result<Value, String> {
+    struct P<'a> {
+        s: &'a [u8],
+        i: usize,
+    }
+    impl P<'_> {
+        fn err(&self, what: &str) -> String {
+            format!("PHP-serialize: {what} (позиция {})", self.i)
+        }
+        fn expect(&mut self, b: u8) -> Result<(), String> {
+            if self.s.get(self.i) != Some(&b) {
+                return Err(self.err(&format!("ожидался «{}»", b as char)));
+            }
+            self.i += 1;
+            Ok(())
+        }
+        /// Текст до `end` (не включая), курсор — за `end`.
+        fn until(&mut self, end: u8) -> Result<&str, String> {
+            let rest = &self.s[self.i..];
+            let n = rest
+                .iter()
+                .position(|&b| b == end)
+                .ok_or_else(|| self.err(&format!("нет «{}»", end as char)))?;
+            let text = std::str::from_utf8(&rest[..n]).map_err(|_| self.err("не UTF-8"))?;
+            self.i += n + 1;
+            Ok(text)
+        }
+        fn value(&mut self) -> Result<Value, String> {
+            let kind = *self.s.get(self.i).ok_or_else(|| self.err("нет значения"))?;
+            self.i += 1;
+            if kind == b'N' {
+                self.expect(b';')?;
+                return Ok(Value::Null);
+            }
+            self.expect(b':')?;
+            match kind {
+                b'i' => {
+                    let t = self.until(b';')?;
+                    t.parse::<i64>()
+                        .map(Value::from)
+                        .map_err(|_| format!("PHP-serialize: не целое «{t}»"))
+                }
+                b'd' => {
+                    let t = self.until(b';')?;
+                    t.parse::<f64>()
+                        .ok()
+                        .and_then(serde_json::Number::from_f64)
+                        .map(Value::Number)
+                        .ok_or_else(|| format!("PHP-serialize: не число «{t}»"))
+                }
+                b'b' => match self.until(b';')? {
+                    "0" => Ok(Value::Bool(false)),
+                    "1" => Ok(Value::Bool(true)),
+                    t => Err(format!("PHP-serialize: не bool «{t}»")),
+                },
+                b's' => {
+                    let t = self.until(b':')?;
+                    let len: usize = t
+                        .parse()
+                        .map_err(|_| format!("PHP-serialize: длина строки «{t}»"))?;
+                    self.expect(b'"')?;
+                    let bytes = self
+                        .s
+                        .get(self.i..self.i + len)
+                        .ok_or_else(|| self.err("строка короче объявленной"))?;
+                    let text = std::str::from_utf8(bytes)
+                        .map_err(|_| self.err("строка не UTF-8"))?
+                        .to_string();
+                    self.i += len;
+                    self.expect(b'"')?;
+                    self.expect(b';')?;
+                    Ok(Value::String(text))
+                }
+                b'a' => {
+                    let t = self.until(b':')?;
+                    let count: usize = t
+                        .parse()
+                        .map_err(|_| format!("PHP-serialize: размер массива «{t}»"))?;
+                    self.expect(b'{')?;
+                    let mut entries = Vec::with_capacity(count.min(1024));
+                    for _ in 0..count {
+                        let key = match self.value()? {
+                            Value::String(k) => k,
+                            Value::Number(n) if n.is_i64() => n.to_string(),
+                            _ => return Err(self.err("ключ массива не строка и не целое")),
+                        };
+                        entries.push((key, self.value()?));
+                    }
+                    self.expect(b'}')?;
+                    let is_list = entries
+                        .iter()
+                        .enumerate()
+                        .all(|(n, (k, _))| *k == n.to_string());
+                    Ok(if is_list {
+                        Value::Array(entries.into_iter().map(|(_, v)| v).collect())
+                    } else {
+                        Value::Object(entries.into_iter().collect())
+                    })
+                }
+                _ => Err(self.err(&format!("неизвестный тип «{}»", kind as char))),
+            }
+        }
+    }
+    let mut p = P {
+        s: raw.trim().as_bytes(),
+        i: 0,
+    };
+    let value = p.value()?;
+    if p.i != p.s.len() {
+        return Err(p.err("лишние данные после значения"));
+    }
+    Ok(value)
+}
+
+/// Дерево условий или действий правила из PHP-serialize Битрикса. Пустой `DATA` (`a:0:{}`)
+/// становится объектом, `CHILDREN` с ключами не по порядку — списком. Значения свойств-
+/// справочников (`CondIBProp` поля из `directories`: поле → инфоблок HL) — внешние коды строк;
+/// они заменяются на id записей, ненайденные остаются как есть (их отметит проверка дерева).
+/// Прочие id сохраняются при переносе и не меняются.
+fn discount_tree(
+    raw: &str,
+    directories: &HashMap<i64, i64>,
+    by_xml_id: &HashMap<(i64, &str), i64>,
+) -> Result<crate::discount::model::Node, String> {
+    fn normalize(v: &mut Value) {
+        let Value::Object(node) = v else { return };
+        if node
+            .get("DATA")
+            .is_some_and(|d| d.as_array().is_some_and(Vec::is_empty))
+        {
+            node.insert("DATA".into(), Value::Object(Map::new()));
+        }
+        if let Some(Value::Object(children)) = node.get_mut("CHILDREN") {
+            let list = std::mem::take(children)
+                .into_iter()
+                .map(|(_, c)| c)
+                .collect();
+            node.insert("CHILDREN".into(), Value::Array(list));
+        }
+        if let Some(Value::Array(children)) = node.get_mut("CHILDREN") {
+            children.iter_mut().for_each(normalize);
+        }
+    }
+    fn remap(
+        node: &mut crate::discount::model::Node,
+        directories: &HashMap<i64, i64>,
+        by_xml_id: &HashMap<(i64, &str), i64>,
+    ) {
+        if let Some(hl) = crate::discount::model::prop_class(&node.class_id)
+            .and_then(|(_, field)| directories.get(&field))
+        {
+            let map = |v: &mut Value| {
+                if let Some(id) = v
+                    .as_str()
+                    .and_then(|code| by_xml_id.get(&(*hl, code.trim())))
+                {
+                    *v = Value::from(*id);
+                }
+            };
+            match node.data.get_mut("value") {
+                Some(Value::Array(items)) => items.iter_mut().for_each(map),
+                Some(v) => map(v),
+                None => {}
+            }
+        }
+        for child in &mut node.children {
+            remap(child, directories, by_xml_id);
+        }
+    }
+    let mut value = php_unserialize(raw)?;
+    normalize(&mut value);
+    let mut node: crate::discount::model::Node =
+        serde_json::from_value(value).map_err(|e| format!("не дерево правила: {e}"))?;
+    remap(&mut node, directories, by_xml_id);
+    Ok(node)
+}
+
+/// Группа Битрикса «Все пользователи (в том числе неавторизованные)»: правило для всех.
+const BITRIX_EVERYONE_GROUP: i64 = 2;
+
+/// Правила работы с корзиной и купоны обновляются по id Битрикса; группы правил
+/// перезаписываются. Группы и пользователи — по `external_id` (`bitrix:<ID>`). Возвращает
+/// предупреждения (они же — в журнале): что не перенесено и почему.
+async fn write_discounts(tx: &mut sqlx::PgConnection, data: &Data) -> anyhow::Result<Vec<String>> {
+    use crate::discount::model::{CouponKind, unsupported_classes};
+    let d = &data.discounts;
+    let mut warnings = Vec::new();
+    if !d.catalog.is_empty() {
+        let list: Vec<String> = d
+            .catalog
+            .iter()
+            .map(|(id, name)| format!("{id} «{name}»"))
+            .collect();
+        warnings.push(format!(
+            "старые скидки каталога (b_catalog_discount) не переносятся: {}",
+            list.join(", ")
+        ));
+    }
+    let directories: HashMap<i64, i64> = data
+        .properties
+        .iter()
+        .filter(|p| p.directory)
+        .filter_map(|p| Some((p.id, p.link_collection_id?)))
+        .collect();
+    let by_xml_id: HashMap<(i64, &str), i64> = data
+        .elements
+        .iter()
+        .filter(|e| !e.xml_id.is_empty())
+        .map(|e| ((e.collection_id, e.xml_id.trim()), e.id))
+        .collect();
+    let group_ids: HashMap<String, i64> = sqlx::query_as::<_, (String, i64)>(
+        "SELECT external_id, id FROM groups WHERE external_id LIKE 'bitrix:%'",
+    )
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .collect();
+    let mut imported = HashSet::new();
+    for r in &d.rules {
+        let trees = discount_tree(&r.conditions, &directories, &by_xml_id)
+            .and_then(|c| Ok((c, discount_tree(&r.actions, &directories, &by_xml_id)?)));
+        let (conditions, actions) = match trees {
+            Ok(t) => t,
+            Err(e) => {
+                warnings.push(format!("правило {} «{}» не перенесено: {e}", r.id, r.name));
+                continue;
+            }
+        };
+        let bitrix_groups: Vec<i64> = d
+            .groups
+            .iter()
+            .filter(|(rule, _)| *rule == r.id)
+            .map(|(_, g)| *g)
+            .collect();
+        let everyone = bitrix_groups.contains(&BITRIX_EVERYONE_GROUP);
+        let mut groups: Vec<i64> = Vec::new();
+        let mut lost: Vec<i64> = Vec::new();
+        if !everyone {
+            for g in &bitrix_groups {
+                match group_ids.get(&format!("bitrix:{g}")) {
+                    Some(id) => groups.push(*id),
+                    None => lost.push(*g),
+                }
+            }
+        }
+        // Ограничение по группам, которых нет в CMS: выключаем, а не открываем всем
+        let mut active = r.active;
+        if !lost.is_empty() {
+            if groups.is_empty() && active {
+                active = false;
+                warnings.push(format!(
+                    "правило {} «{}» выключено: группы Битрикса {lost:?} не перенесены",
+                    r.id, r.name
+                ));
+            } else {
+                warnings.push(format!(
+                    "правило {} «{}»: группы Битрикса {lost:?} не перенесены",
+                    r.id, r.name
+                ));
+            }
+        }
+        let unsupported = unsupported_classes(&conditions, &actions).join(",");
+        sqlx::query(
+            "INSERT INTO discounts (id, name, active, active_from, active_to, priority, sort,
+                                    last_discount, last_level_discount, use_coupons, conditions,
+                                    actions, unsupported, xml_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+             ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, active = EXCLUDED.active,
+                 active_from = EXCLUDED.active_from, active_to = EXCLUDED.active_to,
+                 priority = EXCLUDED.priority, sort = EXCLUDED.sort,
+                 last_discount = EXCLUDED.last_discount,
+                 last_level_discount = EXCLUDED.last_level_discount,
+                 use_coupons = EXCLUDED.use_coupons, conditions = EXCLUDED.conditions,
+                 actions = EXCLUDED.actions, unsupported = EXCLUDED.unsupported,
+                 xml_id = EXCLUDED.xml_id, updated_at = now()",
+        )
+        .bind(r.id)
+        .bind(&r.name)
+        .bind(active)
+        .bind(r.active_from)
+        .bind(r.active_to)
+        .bind(r.priority)
+        .bind(r.sort)
+        .bind(r.last_discount)
+        .bind(r.last_level_discount)
+        .bind(r.use_coupons)
+        .bind(sqlx::types::Json(&conditions))
+        .bind(sqlx::types::Json(&actions))
+        .bind(&unsupported)
+        .bind(r.xml_id.trim())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM discount_groups WHERE discount_id = $1")
+            .bind(r.id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO discount_groups (discount_id, group_id)
+             SELECT $1, unnest($2::bigint[]) ON CONFLICT DO NOTHING",
+        )
+        .bind(r.id)
+        .bind(&groups)
+        .execute(&mut *tx)
+        .await?;
+        imported.insert(r.id);
+    }
+
+    let user_ids: HashMap<String, i64> = sqlx::query_as::<_, (String, i64)>(
+        "SELECT external_id, id FROM users WHERE external_id LIKE 'bitrix:%'",
+    )
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .collect();
+    // Код купона уникален: занятый купоном с другим id не перезаписываем
+    let taken: HashMap<String, i64> =
+        sqlx::query_as::<_, (String, i64)>("SELECT coupon, id FROM discount_coupons")
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect();
+    let mut seen = HashSet::new();
+    for c in &d.coupons {
+        let code = c.coupon.trim();
+        let skip = |why: &str| format!("купон {} «{code}» не перенесён: {why}", c.id);
+        if !imported.contains(&c.discount_id) {
+            warnings.push(skip(&format!("правило {} не перенесено", c.discount_id)));
+            continue;
+        }
+        let Some(kind) = CouponKind::from_bitrix(c.kind) else {
+            warnings.push(skip(&format!("неизвестный тип {}", c.kind)));
+            continue;
+        };
+        if code.is_empty() || !seen.insert(code) || taken.get(code).is_some_and(|id| *id != c.id) {
+            warnings.push(skip("код пуст или уже занят"));
+            continue;
+        }
+        let user_id = match c.user_id {
+            None => None,
+            Some(u) => match user_ids.get(&format!("bitrix:{u}")) {
+                Some(id) => Some(*id),
+                // Купон пользователя не должен стать общим
+                None => {
+                    warnings.push(skip(&format!("пользователь Битрикса {u} не перенесён")));
+                    continue;
+                }
+            },
+        };
+        sqlx::query(
+            "INSERT INTO discount_coupons (id, discount_id, coupon, active, active_from, active_to,
+                                           kind, max_use, use_count, user_id, description)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             ON CONFLICT (id) DO UPDATE SET discount_id = EXCLUDED.discount_id,
+                 coupon = EXCLUDED.coupon, active = EXCLUDED.active,
+                 active_from = EXCLUDED.active_from, active_to = EXCLUDED.active_to,
+                 kind = EXCLUDED.kind, max_use = EXCLUDED.max_use, use_count = EXCLUDED.use_count,
+                 user_id = EXCLUDED.user_id, description = EXCLUDED.description",
+        )
+        .bind(c.id)
+        .bind(c.discount_id)
+        .bind(code)
+        .bind(c.active)
+        .bind(c.active_from)
+        .bind(c.active_to)
+        .bind(kind.as_str())
+        .bind(c.max_use.max(0))
+        .bind(c.use_count.max(0))
+        .bind(user_id)
+        .bind(&c.description)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for w in &warnings {
+        tracing::warn!("перенос из Битрикса: {w}");
+    }
+    Ok(warnings)
 }
 
 /// Код блока формы по названию группы свойств — как эвристика модуля bxapi.
@@ -2421,6 +2851,7 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
     write_catalog(&mut *tx, &data.catalog).await?;
     write_sku(&mut *tx, data, props).await?;
     write_sale(&mut *tx, &data.sale).await?;
+    write_discounts(&mut *tx, data).await?;
 
     // Последовательности — после максимальных перенесённых id
     for (table, seq) in [
@@ -2442,6 +2873,8 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
         ("order_property_variants", "order_property_variants_id_seq"),
         ("deliveries", "deliveries_id_seq"),
         ("pay_systems", "pay_systems_id_seq"),
+        ("discounts", "discounts_id_seq"),
+        ("discount_coupons", "discount_coupons_id_seq"),
     ] {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT setval('{seq}', GREATEST((SELECT MAX(id) FROM {table}), 1))"
@@ -2712,6 +3145,97 @@ async fn read_sale(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
             sort: int_col(&row, 5).unwrap_or(100) as i32,
             api_type: pay_api_type(&str_col(&row, 6)),
             group_ids,
+        });
+    }
+    Ok(())
+}
+
+/// Правила работы с корзиной (`b_sale_discount`), их группы и купоны; из `b_catalog_discount` —
+/// только id и названия для предупреждения.
+async fn read_discounts(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
+    let d = &mut data.discounts;
+    if mysql_table_exists(my, "b_catalog_discount").await? {
+        for row in sqlx::query(
+            "SELECT CAST(ID AS SIGNED), CAST(IFNULL(NAME, '') AS CHAR) FROM b_catalog_discount
+             ORDER BY ID",
+        )
+        .fetch_all(my)
+        .await?
+        {
+            d.catalog.push((
+                int_col(&row, 0).context("b_catalog_discount.ID")?,
+                str_col(&row, 1),
+            ));
+        }
+    }
+    if !mysql_table_exists(my, "b_sale_discount").await? {
+        return Ok(());
+    }
+    let date = |row: &sqlx::mysql::MySqlRow, i: usize| bitrix_date(&str_col(row, i));
+    for row in sqlx::query(
+        "SELECT CAST(ID AS SIGNED), CAST(IFNULL(NAME, '') AS CHAR), CAST(ACTIVE AS CHAR),
+                CAST(ACTIVE_FROM AS CHAR), CAST(ACTIVE_TO AS CHAR),
+                CAST(IFNULL(PRIORITY, 1) AS SIGNED), CAST(IFNULL(SORT, 100) AS SIGNED),
+                CAST(IFNULL(LAST_DISCOUNT, 'N') AS CHAR),
+                CAST(IFNULL(LAST_LEVEL_DISCOUNT, 'N') AS CHAR),
+                CAST(IFNULL(USE_COUPONS, 'N') AS CHAR), CAST(IFNULL(CONDITIONS, '') AS CHAR),
+                CAST(IFNULL(ACTIONS, '') AS CHAR), CAST(IFNULL(XML_ID, '') AS CHAR)
+         FROM b_sale_discount ORDER BY ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        d.rules.push(DiscountRow {
+            id: int_col(&row, 0).context("b_sale_discount.ID")?,
+            name: str_col(&row, 1),
+            active: str_col(&row, 2) == "Y",
+            active_from: date(&row, 3),
+            active_to: date(&row, 4),
+            priority: int_col(&row, 5).unwrap_or(1) as i32,
+            sort: int_col(&row, 6).unwrap_or(100) as i32,
+            last_discount: str_col(&row, 7) == "Y",
+            last_level_discount: str_col(&row, 8) == "Y",
+            use_coupons: str_col(&row, 9) == "Y",
+            conditions: str_col(&row, 10),
+            actions: str_col(&row, 11),
+            xml_id: str_col(&row, 12),
+        });
+    }
+    // ACTIVE здесь — копия активности правила, группы переносятся все
+    for row in sqlx::query(
+        "SELECT CAST(DISCOUNT_ID AS SIGNED), CAST(GROUP_ID AS SIGNED) FROM b_sale_discount_group
+         ORDER BY ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        if let (Some(rule), Some(group)) = (id_col(&row, 0), id_col(&row, 1)) {
+            d.groups.push((rule, group));
+        }
+    }
+    for row in sqlx::query(
+        "SELECT CAST(ID AS SIGNED), CAST(DISCOUNT_ID AS SIGNED), CAST(ACTIVE AS CHAR),
+                CAST(ACTIVE_FROM AS CHAR), CAST(ACTIVE_TO AS CHAR), CAST(COUPON AS CHAR),
+                CAST(TYPE AS SIGNED), CAST(IFNULL(MAX_USE, 0) AS SIGNED),
+                CAST(IFNULL(USE_COUNT, 0) AS SIGNED), CAST(IFNULL(USER_ID, 0) AS SIGNED),
+                CAST(IFNULL(DESCRIPTION, '') AS CHAR)
+         FROM b_sale_discount_coupon ORDER BY ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        d.coupons.push(CouponRow {
+            id: int_col(&row, 0).context("b_sale_discount_coupon.ID")?,
+            discount_id: int_col(&row, 1).unwrap_or(0),
+            active: str_col(&row, 2) == "Y",
+            active_from: date(&row, 3),
+            active_to: date(&row, 4),
+            coupon: str_col(&row, 5),
+            kind: int_col(&row, 6).unwrap_or(0),
+            max_use: int_col(&row, 7).unwrap_or(0) as i32,
+            use_count: int_col(&row, 8).unwrap_or(0) as i32,
+            user_id: id_col(&row, 9),
+            description: str_col(&row, 10),
         });
     }
     Ok(())
@@ -4084,5 +4608,404 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(petr, "issued");
+    }
+    /// `ACTIONS` правила №24 трансопта «+10%» из `b_sale_discount`.
+    const RULE24_ACTIONS: &str = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:1:{s:3:"All";s:3:"AND";}s:8:"CHILDREN";a:1:{i:0;a:3:{s:8:"CLASS_ID";s:14:"ActSaleBsktGrp";s:4:"DATA";a:6:{s:4:"Type";s:5:"Extra";s:5:"Value";d:10;s:4:"Unit";s:4:"Perc";s:3:"Max";i:0;s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:1:{i:0;a:2:{s:8:"CLASS_ID";s:15:"CondIBProp:4:55";s:4:"DATA";a:2:{s:5:"logic";s:5:"Equal";s:5:"value";i:32;}}}}}}"#;
+    const RULE24_CONDITIONS: &str = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:2:{s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:0:{}}"#;
+
+    #[test]
+    fn php_unserialize_bitrix_rule() {
+        use serde_json::json;
+        assert_eq!(
+            php_unserialize(RULE24_ACTIONS).unwrap(),
+            json!({
+                "CLASS_ID": "CondGroup",
+                "DATA": {"All": "AND"},
+                "CHILDREN": [{
+                    "CLASS_ID": "ActSaleBsktGrp",
+                    "DATA": {"Type": "Extra", "Value": 10.0, "Unit": "Perc", "Max": 0, "All": "AND", "True": "True"},
+                    "CHILDREN": [{"CLASS_ID": "CondIBProp:4:55", "DATA": {"logic": "Equal", "value": 32}}]
+                }]
+            })
+        );
+        assert_eq!(
+            php_unserialize(RULE24_CONDITIONS).unwrap(),
+            json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": []})
+        );
+        // Ключи не 0..n — объект; длина строки — в байтах; b:, N;, отрицательные и дробные числа
+        assert_eq!(
+            php_unserialize(
+                r#"a:5:{i:1;s:12:"Скидка";i:0;b:1;s:1:"n";N;s:1:"m";i:-7;s:1:"f";d:0.5;}"#
+            )
+            .unwrap(),
+            json!({"1": "Скидка", "0": true, "n": null, "m": -7, "f": 0.5})
+        );
+        assert_eq!(
+            php_unserialize("a:2:{i:0;i:38581;i:1;s:2:\"12\";}").unwrap(),
+            json!([38581, "12"])
+        );
+        assert_eq!(php_unserialize(" b:0; ").unwrap(), json!(false));
+    }
+
+    #[test]
+    fn php_unserialize_rejects_garbage() {
+        for raw in [
+            "",
+            "garbage",
+            "a:3:{s:8:\"CLASS_ID\";",
+            // Длина строки не сходится
+            "s:5:\"abc\";",
+            // Элементов меньше, чем объявлено
+            "a:2:{i:0;i:1;}",
+            // Хвост после значения
+            "i:1;i:2;",
+            "i:x;",
+            "d:INF;",
+            "b:2;",
+            // Ключ — массив
+            "a:1:{a:0:{}i:1;}",
+            // Объекты PHP не разбираем
+            "O:8:\"stdClass\":0:{}",
+        ] {
+            assert!(php_unserialize(raw).is_err(), "{raw}");
+        }
+    }
+
+    #[sqlx::test]
+    async fn import_carries_discounts(db: PgPool) {
+        use chrono::TimeZone;
+        use serde_json::json;
+        // Группы и пользователь уже перенесены: id в CMS другие, чем в Битриксе
+        sqlx::query(
+            "INSERT INTO groups (code, name, external_id) VALUES
+                 ('other', 'Прочие', NULL), ('plus10', '+10%', 'bitrix:16')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO users (login, password_hash, external_id) VALUES
+                 ('first', 'x', NULL), ('ivan', 'x', 'bitrix:10')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let group16: i64 =
+            sqlx::query_scalar("SELECT id FROM groups WHERE external_id = 'bitrix:16'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let ivan: i64 = sqlx::query_scalar("SELECT id FROM users WHERE login = 'ivan'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+
+        let rule = |id: i64, name: &str| DiscountRow {
+            id,
+            name: name.into(),
+            active: true,
+            active_from: None,
+            active_to: None,
+            priority: 1,
+            sort: 100,
+            last_discount: false,
+            last_level_discount: false,
+            use_coupons: false,
+            conditions: RULE24_CONDITIONS.into(),
+            actions: RULE24_ACTIONS.into(),
+            xml_id: String::new(),
+        };
+        let from = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2026, 12, 31, 21, 0, 0).unwrap();
+        let coupon = |id: i64, code: &str, kind: i64| CouponRow {
+            id,
+            discount_id: 28,
+            active: true,
+            active_from: None,
+            active_to: None,
+            coupon: code.into(),
+            kind,
+            max_use: 0,
+            use_count: 0,
+            user_id: None,
+            description: String::new(),
+        };
+        let mut data = Data {
+        discounts: Discounts {
+            rules: vec![
+                DiscountRow {
+                    last_discount: true,
+                    xml_id: "plus10".into(),
+                    ..rule(24, "+10%")
+                },
+                // Накопительная скидка (3б) — переносится, но не применяется
+                DiscountRow {
+                    conditions: r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:2:{s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:1:{i:0;a:3:{s:8:"CLASS_ID";s:19:"CondCumulativeGroup";s:4:"DATA";a:2:{s:5:"logic";s:4:"EqGr";s:5:"Value";d:1000;}s:8:"CHILDREN";a:0:{}}}}"#.into(),
+                    priority: 5,
+                    sort: 50,
+                    last_level_discount: true,
+                    ..rule(27, "Накопительная")
+                },
+                DiscountRow {
+                    use_coupons: true,
+                    active: false,
+                    active_from: Some(from),
+                    active_to: Some(to),
+                    ..rule(28, "По купону")
+                },
+                // Только для группы, которой нет в CMS: не должна открыться всем
+                rule(29, "Пропавшая группа"),
+                // Группа 2 Битрикса — «все пользователи»
+                rule(30, "Всем"),
+                // Неразбираемые условия — правило пропускается
+                DiscountRow {
+                    conditions: "a:1:{".into(),
+                    ..rule(31, "Сломанное")
+                },
+            ],
+            groups: vec![(24, 16), (29, 77), (30, 2), (30, 16)],
+            coupons: vec![
+                CouponRow {
+                    active_from: Some(from),
+                    active_to: Some(to),
+                    description: "на позицию".into(),
+                    ..coupon(1, "BASKET-1", 1)
+                },
+                CouponRow {
+                    user_id: Some(10),
+                    ..coupon(2, "ORDER-1", 2)
+                },
+                CouponRow {
+                    max_use: 5,
+                    use_count: 2,
+                    active: false,
+                    ..coupon(3, "MULTI-1", 4)
+                },
+                // Пользователь не перенесён — купон не становится общим
+                CouponRow {
+                    user_id: Some(999),
+                    ..coupon(4, "LOST-USER", 2)
+                },
+                // Неизвестный тип, купон пропущенного правила
+                coupon(5, "WEIRD", 3),
+                CouponRow {
+                    discount_id: 31,
+                    ..coupon(6, "BROKEN", 2)
+                },
+            ],
+            catalog: vec![(7, "Старая скидка каталога".into())],
+        },
+..Data::default()
+};
+
+        let props = resolve_properties(&mut data);
+        let mut tx = db.begin().await.unwrap();
+        write_all(&mut tx, &data, &props).await.unwrap();
+        tx.commit().await.unwrap();
+
+        type R = (
+            i64,
+            String,
+            bool,
+            i32,
+            i32,
+            bool,
+            bool,
+            bool,
+            String,
+            String,
+        );
+        let rules: Vec<R> = sqlx::query_as(
+            "SELECT id, name, active, priority, sort, last_discount, last_level_discount,
+                    use_coupons, unsupported, xml_id FROM discounts ORDER BY id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        let r = |id: i64,
+                 name: &str,
+                 active: bool,
+                 priority: i32,
+                 sort: i32,
+                 flags: [bool; 3],
+                 unsupported: &str,
+                 xml_id: &str|
+         -> R {
+            (
+                id,
+                name.into(),
+                active,
+                priority,
+                sort,
+                flags[0],
+                flags[1],
+                flags[2],
+                unsupported.into(),
+                xml_id.into(),
+            )
+        };
+        assert_eq!(
+            rules,
+            vec![
+                r(24, "+10%", true, 1, 100, [true, false, false], "", "plus10"),
+                r(
+                    27,
+                    "Накопительная",
+                    true,
+                    5,
+                    50,
+                    [false, true, false],
+                    "CondCumulativeGroup",
+                    ""
+                ),
+                r(28, "По купону", false, 1, 100, [false, false, true], "", ""),
+                r(29, "Пропавшая группа", false, 1, 100, [false; 3], "", ""),
+                r(30, "Всем", true, 1, 100, [false; 3], "", ""),
+            ]
+        );
+        let (conditions, actions, from_db, to_db): (
+            Value,
+            Value,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+        ) = sqlx::query_as(
+            "SELECT conditions, actions, active_from, active_to FROM discounts WHERE id = 24",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(conditions, php_unserialize(RULE24_CONDITIONS).unwrap());
+        let actions: crate::discount::model::Node = serde_json::from_value(actions).unwrap();
+        assert_eq!(actions.children[0].data["Value"], json!(10.0));
+        assert_eq!(actions.children[0].children[0].data["value"], json!(32));
+        assert_eq!((from_db, to_db), (None, None));
+        let dates: (Option<DateTime<Utc>>, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT active_from, active_to FROM discounts WHERE id = 28")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(dates, (Some(from), Some(to)));
+
+        let groups: Vec<(i64, i64)> =
+            sqlx::query_as("SELECT discount_id, group_id FROM discount_groups ORDER BY 1, 2")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(groups, vec![(24, group16)]);
+
+        type C = (
+            i64,
+            i64,
+            String,
+            bool,
+            String,
+            i32,
+            i32,
+            Option<i64>,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+            String,
+        );
+        let coupons: Vec<C> = sqlx::query_as(
+            "SELECT id, discount_id, coupon, active, kind, max_use, use_count, user_id,
+                    active_from, active_to, description FROM discount_coupons ORDER BY id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            coupons,
+            vec![
+                (
+                    1,
+                    28,
+                    "BASKET-1".into(),
+                    true,
+                    "basket".into(),
+                    0,
+                    0,
+                    None,
+                    Some(from),
+                    Some(to),
+                    "на позицию".into()
+                ),
+                (
+                    2,
+                    28,
+                    "ORDER-1".into(),
+                    true,
+                    "order".into(),
+                    0,
+                    0,
+                    Some(ivan),
+                    None,
+                    None,
+                    String::new()
+                ),
+                (
+                    3,
+                    28,
+                    "MULTI-1".into(),
+                    false,
+                    "multi".into(),
+                    5,
+                    2,
+                    None,
+                    None,
+                    None,
+                    String::new()
+                ),
+            ]
+        );
+
+        // Повторный перенос не дублирует; старые скидки каталога — только предупреждение
+        let mut tx = db.begin().await.unwrap();
+        let warnings = write_discounts(&mut tx, &data).await.unwrap();
+        tx.commit().await.unwrap();
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM discounts), (SELECT count(*) FROM discount_groups),
+                    (SELECT count(*) FROM discount_coupons)",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(counts, (5, 1, 3));
+        let joined = warnings.join("\n");
+        assert!(joined.contains("b_catalog_discount"), "{joined}");
+        assert!(joined.contains("7 «Старая скидка каталога»"), "{joined}");
+        for needle in ["29", "31", "LOST-USER", "WEIRD", "BROKEN"] {
+            assert!(joined.contains(needle), "{needle}: {joined}");
+        }
+        // Новые правила и купоны после перенесённых id
+        let next: (i64, i64) = sqlx::query_as(
+            "SELECT nextval('discounts_id_seq'), nextval('discount_coupons_id_seq')",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(next, (31, 4));
+    }
+
+    #[test]
+    fn discount_tree_maps_directory_values() {
+        use serde_json::json;
+        let raw = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:0:{}s:8:"CHILDREN";a:2:{i:0;a:2:{s:8:"CLASS_ID";s:16:"CondIBProp:4:200";s:4:"DATA";a:2:{s:5:"logic";s:5:"Equal";s:5:"value";a:2:{i:0;s:3:"red";i:1;s:4:"none";}}}i:2;a:2:{s:8:"CLASS_ID";s:16:"CondIBProp:4:201";s:4:"DATA";a:2:{s:5:"logic";s:5:"Equal";s:5:"value";s:3:"red";}}}}"#;
+        let directories = HashMap::from([(200, 101)]);
+        let by_xml_id = HashMap::from([((101, "red"), 5001)]);
+        let node = discount_tree(raw, &directories, &by_xml_id).unwrap();
+        assert_eq!(
+            serde_json::to_value(&node).unwrap(),
+            json!({
+                "CLASS_ID": "CondGroup",
+                "DATA": {},
+                "CHILDREN": [
+                    // Справочник: внешний код → id записи; не найденный остаётся как есть
+                    {"CLASS_ID": "CondIBProp:4:200", "DATA": {"logic": "Equal", "value": [5001, "none"]}, "CHILDREN": []},
+                    // Не справочник — без изменений; ключи CHILDREN не по порядку — список
+                    {"CLASS_ID": "CondIBProp:4:201", "DATA": {"logic": "Equal", "value": "red"}, "CHILDREN": []}
+                ]
+            })
+        );
+        assert!(discount_tree("a:0:{}", &directories, &by_xml_id).is_err());
     }
 }
