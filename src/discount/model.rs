@@ -532,7 +532,7 @@ fn choice(
 }
 
 /// Число как в PHP-serialize: `i:`/`d:` или числовая строка.
-fn as_num(v: &Value) -> Option<f64> {
+pub(super) fn as_num(v: &Value) -> Option<f64> {
     match v {
         Value::Number(n) => n.as_f64(),
         Value::String(s) => s.trim().parse().ok(),

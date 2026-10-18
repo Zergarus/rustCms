@@ -159,6 +159,21 @@ pub trait OrderImportHook: Send + Sync {
     ) -> BoxFuture<'a, anyhow::Result<()>>;
 }
 
+/// Свои классы условий правил работы с корзиной (как обработчики `OnCondSaleControlBuildList`
+/// Битрикса). `item` — позиция, когда условие стоит в группе по позициям или в фильтре
+/// действия; `None` — условие заказа. `None` в ответе — условие не выполнено.
+pub trait DiscountConditionHook: Send + Sync {
+    fn class_ids(&self) -> &[&'static str];
+
+    fn check(
+        &self,
+        class_id: &str,
+        data: &Map<String, Value>,
+        ctx: &crate::discount::context::Context,
+        item: Option<&crate::discount::context::CtxItem>,
+    ) -> Option<bool>;
+}
+
 /// Выбор города (`bxapi.location`).
 pub struct LocationConfig {
     /// Типы местоположений в поиске (`CITY`, `VILLAGE`...).
@@ -293,6 +308,9 @@ pub struct Project {
     pub order_export_hook: Option<Arc<dyn OrderExportHook>>,
     /// Свой разбор документов заказа из 1С (`None` — только штатный).
     pub order_import_hook: Option<Arc<dyn OrderImportHook>>,
+    /// Свои классы условий скидок (`None` — только штатные).
+    #[allow(dead_code)] // читает расчёт скидок корзины (следующие задачи)
+    pub discount_condition_hook: Option<Arc<dyn DiscountConditionHook>>,
     pub cart: CartConfig,
     pub order: OrderConfig,
     pub profile: ProfileConfig,
@@ -397,6 +415,7 @@ impl Default for Project {
             import_hook: None,
             order_export_hook: None,
             order_import_hook: None,
+            discount_condition_hook: None,
             cart: CartConfig::default(),
             order: OrderConfig::default(),
             profile: ProfileConfig::default(),
