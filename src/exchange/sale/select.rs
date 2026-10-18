@@ -13,7 +13,6 @@ use super::document::{
 };
 use super::settings::{CONTRAGENT_CODES, Domain, MapEntry, MapSource, SaleSettings, load_map};
 use crate::bxapi::project::OrderExportHook;
-use crate::discount::model::round2;
 
 /// Заказы одного `query` и метка для `success`.
 #[derive(Debug, Clone, PartialEq)]
@@ -598,7 +597,7 @@ fn export_item(it: &ItemRow) -> ExportItem {
         price: it.price,
         quantity: it.quantity,
         sum: it.price * it.quantity,
-        discount: round2(it.discount_price * it.quantity),
+        discount: it.discount_price,
     }
 }
 
@@ -1684,7 +1683,7 @@ mod tests {
         assert_eq!(o.items[0].discount, 0.0);
         assert_eq!(o.discount, 0.0);
 
-        // Скидка 6.70 на единицу × 3 шт.; скидка на доставку — уже в цене отгрузки
+        // Скидка 6.70 на единицу (3 шт.) — как есть; скидка на доставку — уже в цене отгрузки
         exec(
             &db,
             "UPDATE cart_items SET quantity = 3, base_price = 40, discount_price = 6.7, price = 33.3
@@ -1700,8 +1699,8 @@ mod tests {
         .await;
         let o = one(&db, id).await;
         let it = &o.items[0];
-        assert_eq!((it.price, it.quantity, it.discount), (33.3, 3.0, 20.1));
-        assert_eq!(o.shipments[0].items[0].discount, 20.1);
+        assert_eq!((it.price, it.quantity, it.discount), (33.3, 3.0, 6.7));
+        assert_eq!(o.shipments[0].items[0].discount, 6.7);
         assert_eq!(o.discount, 0.0);
 
         // Наценка — отрицательная скидка, как есть (элемент не выводится)
@@ -1711,6 +1710,6 @@ mod tests {
             id,
         )
         .await;
-        assert_eq!(one(&db, id).await.items[0].discount, -6.0);
+        assert_eq!(one(&db, id).await.items[0].discount, -2.0);
     }
 }

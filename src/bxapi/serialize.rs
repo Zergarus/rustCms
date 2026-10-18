@@ -476,6 +476,9 @@ impl Loaded {
 
     /// Цены со скидкой для `catalogPrice`: у товара с ценой «от» — скидка того предложения.
     async fn load_discounts(&mut self, env: &Env<'_>) -> Result<(), BxError> {
+        let Some(rules) = crate::discount::catalog::CatalogRules::load(&env.state.db).await? else {
+            return Ok(());
+        };
         let sources: Vec<(i64, i64, f64)> = self
             .prices
             .iter()
@@ -487,13 +490,14 @@ impl Loaded {
         let mut products: Vec<(i64, f64)> = sources.iter().map(|(_, src, p)| (*src, *p)).collect();
         products.sort_by_key(|(id, _)| *id);
         products.dedup_by_key(|(id, _)| *id);
-        let discounted = crate::discount::catalog::discount_prices(
-            &env.state.db,
-            env.project.discount_condition_hook.as_deref(),
-            env.user_id,
-            &products,
-        )
-        .await?;
+        let discounted = rules
+            .prices(
+                &env.state.db,
+                env.project.discount_condition_hook.as_deref(),
+                env.user_id,
+                &products,
+            )
+            .await?;
         self.discounts = sources
             .into_iter()
             .filter_map(|(id, src, _)| Some((id, *discounted.get(&src)?)))

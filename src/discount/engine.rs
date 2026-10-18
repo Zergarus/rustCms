@@ -480,13 +480,14 @@ pub fn catalog_price(
     group_ids: &[i64],
     now: DateTime<Utc>,
 ) -> Option<f64> {
-    catalog_price_with(rules, item, group_ids, now, None)
+    catalog_price_with(rules, item, None, group_ids, now, None)
 }
 
-/// [`catalog_price`] с классами условий проекта.
+/// [`catalog_price`] для посетителя `user_id` (его видят условия проекта `hook`).
 pub fn catalog_price_with(
     rules: &[&Rule],
     item: &CtxItem,
+    user_id: Option<i64>,
     group_ids: &[i64],
     now: DateTime<Utc>,
     hook: Hook,
@@ -499,7 +500,7 @@ pub fn catalog_price_with(
             quantity: 1.0,
             ..item.clone()
         }],
-        user_id: None,
+        user_id,
         group_ids: group_ids.to_vec(),
         coupons: Vec::new(),
         order: Default::default(),
@@ -1463,5 +1464,44 @@ mod tests {
         // Наценка тоже меняет цену
         let extra = rule(5, vec![bskt("Extra", 10.0, "Perc", 0.0, vec![])]);
         assert_eq!(catalog_price(&[&extra], &it, &[], now()), Some(1100.0));
+    }
+
+    struct UserHook;
+
+    impl DiscountConditionHook for UserHook {
+        fn class_ids(&self) -> &[&'static str] {
+            &["CondProjUser"]
+        }
+
+        fn check(
+            &self,
+            _: &str,
+            data: &Map<String, Value>,
+            ctx: &Context,
+            _: Option<&CtxItem>,
+        ) -> Option<bool> {
+            Some(ctx.user_id == data["user"].as_i64())
+        }
+    }
+
+    #[test]
+    fn catalog_price_hook_sees_user() {
+        let mut r = rule(1, vec![bskt("Discount", 10.0, "Perc", 0.0, vec![])]);
+        r.conditions = node(
+            json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": [
+                {"CLASS_ID": "CondProjUser", "DATA": {"user": 5}}
+            ]}),
+        );
+        let it = item(1, 1000.0, 1.0);
+        let hook: Hook = Some(&UserHook);
+        assert_eq!(
+            catalog_price_with(&[&r], &it, Some(5), &[], now(), hook),
+            Some(900.0)
+        );
+        assert_eq!(
+            catalog_price_with(&[&r], &it, Some(6), &[], now(), hook),
+            None
+        );
+        assert_eq!(catalog_price_with(&[&r], &it, None, &[], now(), hook), None);
     }
 }

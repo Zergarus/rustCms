@@ -130,7 +130,8 @@ pub struct ExportItem {
     pub price: f64,
     pub quantity: f64,
     pub sum: f64,
-    /// Сумма скидки позиции (скидка на единицу × количество); выводится при > 0, наценка — нет.
+    /// Скидка на единицу (`DISCOUNT_PRICE` позиции, `export.php:1755` пишет её как есть);
+    /// выводится при > 0, наценка — нет.
     pub discount: f64,
 }
 
@@ -1392,7 +1393,7 @@ mod tests {
     #[test]
     fn export_item_discount_element() {
         let mut o = canceled_guest();
-        o.items[0].discount = 20.1;
+        o.items[0].discount = 6.7;
         o.discount = 5.0;
         let path = format!(
             "{}/tests/fixtures/1c/sale/export_discount.xml",

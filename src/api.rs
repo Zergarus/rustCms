@@ -90,19 +90,24 @@ async fn fill_price_discount(
     if !collection.is_catalog || items.is_empty() {
         return Ok(());
     }
+    // Без правил товара — ни цен, ни данных записей: один запрос правил
+    let Some(rules) = crate::discount::catalog::CatalogRules::load(&state.db).await? else {
+        return Ok(());
+    };
     let ids: Vec<i64> = items.iter().map(|i| i.id).collect();
     let prices = crate::catalog::load_prices(&state.db, &ids).await?;
     let base: Vec<(i64, f64)> = ids
         .iter()
         .filter_map(|id| Some((*id, crate::catalog::main_price(prices.get(id)?)?.price)))
         .collect();
-    let discounted = crate::discount::catalog::discount_prices(
-        &state.db,
-        state.project.discount_condition_hook.as_deref(),
-        None,
-        &base,
-    )
-    .await?;
+    let discounted = rules
+        .prices(
+            &state.db,
+            state.project.discount_condition_hook.as_deref(),
+            None,
+            &base,
+        )
+        .await?;
     for item in items {
         item.price_discount = discounted.get(&item.id).copied();
     }

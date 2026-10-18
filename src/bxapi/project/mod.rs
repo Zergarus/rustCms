@@ -309,7 +309,6 @@ pub struct Project {
     /// Свой разбор документов заказа из 1С (`None` — только штатный).
     pub order_import_hook: Option<Arc<dyn OrderImportHook>>,
     /// Свои классы условий скидок (`None` — только штатные).
-    #[allow(dead_code)] // читает расчёт скидок корзины (следующие задачи)
     pub discount_condition_hook: Option<Arc<dyn DiscountConditionHook>>,
     /// Цена со скидкой в `catalogPrice` элементов (`discountValue`/`discountFormatted`, как
     /// `DISCOUNT_PRICE` у `GetOptimalPrice`); по умолчанию выключено — ответ как у модуля bxapi.
