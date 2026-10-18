@@ -33,8 +33,8 @@ CMS — универсальный шаблон под любой проект (
 
 - `discounts`: `id`, `name`, `active`, `active_from`, `active_to` (TIMESTAMPTZ NULL),
   `priority INT` (по умолчанию 1), `sort INT` (100), `last_discount BOOL` (прекратить
-  дальнейшее применение), `last_level_discount BOOL` (не применять правила с меньшим
-  приоритетом), `use_coupons BOOL` (только по купону), `conditions JSONB`, `actions JSONB`,
+  дальнейшее применение), `last_level_discount BOOL` (не применять остальные правила того же
+  уровня приоритета, как в Битриксе), `use_coupons BOOL` (только по купону), `conditions JSONB`, `actions JSONB`,
   `unsupported TEXT NOT NULL DEFAULT ''` (классы, которые движок не знает; правило с ними не
   применяется), `xml_id`, `created_at`, `updated_at`.
 - `discount_groups (discount_id, group_id)`; правило без групп — для всех.
@@ -92,8 +92,9 @@ CMS — универсальный шаблон под любой проект (
 3. Правило проверяет `conditions` по текущему состоянию корзины и применяет `actions` к
    текущим ценам (каждое следующее — от цены после предыдущих).
 4. `last_discount` у сработавшего правила останавливает всё дальнейшее;
-   `last_level_discount` — правила с меньшим приоритетом.
-5. Цена позиции не становится отрицательной; позиции с `custom_price` не участвуют.
+   `last_level_discount` — остальные правила того же приоритета (`discountbase.php`).
+5. Действие, после которого цена позиции стала бы отрицательной, к ней не применяется
+   (как Битрикс); позиции с `custom_price` не участвуют.
 6. Деньги округляются до копеек на каждом шаге, как `Sale\PriceMaths::roundPrecision`.
 
 Движок — чистая функция `discount::calculate(rules, &Context) -> DiscountResult` без БД:
