@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% set section = "discounts" %}
+{% block title %}Купоны — {{ rule_name }}{% endblock %}
+{% block content %}
+{% macro kind_select(current, kinds) %}
+<select name="kind">
+  {% for k in kinds %}<option value="{{ k[0] }}" {% if k[0] == current %}selected{% endif %}>{{ k[1] }}</option>{% endfor %}
+</select>
+{% endmacro %}
+<div class="breadcrumbs"><a href="/admin/discounts">Правила работы с корзиной</a> / <a href="/admin/discounts/{{ rule_id }}">{{ rule_name }}</a> /</div>
+<h1>Купоны <span class="muted count">{{ total }}</span></h1>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+
+<div class="grid-2">
+  <form class="card form" method="post" action="/admin/discounts/{{ rule_id }}/coupons">
+    <h2>Добавить купон</h2>
+    {% if add_error %}<div class="alert">{{ add_error }}</div>{% endif %}
+    <label>Код <small>пусто — сгенерировать</small>
+      <input name="coupon" value="{{ add.coupon }}" maxlength="32">
+    </label>
+    <label>Тип {{ kind_select(add.kind, kinds) }}</label>
+    <label>Лимит использований <small>для многоразового; 0 — без лимита</small>
+      <input name="max_use" type="number" min="0" value="{{ add.max_use }}">
+    </label>
+    <div class="grid-2">
+      <label>Начало активности <input name="active_from" type="datetime-local" value="{{ add.active_from }}"></label>
+      <label>Окончание активности <input name="active_to" type="datetime-local" value="{{ add.active_to }}"></label>
+    </div>
+    <label>ID пользователя <small>пусто — любому покупателю</small>
+      <input name="user_id" value="{{ add.user_id }}">
+    </label>
+    <label>Описание <input name="description" value="{{ add.description }}"></label>
+    <div class="form-actions"><button class="btn primary" type="submit">Добавить</button></div>
+  </form>
+
+  <form class="card form" method="post" action="/admin/discounts/{{ rule_id }}/coupons/generate">
+    <h2>Сгенерировать купоны</h2>
+    {% if generate_error %}<div class="alert">{{ generate_error }}</div>{% endif %}
+    <div class="grid-2">
+      <label>Количество <small>от 1 до 10000</small>
+        <input name="count" type="number" min="1" max="10000" value="{{ generate.count }}">
+      </label>
+      <label>Префикс <small>перед 12 случайными символами A–Z, 0–9</small>
+        <input name="prefix" value="{{ generate.prefix }}" maxlength="20">
+      </label>
+    </div>
+    <label>Тип {{ kind_select(generate.kind, kinds) }}</label>
+    <label>Лимит использований <small>для многоразового; 0 — без лимита</small>
+      <input name="max_use" type="number" min="0" value="{{ generate.max_use }}">
+    </label>
+    <div class="grid-2">
+      <label>Начало активности <input name="active_from" type="datetime-local" value="{{ generate.active_from }}"></label>
+      <label>Окончание активности <input name="active_to" type="datetime-local" value="{{ generate.active_to }}"></label>
+    </div>
+    <div class="form-actions"><button class="btn primary" type="submit">Сгенерировать</button></div>
+  </form>
+</div>
+
+{% if coupons %}
+<div class="card table-wrap">
+  {% if total > coupons|length %}<p class="muted">Показаны последние {{ coupons|length }} из {{ total }}.</p>{% endif %}
+  <table>
+    <thead>
+      <tr><th>Купон</th><th>Тип</th><th>Активность</th><th>Использован</th><th>Период</th><th>Пользователь</th><th>Описание</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for c in coupons %}
+      <tr>
+        <td><code>{{ c.coupon }}</code></td>
+        <td>{% for k in kinds if k[0] == c.kind %}{{ k[1] }}{% endfor %}</td>
+        <td>
+          <form method="post" action="/admin/discounts/{{ rule_id }}/coupons/{{ c.id }}/active">
+            <input type="hidden" name="active" value="{{ 'false' if c.active else 'true' }}">
+            {% if c.active %}<span class="badge ok">активен</span>{% else %}<span class="badge">выключен</span>{% endif %}
+            <button class="link" type="submit">{{ "Выключить" if c.active else "Включить" }}</button>
+          </form>
+        </td>
+        <td>{{ c.use_count }}{% if c.max_use %} из {{ c.max_use }}{% endif %}</td>
+        <td class="small">{% if c.active_from %}с {{ c.active_from }}{% endif %}{% if c.active_to %} по {{ c.active_to }}{% endif %}{% if not c.active_from and not c.active_to %}<span class="muted">—</span>{% endif %}</td>
+        <td>{% if c.user_id %}<a href="/admin/users/{{ c.user_id }}">{{ c.login or c.user_id }}</a>{% else %}<span class="muted">любой</span>{% endif %}</td>
+        <td>{{ c.description }}</td>
+        <td class="actions">
+          {% if c.use_count == 0 %}
+          <form method="post" action="/admin/discounts/{{ rule_id }}/coupons/{{ c.id }}/delete" hx-confirm="Удалить купон {{ c.coupon }}?">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card empty"><p>Купонов пока нет.</p></div>
+{% endif %}
+{% endblock %}

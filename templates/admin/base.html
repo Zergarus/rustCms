@@ -10,6 +10,8 @@
     <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/>
   {%- elif name == "shop" -%}
     <circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M2 3h3l2.6 11.4a2 2 0 0 0 2 1.6h7.9a2 2 0 0 0 2-1.5L21 7H6"/>
+  {%- elif name == "discounts" -%}
+    <path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8Z"/><circle cx="7.5" cy="7.5" r="1.5"/>
   {%- elif name == "exchange" -%}
     <path d="M7 4 3 8l4 4"/><path d="M3 8h14"/><path d="m17 20 4-4-4-4"/><path d="M21 16H7"/>
   {%- elif name == "logout" -%}
@@ -36,6 +38,7 @@
     {"id": "dashboard", "url": "/admin", "label": "Рабочий стол", "show": true},
     {"id": "collections", "url": "/admin/collections", "label": "Коллекции", "show": user.can_see_collections},
     {"id": "shop", "url": "/admin/shop/orders" if "orders.manage" in user.permissions else "/admin/shop/stores", "label": "Магазин", "show": "shop.manage" in user.permissions or "orders.manage" in user.permissions},
+    {"id": "discounts", "url": "/admin/discounts", "label": "Скидки", "show": "discounts.manage" in user.permissions},
     {"id": "exchange", "url": "/admin/exchange", "label": "Обмен с 1С", "show": "exchange.1c" in user.permissions or "exchange.1c.sale" in user.permissions},
     {"id": "users", "url": "/admin/users", "label": "Пользователи", "show": "users.manage" in user.permissions},
     {"id": "groups", "url": "/admin/groups", "label": "Группы", "show": user.is_admin},

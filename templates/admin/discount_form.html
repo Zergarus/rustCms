@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% set section = "discounts" %}
+{% block title %}{% if rule_id %}{{ form.name }}{% else %}Новое правило{% endif %}{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/admin/discounts">Правила работы с корзиной</a> /</div>
+<div class="page-head">
+  <h1>{% if rule_id %}{{ form.name }}{% else %}Новое правило{% endif %}</h1>
+  {% if rule_id %}<a class="btn" href="/admin/discounts/{{ rule_id }}/coupons">Купоны <span class="muted">{{ coupons }}</span></a>{% endif %}
+</div>
+
+<form class="card form" method="post" action="{% if rule_id %}/admin/discounts/{{ rule_id }}{% else %}/admin/discounts{% endif %}">
+  {% if errors or tree_errors %}
+  <div class="alert">
+    Исправьте ошибки:
+    <ul>
+      {% for e in errors %}<li>{{ e }}</li>{% endfor %}
+      {% for e in tree_errors %}<li>{{ "Условия" if e.tree == "conditions" else "Действия" }}, элемент {{ e.path }}: {{ e.message }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  {% if unsupported %}
+  <div class="notice">Правило не применяется: неподдерживаемые элементы {{ unsupported|join(", ") }}. Удалите их, чтобы правило заработало.</div>
+  {% endif %}
+
+  <div class="grid-2">
+    <label>Название *
+      <input name="name" value="{{ form.name }}" required>
+    </label>
+    <label class="check">
+      <input type="checkbox" name="active" {% if form.active %}checked{% endif %}> Активно
+    </label>
+  </div>
+  <div class="grid-2">
+    <label>Начало активности
+      <input name="active_from" type="datetime-local" value="{{ form.active_from }}">
+    </label>
+    <label>Окончание активности
+      <input name="active_to" type="datetime-local" value="{{ form.active_to }}">
+    </label>
+  </div>
+  <div class="grid-2">
+    <label>Приоритет <small>больше — раньше</small>
+      <input name="priority" type="number" value="{{ form.priority }}">
+    </label>
+    <label>Сортировка <small>внутри приоритета</small>
+      <input name="sort" type="number" value="{{ form.sort }}">
+    </label>
+  </div>
+  <label class="check"><input type="checkbox" name="last_discount" {% if form.last_discount %}checked{% endif %}> Прекратить дальнейшее применение правил</label>
+  <label class="check"><input type="checkbox" name="last_level_discount" {% if form.last_level_discount %}checked{% endif %}> Не применять остальные правила этого уровня приоритета</label>
+  <label class="check"><input type="checkbox" name="use_coupons" {% if form.use_coupons %}checked{% endif %}> Только по купону</label>
+
+  <fieldset>
+    <legend>Группы пользователей</legend>
+    {% if groups %}
+    <p class="muted hint">Ни одной не отмечено — правило для всех.</p>
+    {% for g in groups %}
+    <label class="check"><input type="checkbox" name="group" value="{{ g[0] }}" {% if g[0] in form.groups %}checked{% endif %}> {{ g[1] }}</label>
+    {% endfor %}
+    {% else %}
+    <p class="muted hint">Групп нет — правило для всех.</p>
+    {% endif %}
+  </fieldset>
+
+  <fieldset>
+    <legend>Условия</legend>
+    <div class="discount-tree" data-tree="conditions"><p class="muted">Конструктор загружается…</p></div>
+    <input type="hidden" name="conditions" value="{{ form.conditions }}">
+  </fieldset>
+  <fieldset>
+    <legend>Действия</legend>
+    <div class="discount-tree" data-tree="actions"><p class="muted">Конструктор загружается…</p></div>
+    <input type="hidden" name="actions" value="{{ form.actions }}">
+  </fieldset>
+  <input type="hidden" id="discount-tree-data" value="{{ editor }}">
+
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/discounts">Отмена</a>
+  </div>
+</form>
+<script src="/admin/static/discount-tree.js"></script>
+{% endblock %}

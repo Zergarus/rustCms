@@ -2,6 +2,7 @@
 
 mod auth_pages;
 mod collections;
+mod discounts;
 mod exchange;
 mod groups;
 mod items;
@@ -214,6 +215,31 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route(
             "/shop/settings",
             get(shop::settings::form).post(shop::settings::save),
+        )
+        .route("/discounts", get(discounts::list).post(discounts::create))
+        .route("/discounts/new", get(discounts::new_form))
+        .route("/discounts/names", get(discounts::names_lookup))
+        .route(
+            "/discounts/{id}",
+            get(discounts::edit_form).post(discounts::update),
+        )
+        .route("/discounts/{id}/active", post(discounts::set_active))
+        .route("/discounts/{id}/delete", post(discounts::delete))
+        .route(
+            "/discounts/{id}/coupons",
+            get(discounts::coupons).post(discounts::add_coupon),
+        )
+        .route(
+            "/discounts/{id}/coupons/generate",
+            post(discounts::generate_coupons),
+        )
+        .route(
+            "/discounts/{id}/coupons/{coupon}/active",
+            post(discounts::set_coupon_active),
+        )
+        .route(
+            "/discounts/{id}/coupons/{coupon}/delete",
+            post(discounts::delete_coupon),
         )
         .route("/exchange", get(exchange::form).post(exchange::save))
         .route("/exchange/sale", post(exchange::save_sale))

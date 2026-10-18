@@ -353,7 +353,7 @@ fn is_row_condition(class_id: &str) -> bool {
 }
 
 /// Можно ли вложить `child` в `parent` (как `GetShowIn` контролов Битрикса).
-fn allowed_in(parent: &str, child: &str, parent_is_root: bool) -> bool {
+pub fn allowed_in(parent: &str, child: &str, parent_is_root: bool) -> bool {
     match parent {
         "CondGroup" => match child {
             "ActSaleBsktGrp" | "ActSaleDelivery" => parent_is_root,
@@ -376,7 +376,7 @@ fn allowed_in(parent: &str, child: &str, parent_is_root: bool) -> bool {
     }
 }
 
-fn is_group(class_id: &str) -> bool {
+pub fn is_group(class_id: &str) -> bool {
     matches!(
         class_id,
         "CondGroup"

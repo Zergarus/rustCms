@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% set section = "discounts" %}
+{% block title %}Правила работы с корзиной{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Правила работы с корзиной <span class="muted count">{{ items|length }}</span></h1>
+  <a class="btn primary" href="/admin/discounts/new">Добавить правило</a>
+</div>
+
+{% if items %}
+<div class="card table-wrap">
+  <table>
+    <thead>
+      <tr><th>ID</th><th>Название</th><th>Активность</th><th>Приоритет</th><th>Сортировка</th><th>Период</th><th>Группы</th><th>Купоны</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for r in items %}
+      <tr>
+        <td class="muted">{{ r.id }}</td>
+        <td>
+          <a href="/admin/discounts/{{ r.id }}">{{ r.name }}</a>
+          {% if r.use_coupons %}<span class="badge accent">только по купону</span>{% endif %}
+          {% if r.unsupported %}<div class="small danger-text">Правило не применяется: неподдерживаемые элементы {{ r.unsupported }}</div>{% endif %}
+        </td>
+        <td>
+          <form method="post" action="/admin/discounts/{{ r.id }}/active">
+            <input type="hidden" name="active" value="{{ 'false' if r.active else 'true' }}">
+            {% if r.active %}<span class="badge ok">активно</span>{% else %}<span class="badge">выключено</span>{% endif %}
+            <button class="link" type="submit">{{ "Выключить" if r.active else "Включить" }}</button>
+          </form>
+        </td>
+        <td>{{ r.priority }}</td>
+        <td>{{ r.sort }}</td>
+        <td class="small">{% if r.active_from %}с {{ r.active_from }}{% endif %}{% if r.active_to %} по {{ r.active_to }}{% endif %}{% if not r.active_from and not r.active_to %}<span class="muted">—</span>{% endif %}</td>
+        <td>{% for g in r.groups %}<span class="badge">{{ g }}</span> {% else %}<span class="muted">все</span>{% endfor %}</td>
+        <td><a href="/admin/discounts/{{ r.id }}/coupons">{{ r.coupons }}</a></td>
+        <td class="actions">
+          <form method="post" action="/admin/discounts/{{ r.id }}/delete"
+                hx-confirm="Удалить правило «{{ r.name }}»? Его купоны тоже удалятся.">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card empty">
+  <p>Правил пока нет. Правило задаёт скидку или наценку на товары корзины и доставку по условиям.</p>
+  <a class="btn primary" href="/admin/discounts/new">Создать правило</a>
+</div>
+{% endif %}
+<p class="muted">Правила применяются по убыванию приоритета, затем по сортировке; каждое — к цене после предыдущих.</p>
+{% endblock %}
