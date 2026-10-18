@@ -195,7 +195,7 @@ pub async fn load_locked(
     load_on(tx, item_ids).await
 }
 
-async fn load_on(
+pub async fn load_on(
     db: &mut PgConnection,
     item_ids: &[i64],
 ) -> sqlx::Result<HashMap<i64, PurchaseInfo>> {

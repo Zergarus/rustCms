@@ -331,6 +331,8 @@ pub(super) struct CartState {
     pub discounts: DiscountResult,
     /// Стоимость товаров снимка до скидок.
     pub goods_base: f64,
+    /// Цена единицы до скидок у позиций, участвующих в расчёте скидок.
+    pub bases: HashMap<i64, f64>,
     pub snapshot: Value,
 }
 
@@ -452,8 +454,9 @@ pub(super) async fn priced(
     order: OrderCtx,
 ) -> Result<CartState, BxError> {
     let rules = discount_repo::active_rules(&state.db, chrono::Utc::now()).await?;
+    let mut conn = state.db.acquire().await?;
     let ctx = context::for_cart(
-        &state.db,
+        &mut conn,
         &base.items,
         &base.info,
         base.user_id,
@@ -463,6 +466,7 @@ pub(super) async fn priced(
     .await?;
     let hook = state.project.discount_condition_hook.as_deref();
     let discounts = engine::calculate(&rules, &ctx, hook);
+    drop(conn);
     if base.buyer.is_some() {
         save_prices(state, &ctx, &discounts).await?;
     }
@@ -513,6 +517,7 @@ pub(super) async fn priced(
         stores: base.stores,
         discounts,
         goods_base: (goods_base * 100.0).round() / 100.0,
+        bases: ctx_base,
         snapshot,
     })
 }

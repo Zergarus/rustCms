@@ -584,6 +584,8 @@ pub async fn recalculate_discounts_with(
 ) -> anyhow::Result<()> {
     use crate::discount::{context, engine, repo as discount_repo};
 
+    // Правила — до транзакции: в ней чтения только через её соединение
+    let rules = discount_repo::active_rules(db, Utc::now()).await?;
     let mut tx = db.begin().await?;
     let Some((paid, person_type, user_id)): Option<(bool, i64, Option<i64>)> =
         sqlx::query_as("SELECT paid, person_type_id, user_id FROM orders WHERE id = $1 FOR UPDATE")
@@ -651,21 +653,24 @@ pub async fn recalculate_discounts_with(
         })
         .collect();
 
+    // Все позиции заказа — по базовым ценам заказа, без отбора по каталогу
     let ids: Vec<i64> = items.iter().map(|i| i.product_id).collect();
-    let info = catalog::load(db, &ids).await?;
+    let info = catalog::load_on(&mut tx, &ids).await?;
+    let lines: Vec<context::Line> = items
+        .iter()
+        .map(|it| context::Line {
+            item: it,
+            base_price: bases.get(&it.id).copied().unwrap_or(0.0),
+            stock: info.get(&it.product_id).map_or(0.0, |p| p.total),
+        })
+        .collect();
     let order = context::OrderCtx {
         person_type_id: Some(person_type),
         pay_system_id: pay_system,
         delivery_id: shipment.and_then(|s| s.1),
         delivery_price: shipment.map(|s| s.2),
     };
-    let mut ctx = context::for_cart(db, &items, &info, user_id, coupons, order).await?;
-    for it in ctx.items.iter_mut().filter(|it| !it.custom_price) {
-        if let Some(base) = bases.get(&it.key) {
-            it.base_price = *base;
-        }
-    }
-    let rules = discount_repo::active_rules(db, Utc::now()).await?;
+    let ctx = context::for_lines(&mut tx, lines, user_id, coupons, order).await?;
     let result = engine::calculate(&rules, &ctx, hook);
 
     for it in &ctx.items {
@@ -1240,5 +1245,71 @@ mod tests {
             (false, 1, 1, 0),
             "отмена купон не возвращает"
         );
+    }
+
+    /// Пересчёт берёт все позиции заказа по его базовым ценам — и снятые с продажи.
+    #[sqlx::test]
+    async fn recalculate_covers_unavailable_lines(db: PgPool) {
+        let id = place_order(&db, &order_fixture(&db).await, None).await;
+        let rule: i64 = sqlx::query_scalar(
+            "INSERT INTO discounts (name, actions) VALUES ('Скидка', $1) RETURNING id",
+        )
+        .bind(serde_json::json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND"}, "CHILDREN": [{
+            "CLASS_ID": "ActSaleBsktGrp",
+            "DATA": {"Type": "Discount", "Value": 10, "Unit": "Perc", "Max": 0, "All": "AND", "True": "True"},
+            "CHILDREN": []}]}))
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        recalculate_discounts(&db, id).await.unwrap();
+        let state = || async {
+            sqlx::query_as::<_, (f64, f64, f64, Value, f64)>(
+                "SELECT c.base_price::float8, c.discount_price::float8, c.price::float8,
+                        d.applied, d.sum::float8
+                 FROM cart_items c JOIN order_discounts d ON d.order_id = c.order_id
+                 WHERE c.order_id = $1",
+            )
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        let line: i64 = sqlx::query_scalar("SELECT id FROM cart_items WHERE order_id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let (b, d, p, applied, sum) = state().await;
+        assert_eq!((b, d, p, sum), (100.0, 10.0, 90.0, 10.0));
+        assert_eq!(
+            applied["items"],
+            serde_json::json!([{"cart_item_id": line, "value": 10.0}])
+        );
+
+        // Товар снят с продажи и без цены в каталоге, правило стало 50 %
+        sqlx::query("UPDATE catalog_products SET available = FALSE")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE discounts SET actions = jsonb_set(actions, '{CHILDREN,0,DATA,Value}', '50') WHERE id = $1",
+        )
+        .bind(rule)
+        .execute(&db)
+        .await
+        .unwrap();
+        recalculate_discounts(&db, id).await.unwrap();
+        let (b, d, p, applied, sum) = state().await;
+        assert_eq!((b, d, p, sum), (100.0, 50.0, 50.0, 50.0));
+        assert_eq!(
+            applied["items"],
+            serde_json::json!([{"cart_item_id": line, "value": 50.0}])
+        );
+        let total: f64 = sqlx::query_scalar("SELECT price::float8 FROM orders WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(total, 50.0);
     }
 }

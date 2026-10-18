@@ -548,4 +548,101 @@ mod tests {
             plan(&before, &after, &traced)
         );
     }
+
+    /// Правка в админке скидки не пересчитывает: своя цена — без скидки, только количество —
+    /// скидка остаётся, ручная доставка — без скидки.
+    #[sqlx::test]
+    async fn admin_edit_keeps_base_prices(db: sqlx::PgPool) {
+        use crate::smoke_tests::post_form;
+        use crate::test_support::{admin_cookie, order_fixture, place_order, test_state};
+        let f = order_fixture(&db).await;
+        for sql in [
+            "INSERT INTO deliveries (id, name) VALUES (1, 'Самовывоз'), (2, 'Курьер')",
+            "INSERT INTO pay_systems (id, name) VALUES (1, 'QR')",
+        ] {
+            sqlx::query(sql).execute(&db).await.unwrap();
+        }
+        let id = place_order(&db, &f, None).await;
+        let line: i64 = sqlx::query_scalar("SELECT id FROM cart_items WHERE order_id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        // Заказ со скидками: позиция 120 → 100, доставка 300 → 200
+        sqlx::query("UPDATE cart_items SET base_price = 120, discount_price = 20 WHERE id = $1")
+            .bind(line)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE shipments SET base_price = 300, price = 200 WHERE order_id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE orders SET delivery_price = 200 WHERE id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let path = format!("/admin/shop/orders/{id}/items");
+        let edit = |fields: String| {
+            let (app, db, cookie, path) = (app.clone(), db.clone(), cookie.clone(), path.clone());
+            async move {
+                let at: DateTime<Utc> =
+                    sqlx::query_scalar("SELECT updated_at FROM orders WHERE id = $1")
+                        .bind(id)
+                        .fetch_one(&db)
+                        .await
+                        .unwrap();
+                let v = version(&at).replace(':', "%3A").replace('+', "%2B");
+                let (status, html) = post_form(
+                    &app,
+                    &path,
+                    &cookie,
+                    &format!("version={v}&pay_system_id=1&{fields}"),
+                )
+                .await;
+                assert!(status.is_redirection(), "{status} {html}");
+            }
+        };
+        let state = || async {
+            sqlx::query_as::<_, (f64, f64, f64, f64, f64)>(
+                "SELECT c.base_price::float8, c.discount_price::float8, c.price::float8,
+                        s.base_price::float8, s.price::float8
+                 FROM cart_items c JOIN shipments s ON s.order_id = c.order_id WHERE c.id = $1",
+            )
+            .bind(line)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+
+        edit(format!(
+            "item_{line}_quantity=2&item_{line}_price=100&delivery_id=1&delivery_price=200"
+        ))
+        .await;
+        assert_eq!(
+            state().await,
+            (120.0, 20.0, 100.0, 300.0, 200.0),
+            "только количество"
+        );
+
+        edit(format!(
+            "item_{line}_quantity=2&item_{line}_price=80&delivery_id=1&delivery_price=200"
+        ))
+        .await;
+        assert_eq!(state().await, (80.0, 0.0, 80.0, 300.0, 200.0), "своя цена");
+
+        edit(format!(
+            "item_{line}_quantity=2&item_{line}_price=80&delivery_id=2&delivery_price=350"
+        ))
+        .await;
+        assert_eq!(
+            state().await,
+            (80.0, 0.0, 80.0, 350.0, 350.0),
+            "другая доставка"
+        );
+    }
 }

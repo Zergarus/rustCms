@@ -345,6 +345,8 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
     };
 
     let product_ids: Vec<i64> = lines.iter().map(|l| l.product_id).collect();
+    // Правила — до транзакции: в ней чтения только через её соединение
+    let rules = discount_repo::active_rules(&state.db, chrono::Utc::now()).await?;
     let mut tx = state.db.begin().await?;
     let info = catalog::load_locked(&mut tx, &product_ids).await?;
     let checked = match lines
@@ -371,16 +373,21 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         delivery_id: Some(delivery.id),
         delivery_price: Some(delivery.price),
     };
-    let pricing = price_order(
+    let Some(pricing) = price_order(
         &state,
         &mut tx,
+        &rules,
         &cart,
         (cart_buyer, buyer),
         &ordered,
         &info,
         order_ctx,
     )
-    .await?;
+    .await?
+    else {
+        tx.rollback().await?;
+        return Err(fail(SubmitError::basket_changed()));
+    };
     for it in &mut order_items {
         if let Some((base, r)) = pricing.items.get(&it.id) {
             it.base_price = *base;
@@ -486,16 +493,19 @@ struct OrderPricing {
 /// Скидки с данными заказа внутри его транзакции. Купоны покупателя блокируются и
 /// проверяются заново (`saveApplied` Битрикса): занятый параллельным оформлением купон
 /// дождётся его и, если тот купон израсходовал, заказ считается без него — с сообщением.
-/// Купон, правило которого не сработало, не применяется и не расходуется.
+/// Купон, правило которого не сработало, не применяется и не расходуется. Базовая цена
+/// позиции под блокировкой не та, что в снимке, — `None` (корзина изменилась).
+#[allow(clippy::too_many_arguments)]
 async fn price_order(
     state: &AppState,
     tx: &mut sqlx::PgConnection,
+    rules: &[crate::discount::model::Rule],
     cart: &CartState,
     (cart_buyer, user_id): (i64, i64),
     items: &[CartItem],
     info: &HashMap<i64, catalog::PurchaseInfo>,
     order: OrderCtx,
-) -> Result<OrderPricing, BxError> {
+) -> Result<Option<OrderPricing>, BxError> {
     let now = chrono::Utc::now();
     let mut coupons = Vec::new();
     let mut messages = Vec::new();
@@ -513,10 +523,16 @@ async fn price_order(
             }
         }
     }
-    let rules = discount_repo::active_rules(&state.db, now).await?;
-    let ctx = context::for_cart(&state.db, items, info, Some(user_id), coupons, order).await?;
+    let ctx = context::for_cart(&mut *tx, items, info, Some(user_id), coupons, order).await?;
+    if ctx.items.iter().any(|it| {
+        cart.bases
+            .get(&it.key)
+            .is_none_or(|b| (b - it.base_price).abs() > 0.005)
+    }) {
+        return Ok(None);
+    }
     let hook = state.project.discount_condition_hook.as_deref();
-    let result = engine::calculate(&rules, &ctx, hook);
+    let result = engine::calculate(rules, &ctx, hook);
     let used: Vec<i64> = ctx
         .coupons
         .iter()
@@ -533,13 +549,13 @@ async fn price_order(
         .iter()
         .filter_map(|it| Some((it.key, (it.base_price, result.items.get(&it.key)?.clone()))))
         .collect();
-    Ok(OrderPricing {
+    Ok(Some(OrderPricing {
         items,
         delivery_price: result.delivery_price,
         applied: result.applied,
         coupons: used,
         messages,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -982,5 +998,146 @@ mod tests {
             .unwrap();
         assert_eq!(item["price"], json!(900.0));
         assert_eq!(item["basePrice"], json!(1000.0));
+    }
+
+    /// Ждёт, пока `n` запросов встанут на блокировке строк.
+    async fn wait_locked(db: &sqlx::PgPool, n: i64) {
+        for _ in 0..1000 {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'",
+            )
+            .fetch_one(db)
+            .await
+            .unwrap();
+            if waiting >= n {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("оформления не дошли до блокировки");
+    }
+
+    /// Базовая цена под блокировкой не та, что видел покупатель (цена сменилась, пока
+    /// оформление ждало строку товара), — `basket_changed`.
+    #[sqlx::test]
+    async fn base_price_changed_after_snapshot(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let (_, cookie) = login(&db, fx.f.buyer_id, "ivan").await;
+        rule(&db, 10.0, 0.0, false, None).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let (_, cart) = send(&app, "GET", "/api/v1/cart", &cookie, None).await;
+        let mut hold = db.begin().await.unwrap();
+        sqlx::query("SELECT item_id FROM catalog_products WHERE item_id = $1 FOR UPDATE")
+            .bind(fx.f.product_id)
+            .execute(&mut *hold)
+            .await
+            .unwrap();
+        let pt = fx.f.person_type_id;
+        let task = tokio::spawn(async move {
+            send(
+                &app,
+                "POST",
+                "/api/v1/order/submit",
+                &cookie,
+                Some(json!({"personTypeId": pt, "deliveryId": 1, "paymentId": 1,
+                            "basketSnapshot": cart["data"]["snapshot"]})),
+            )
+            .await
+        });
+        wait_locked(&db, 1).await;
+        sqlx::query("UPDATE catalog_prices SET price = 1100 WHERE item_id = $1")
+            .bind(fx.f.product_id)
+            .execute(&mut *hold)
+            .await
+            .unwrap();
+        hold.commit().await.unwrap();
+        let (status, body) = task.await.unwrap();
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["errors"][0]["code"], "basket_changed");
+        let orders: i64 = sqlx::query_scalar("SELECT count(*) FROM orders")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(orders, 0);
+    }
+
+    /// Оформлений столько же, сколько соединений в пуле, — ни одно не ждёт свободного
+    /// соединения, держа транзакцию.
+    #[sqlx::test]
+    async fn checkouts_fill_the_pool_without_stall(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        rule(&db, 10.0, 0.0, false, None).await;
+        let size = 3;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(size)
+            .connect_with((*db.connect_options()).clone())
+            .await
+            .unwrap();
+        let mut cookies = Vec::new();
+        for n in 0..size {
+            let buyer: i64 =
+                sqlx::query_scalar("INSERT INTO buyers (token_hash) VALUES ($1) RETURNING id")
+                    .bind(format!("b{n}"))
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            sqlx::query(
+                "INSERT INTO cart_items (buyer_id, item_id, quantity, name) VALUES ($1, $2, 1, 'Масло 1 л')",
+            )
+            .bind(buyer)
+            .bind(fx.offer_id)
+            .execute(&db)
+            .await
+            .unwrap();
+            cookies.push(login(&db, buyer, &format!("u{n}")).await.1);
+        }
+        let app = crate::app(crate::test_support::test_state(pool));
+        let mut snapshots = Vec::new();
+        for c in &cookies {
+            let (_, cart) = send(&app, "GET", "/api/v1/cart", c, None).await;
+            snapshots.push(cart["data"]["snapshot"].clone());
+        }
+        // Все оформления встают в своих транзакциях на строке товара, пока её держит тест
+        let mut hold = db.begin().await.unwrap();
+        sqlx::query("SELECT item_id FROM catalog_products WHERE item_id = $1 FOR UPDATE")
+            .bind(fx.offer_id)
+            .execute(&mut *hold)
+            .await
+            .unwrap();
+        let pt = fx.f.person_type_id;
+        let tasks: Vec<_> = cookies
+            .into_iter()
+            .zip(snapshots)
+            .map(|(c, snap)| {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    send(
+                        &app,
+                        "POST",
+                        "/api/v1/order/submit",
+                        &c,
+                        Some(json!({"personTypeId": pt, "deliveryId": 1, "paymentId": 1,
+                                    "basketSnapshot": snap})),
+                    )
+                    .await
+                })
+            })
+            .collect();
+        wait_locked(&db, size as i64).await;
+        hold.commit().await.unwrap();
+        let all = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let mut out = Vec::new();
+            for t in tasks {
+                out.push(t.await.unwrap());
+            }
+            out
+        })
+        .await
+        .expect("оформления встали на пуле");
+        for (status, body) in all {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["data"]["total"], json!(750.0), "{body}");
+        }
     }
 }

@@ -98,7 +98,7 @@ struct RecordRow {
 /// с данными товара и родителя предложения; группы пользователя; купоны покупателя.
 /// Позиции с `custom_price` видны условиям по своей цене, действия их не меняют.
 pub async fn for_cart(
-    db: &sqlx::PgPool,
+    db: &mut sqlx::PgConnection,
     items: &[crate::cart::CartItem],
     info: &HashMap<i64, crate::catalog::PurchaseInfo>,
     user_id: Option<i64>,
@@ -107,13 +107,47 @@ pub async fn for_cart(
 ) -> sqlx::Result<Context> {
     use crate::catalog::{main_price, sellable};
 
+    let buyable: Vec<Line> = items
+        .iter()
+        .filter_map(|it| {
+            let p = info.get(&it.product_id)?;
+            if !(sellable(p) && p.available) {
+                return None;
+            }
+            Some(Line {
+                item: it,
+                base_price: main_price(&p.prices)?.price,
+                stock: p.total,
+            })
+        })
+        .collect();
+    for_lines(db, buyable, user_id, coupons, order).await
+}
+
+/// Позиция для [`for_lines`]: цена единицы до скидок и остаток.
+pub struct Line<'a> {
+    pub item: &'a crate::cart::CartItem,
+    pub base_price: f64,
+    pub stock: f64,
+}
+
+/// Контекст по заданным позициям без отбора (пересчёт заказа: все его позиции по базовым
+/// ценам заказа). Позиция с `custom_price` — по своей цене; запись, которой уже нет, — без
+/// данных товара.
+pub async fn for_lines(
+    db: &mut sqlx::PgConnection,
+    lines: Vec<Line<'_>>,
+    user_id: Option<i64>,
+    coupons: Vec<Coupon>,
+    order: OrderCtx,
+) -> sqlx::Result<Context> {
     let group_ids: Vec<i64> = match user_id {
         Some(u) => {
             sqlx::query_scalar(
                 "SELECT group_id FROM user_groups WHERE user_id = $1 ORDER BY group_id",
             )
             .bind(u)
-            .fetch_all(db)
+            .fetch_all(&mut *db)
             .await?
         }
         None => Vec::new(),
@@ -127,15 +161,9 @@ pub async fn for_cart(
         now: Utc::now(),
     };
 
-    let mut buyable: Vec<(&crate::cart::CartItem, f64, f64)> = items
-        .iter()
-        .filter_map(|it| {
-            let p = info.get(&it.product_id)?;
-            if !(sellable(p) && p.available) {
-                return None;
-            }
-            Some((it, main_price(&p.prices)?.price, p.total))
-        })
+    let mut buyable: Vec<(&crate::cart::CartItem, f64, f64)> = lines
+        .into_iter()
+        .map(|l| (l.item, l.base_price, l.stock))
         .collect();
     buyable.sort_by_key(|(it, _, _)| it.id);
     if buyable.is_empty() {
@@ -147,7 +175,7 @@ pub async fn for_cart(
         "SELECT id, price::float8 FROM cart_items WHERE id = ANY($1) AND custom_price",
     )
     .bind(&keys)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?
     .into_iter()
     .collect();
@@ -160,16 +188,29 @@ pub async fn for_cart(
     let product_ids: Vec<i64> = buyable.iter().map(|(it, _, _)| it.product_id).collect();
     let mut records: HashMap<i64, RecordRow> = sqlx::query_as::<_, RecordRow>(RECORD)
         .bind(&product_ids)
-        .fetch_all(db)
+        .fetch_all(&mut *db)
         .await?
         .into_iter()
         .map(|r| (r.id, r))
         .collect();
+    for (it, _, _) in &buyable {
+        records.entry(it.product_id).or_insert_with(|| RecordRow {
+            id: it.product_id,
+            collection_id: 0,
+            product_id: None,
+            section_id: None,
+            xml_id: String::new(),
+            name: String::new(),
+            code: String::new(),
+            field_values: sqlx::types::Json(Map::new()),
+            weight: 0.0,
+        });
+    }
     let parent_ids: Vec<i64> = records.values().filter_map(|r| r.product_id).collect();
     if !parent_ids.is_empty() {
         for r in sqlx::query_as::<_, RecordRow>(RECORD)
             .bind(&parent_ids)
-            .fetch_all(db)
+            .fetch_all(&mut *db)
             .await?
         {
             records.entry(r.id).or_insert(r);
@@ -189,7 +230,7 @@ pub async fn for_cart(
          SELECT start, id FROM t ORDER BY start, depth",
     )
     .bind(&section_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?
     {
         chains.entry(start).or_default().push(id);
@@ -202,7 +243,7 @@ pub async fn for_cart(
          ORDER BY id",
     )
     .bind(&collections)
-    .fetch_all(db)
+    .fetch_all(&mut *db)
     .await?
     {
         fields_of.entry(collection).or_default().push((id, code));
@@ -321,9 +362,17 @@ mod tests {
         let items = crate::cart::repo::items(&db, fx.f.buyer_id).await.unwrap();
         let ids: Vec<i64> = items.iter().map(|i| i.product_id).collect();
         let info = crate::catalog::load(&db, &ids).await.unwrap();
-        let ctx = for_cart(&db, &items, &info, None, Vec::new(), OrderCtx::default())
-            .await
-            .unwrap();
+        let mut conn = db.acquire().await.unwrap();
+        let ctx = for_cart(
+            &mut conn,
+            &items,
+            &info,
+            None,
+            Vec::new(),
+            OrderCtx::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(ctx.items.len(), 2);
         let simple = &ctx.items[0];
         assert_eq!(
@@ -358,9 +407,17 @@ mod tests {
             .await
             .unwrap();
         let info = crate::catalog::load(&db, &ids).await.unwrap();
-        let ctx = for_cart(&db, &items, &info, None, Vec::new(), OrderCtx::default())
-            .await
-            .unwrap();
+        let mut conn = db.acquire().await.unwrap();
+        let ctx = for_cart(
+            &mut conn,
+            &items,
+            &info,
+            None,
+            Vec::new(),
+            OrderCtx::default(),
+        )
+        .await
+        .unwrap();
         let keys: Vec<i64> = ctx.items.iter().map(|i| i.key).collect();
         assert_eq!(keys, [fx.offer_item_id]);
     }

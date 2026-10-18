@@ -2592,4 +2592,104 @@ mod tests {
         .await
         .unwrap()
     }
+
+    async fn bases(db: &PgPool, order: i64) -> (Vec<(f64, f64, f64)>, Vec<(f64, f64)>) {
+        let lines = sqlx::query_as(
+            "SELECT base_price::float8, discount_price::float8, price::float8 FROM cart_items
+             WHERE order_id = $1 ORDER BY id",
+        )
+        .bind(order)
+        .fetch_all(db)
+        .await
+        .unwrap();
+        let shipments = sqlx::query_as(
+            "SELECT base_price::float8, price::float8 FROM shipments WHERE order_id = $1 ORDER BY id",
+        )
+        .bind(order)
+        .fetch_all(db)
+        .await
+        .unwrap();
+        (lines, shipments)
+    }
+
+    /// Цены из 1С — как есть: базовая цена = цене у позиций и отгрузок, которые пишет обмен.
+    #[sqlx::test]
+    async fn exchange_fills_base_prices(db: PgPool) {
+        let f = fixture(&db).await;
+        let courier: i64 =
+            sqlx::query_scalar("INSERT INTO deliveries (name) VALUES ('Курьер') RETURNING id")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let s = SaleSettings {
+            default_delivery: Some(courier),
+            ..SaleSettings::default()
+        };
+        // Новый заказ из 1С
+        let mut d = doc("ord-1c-base", "1", &[]);
+        d.agent_id = Some("fiz-base".into());
+        d.items = vec![item("tovar-1c", 1000.0, 2.0), delivery(300.0)];
+        let sale = SaleFile {
+            agents: vec![agent(
+                "fiz-base",
+                Domain::Individual,
+                &[("EMAIL", "base@example.com")],
+            )],
+            groups: vec![vec![d]],
+        };
+        let (stats, _) = apply_file(&db, &s, &[], &sale, None, 0, None).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        let created: i64 = sqlx::query_scalar("SELECT id FROM orders WHERE external")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            bases(&db, created).await,
+            (vec![(1000.0, 0.0, 1000.0)], vec![(300.0, 300.0)])
+        );
+
+        // Заказ сайта со скидками: состав и доставку меняет 1С
+        let id = place_order(&db, &f, None).await;
+        sqlx::query(
+            "UPDATE cart_items SET base_price = 120, discount_price = 20 WHERE order_id = $1",
+        )
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE shipments SET base_price = 500, price = 400 WHERE order_id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut d = doc(&id.to_string(), "1", &[]);
+        d.items = vec![item("tovar-1c", 90.0, 1.0), delivery(250.0)];
+        let stats = run(&db, &s, &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(
+            bases(&db, id).await,
+            (vec![(90.0, 0.0, 90.0)], vec![(250.0, 250.0)])
+        );
+
+        // Отгрузка из 1С: новая цена доставки — без скидки
+        sqlx::query("UPDATE shipments SET base_price = 500, price = 400 WHERE order_id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let sh = first_shipment(&db, id).await;
+        let mut d = ship_doc(&sh.to_string(), id, "1");
+        d.items = vec![delivery(260.0)];
+        let stats = run(&db, &s, &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(bases(&db, id).await.1, vec![(260.0, 260.0)]);
+
+        // Новая отгрузка из 1С
+        let mut d = ship_doc("1С-new", id, "1");
+        d.items = vec![delivery(310.0)];
+        let stats = run(&db, &s, &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(stats.shipments_created, 1);
+        assert_eq!(bases(&db, id).await.1, vec![(260.0, 260.0), (310.0, 310.0)]);
+    }
 }
