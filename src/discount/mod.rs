@@ -3,6 +3,7 @@
 pub mod catalog;
 pub mod cond;
 pub mod context;
+pub mod cumulative;
 pub mod engine;
 pub mod model;
 pub mod repo;

@@ -1956,7 +1956,7 @@ mod tests {
         let app = app(&db);
         let cookie = admin_cookie(&db).await;
         let conds = json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": [
-            {"CLASS_ID": "CondCumulativeGroup", "DATA": {"logic": "EqGr", "Value": 1000}, "CHILDREN": []}
+            {"CLASS_ID": "CondFooGroup", "DATA": {"logic": "EqGr", "Value": 1000}, "CHILDREN": []}
         ]});
         let acts = json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND"}, "CHILDREN": [
             {"CLASS_ID": "ActSaleDelivery", "DATA": {"Type": "DiscountZero", "Value": 0, "Unit": "Perc"}}
@@ -1974,13 +1974,13 @@ mod tests {
                 .fetch_one(&db)
                 .await
                 .unwrap();
-        assert_eq!(unsupported, "CondCumulativeGroup");
+        assert_eq!(unsupported, "CondFooGroup");
         assert_eq!(stored["CHILDREN"][0]["DATA"]["Value"], 1000);
         let (_, list) = get(&app, "/admin/discounts", &cookie).await;
         assert!(list.contains("не применяется"), "{list}");
-        assert!(list.contains("CondCumulativeGroup"), "{list}");
+        assert!(list.contains("CondFooGroup"), "{list}");
         let (_, html) = get(&app, &format!("/admin/discounts/{id}"), &cookie).await;
-        assert!(html.contains("не применяется") && html.contains("CondCumulativeGroup"));
+        assert!(html.contains("не применяется") && html.contains("CondFooGroup"));
     }
 
     /// Правило удалили, пока его правили, — 404, а не 500.

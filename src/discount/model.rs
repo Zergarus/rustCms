@@ -136,10 +136,19 @@ pub const CONDITION_CLASSES: &[&str] = &[
     "CondSaleDelivery",
     "CondSaleCmnDayOfWeek",
     "CondBsktAppliedDiscount",
+    "CondCumulativeGroup",
+    "Period",
+    "PeriodRelative",
 ];
 
-/// Классы действий (`CSaleActionCtrlBasketGroup`, `CSaleActionCtrlSubGroup`, `CSaleActionCtrlDelivery`).
-pub const ACTION_CLASSES: &[&str] = &["ActSaleBsktGrp", "ActSaleSubGrp", "ActSaleDelivery"];
+/// Классы действий (`CSaleActionCtrlBasketGroup`, `CSaleActionCtrlSubGroup`, `CSaleActionCtrlDelivery`,
+/// `CSaleCumulativeAction`).
+pub const ACTION_CLASSES: &[&str] = &[
+    "ActSaleBsktGrp",
+    "ActSaleSubGrp",
+    "ActSaleDelivery",
+    "CumulativeAction",
+];
 
 const PROP_PREFIX: &str = "CondIBProp:";
 
@@ -356,8 +365,9 @@ fn is_row_condition(class_id: &str) -> bool {
 pub fn allowed_in(parent: &str, child: &str, parent_is_root: bool) -> bool {
     match parent {
         "CondGroup" => match child {
-            "ActSaleBsktGrp" | "ActSaleDelivery" => parent_is_root,
+            "ActSaleBsktGrp" | "ActSaleDelivery" | "CumulativeAction" => parent_is_root,
             "CondGroup"
+            | "CondCumulativeGroup"
             | "CondBsktCntGroup"
             | "CondBsktAmtGroup"
             | "CondBsktAmtBaseGroup"
@@ -372,6 +382,10 @@ pub fn allowed_in(parent: &str, child: &str, parent_is_root: bool) -> bool {
         | "CondBsktRowGroup"
         | "CondBsktSubGroup" => is_row_condition(child),
         "ActSaleBsktGrp" | "ActSaleSubGrp" => child == "ActSaleSubGrp" || is_row_condition(child),
+        // `CSaleCondCumulativeCtrl::getShowIn`
+        "CondCumulativeGroup" => matches!(child, "Period" | "PeriodRelative"),
+        // Фильтр позиций (`buildSubsCode`): только условия строки
+        "CumulativeAction" => is_row_condition(child),
         _ => false,
     }
 }
@@ -386,8 +400,10 @@ pub fn is_group(class_id: &str) -> bool {
             | "CondBsktProductGroup"
             | "CondBsktRowGroup"
             | "CondBsktSubGroup"
+            | "CondCumulativeGroup"
             | "ActSaleBsktGrp"
             | "ActSaleSubGrp"
+            | "CumulativeAction"
     )
 }
 
@@ -462,6 +478,23 @@ fn check_data(node: &Node, refs: &Refs, e: &mut Vec<String>) {
             choice(d, "All", ALL, true, e);
         }
         "CondBsktAppliedDiscount" => choice(d, "value", &["Y", "N"], true, e),
+        "CondCumulativeGroup" => {
+            choice(d, "logic", LOGIC_NUM, true, e);
+            number(d, "Value", true, e);
+            // Битрикс берёт только первый период (`$subs[0]`)
+            if node.children.len() > 1 {
+                e.push("в «CondCumulativeGroup» допустим только один период".to_string());
+            }
+        }
+        "Period" => {
+            timestamp(d, "ValueStart", e);
+            timestamp(d, "ValueEnd", e);
+        }
+        "PeriodRelative" => {
+            number(d, "Value", true, e);
+            choice(d, "TypeRelativePeriod", &["D", "M", "Y"], true, e);
+        }
+        "CumulativeAction" => check_cumulative_action(d, e),
         "ActSaleBsktGrp" => {
             choice(d, "Type", &["Discount", "Extra", "Closeout"], true, e);
             number(d, "Value", true, e);
@@ -488,6 +521,57 @@ fn check_data(node: &Node, refs: &Refs, e: &mut Vec<String>) {
                 value(d, l.value, refs, e);
             }
         }
+    }
+}
+
+/// `DATA` пресета «Накопительная скидка» (`Cumulative::generateDiscount`).
+fn check_cumulative_action(d: &Map<String, Value>, e: &mut Vec<String>) {
+    match d.get("ranges") {
+        None => e.push("не задано ranges".to_string()),
+        Some(Value::Array(ranges)) => {
+            for range in ranges {
+                let Some(r) = range.as_object() else {
+                    e.push(bad("ranges", range));
+                    continue;
+                };
+                number(r, "sum", true, e);
+                number(r, "value", true, e);
+                choice(r, "type", &["P", "F"], true, e);
+            }
+        }
+        Some(v) => e.push(bad("ranges", v)),
+    }
+    choice(
+        d,
+        "type_sum_period",
+        &["all_time", "interval", "relative"],
+        false,
+        e,
+    );
+    if let Some(v) = d.get("sum_period_data") {
+        match v.as_object() {
+            Some(p) => {
+                timestamp(p, "discount_sum_order_start", e);
+                timestamp(p, "discount_sum_order_end", e);
+                if p.get("discount_sum_period_value").is_some_and(|v| v != "") {
+                    number(p, "discount_sum_period_value", false, e);
+                }
+                if p.get("discount_sum_period_type").is_some_and(|v| v != "") {
+                    choice(p, "discount_sum_period_type", &["D", "M", "Y"], false, e);
+                }
+            }
+            None => e.push(bad("sum_period_data", v)),
+        }
+    }
+    choice(d, "apply_if_more_profitable", &["Y", "N", ""], false, e);
+    choice(d, "All", ALL, false, e);
+    choice(d, "True", TRUE, false, e);
+}
+
+/// Unix-время: необязательно, пустая строка — не задано.
+fn timestamp(d: &Map<String, Value>, key: &str, e: &mut Vec<String>) {
+    if d.get(key).is_some_and(|v| v != "") {
+        number(d, key, false, e);
     }
 }
 
@@ -734,10 +818,10 @@ mod tests {
         let conditions = node(json!({
             "CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"},
             "CHILDREN": [
-                {"CLASS_ID": "CondCumulativeGroup", "DATA": {"logic": "EqGr", "Value": 1000}, "CHILDREN": []},
+                {"CLASS_ID": "CondBsktFooGroup", "DATA": {"logic": "EqGr", "Value": 1000}, "CHILDREN": []},
                 {"CLASS_ID": "CondIBProp:4:55", "DATA": {"logic": "Equal", "value": 32}},
                 {"CLASS_ID": "CondIBProp:4", "DATA": {"logic": "Equal", "value": 32}},
-                {"CLASS_ID": "CondCumulativeGroup", "DATA": {"logic": "EqGr", "Value": 5}, "CHILDREN": []}
+                {"CLASS_ID": "CondBsktFooGroup", "DATA": {"logic": "EqGr", "Value": 5}, "CHILDREN": []}
             ]
         }));
         let actions = node(json!({
@@ -752,7 +836,7 @@ mod tests {
         }));
         assert_eq!(
             unsupported_classes(&conditions, &actions),
-            vec!["CondCumulativeGroup", "CondIBProp:4", "ActSaleGift"]
+            vec!["CondBsktFooGroup", "CondIBProp:4", "ActSaleGift"]
         );
         assert!(
             unsupported_classes(&node(rule24_conditions()), &node(rule24_actions())).is_empty()
@@ -893,6 +977,107 @@ mod tests {
                 "«CondProjVip» нельзя вложить в «CondSalePaySystem»".to_string()
             )),
             "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn validate_cumulative_nodes() {
+        let refs = Refs::default();
+        let conditions = node(json!({
+            "CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"},
+            "CHILDREN": [
+                {"CLASS_ID": "CondCumulativeGroup", "DATA": {"logic": "EqGr", "Value": 1000}, "CHILDREN": [
+                    {"CLASS_ID": "Period", "DATA": {"ValueStart": 1_700_000_000, "ValueEnd": ""}}
+                ]},
+                {"CLASS_ID": "CondCumulativeGroup", "DATA": {"logic": "Great", "Value": 5}, "CHILDREN": [
+                    {"CLASS_ID": "PeriodRelative", "DATA": {"Value": 1, "TypeRelativePeriod": "M"}}
+                ]},
+                {"CLASS_ID": "CondCumulativeGroup", "DATA": {"logic": "Less", "Value": 0}}
+            ]
+        }));
+        let actions = node(json!({
+            "CLASS_ID": "CondGroup", "DATA": {"All": "AND"},
+            "CHILDREN": [{
+                "CLASS_ID": "CumulativeAction",
+                "DATA": {
+                    "ranges": [{"sum": 0, "value": 3, "type": "P"}, {"sum": "5000", "value": "100", "type": "F"}],
+                    "type_sum_period": "relative",
+                    "sum_period_data": {"discount_sum_period_value": 1, "discount_sum_period_type": "Y"},
+                    "apply_if_more_profitable": "Y",
+                    "All": "AND", "True": "True"
+                },
+                "CHILDREN": [{"CLASS_ID": "CondBsktAppliedDiscount", "DATA": {"logic": "Equal", "value": "N"}}]
+            }]
+        }));
+        assert_eq!(validate(&conditions, &refs), vec![]);
+        assert_eq!(validate(&actions, &refs), vec![]);
+        assert!(unsupported_classes(&conditions, &actions).is_empty());
+
+        let s = |p: &str, m: &str| (p.to_string(), m.to_string());
+        let conditions = node(json!({
+            "CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"},
+            "CHILDREN": [
+                {"CLASS_ID": "CondCumulativeGroup", "DATA": {"logic": "Great", "Value": 5}, "CHILDREN": [
+                    {"CLASS_ID": "PeriodRelative", "DATA": {"Value": 1, "TypeRelativePeriod": "W"}}
+                ]},
+                {"CLASS_ID": "CondCumulativeGroup", "DATA": {"logic": "Contain", "Value": 5}, "CHILDREN": [
+                    {"CLASS_ID": "Period", "DATA": {}},
+                    {"CLASS_ID": "PeriodRelative", "DATA": {"Value": 1, "TypeRelativePeriod": "D"}}
+                ]},
+                {"CLASS_ID": "Period", "DATA": {}},
+                {"CLASS_ID": "CondCumulativeGroup", "DATA": {"logic": "EqGr", "Value": 1}, "CHILDREN": [
+                    {"CLASS_ID": "CondBsktFldPrice", "DATA": {"logic": "Great", "value": 1}}
+                ]},
+                {"CLASS_ID": "CondBsktCntGroup", "DATA": {"logic": "EqGr", "Value": 1, "All": "AND"}, "CHILDREN": [
+                    {"CLASS_ID": "CondCumulativeGroup", "DATA": {"logic": "EqGr", "Value": 1}}
+                ]}
+            ]
+        }));
+        assert_eq!(
+            validate(&conditions, &refs),
+            vec![
+                s("0.0.0", "недопустимое значение TypeRelativePeriod «W»"),
+                s("0.1", "недопустимое значение logic «Contain»"),
+                s("0.1", "в «CondCumulativeGroup» допустим только один период"),
+                s("0.2", "«Period» нельзя вложить в «CondGroup»"),
+                s(
+                    "0.3.0",
+                    "«CondBsktFldPrice» нельзя вложить в «CondCumulativeGroup»"
+                ),
+                s(
+                    "0.4.0",
+                    "«CondCumulativeGroup» нельзя вложить в «CondBsktCntGroup»"
+                ),
+            ]
+        );
+
+        let actions = node(json!({
+            "CLASS_ID": "CondGroup", "DATA": {"All": "AND"},
+            "CHILDREN": [
+                {"CLASS_ID": "CumulativeAction",
+                 "DATA": {"ranges": [{"sum": 0, "value": 3, "type": "X"}], "apply_if_more_profitable": "Y"},
+                 "CHILDREN": [{"CLASS_ID": "ActSaleSubGrp", "DATA": {"All": "AND", "True": "True"}}]},
+                {"CLASS_ID": "CumulativeAction", "DATA": {"type_sum_period": "week"}},
+                {"CLASS_ID": "ActSaleBsktGrp",
+                 "DATA": {"Type": "Discount", "Value": 5, "Unit": "Perc", "Max": 0, "All": "AND", "True": "True"},
+                 "CHILDREN": [{"CLASS_ID": "CumulativeAction", "DATA": {"ranges": [{"sum": 0, "value": 3, "type": "P"}]}}]}
+            ]
+        }));
+        assert_eq!(
+            validate(&actions, &refs),
+            vec![
+                s("0.0", "недопустимое значение type «X»"),
+                s(
+                    "0.0.0",
+                    "«ActSaleSubGrp» нельзя вложить в «CumulativeAction»"
+                ),
+                s("0.1", "не задано ranges"),
+                s("0.1", "недопустимое значение type_sum_period «week»"),
+                s(
+                    "0.2.0",
+                    "«CumulativeAction» нельзя вложить в «ActSaleBsktGrp»"
+                ),
+            ]
         );
     }
 

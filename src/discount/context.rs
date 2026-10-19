@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Datelike, Utc};
 use serde_json::{Map, Value};
 
+use super::cumulative::CumulativePeriod;
 use super::model::{Coupon, Rule};
 use crate::catalog::rounding::{self, Rounding};
 
@@ -76,6 +77,9 @@ pub struct Context {
     pub now: DateTime<Utc>,
     /// Правила округления цен; `None` — их нет (или не загружены).
     pub rounding: Option<Rounding>,
+    /// Накопленные суммы покупателя по периодам правил; нет ключа — 0 (гость, правило без
+    /// загрузки).
+    pub cumulative: HashMap<CumulativePeriod, f64>,
 }
 
 impl Context {
@@ -200,6 +204,7 @@ pub async fn for_lines(
         order,
         now: Utc::now(),
         rounding: None,
+        cumulative: HashMap::new(),
     })
 }
 

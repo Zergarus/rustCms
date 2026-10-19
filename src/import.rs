@@ -4625,7 +4625,7 @@ mod tests {
     /// `ACTIONS` правила №24 трансопта «+10%» из `b_sale_discount`.
     const RULE24_ACTIONS: &str = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:1:{s:3:"All";s:3:"AND";}s:8:"CHILDREN";a:1:{i:0;a:3:{s:8:"CLASS_ID";s:14:"ActSaleBsktGrp";s:4:"DATA";a:6:{s:4:"Type";s:5:"Extra";s:5:"Value";d:10;s:4:"Unit";s:4:"Perc";s:3:"Max";i:0;s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:1:{i:0;a:2:{s:8:"CLASS_ID";s:15:"CondIBProp:4:55";s:4:"DATA";a:2:{s:5:"logic";s:5:"Equal";s:5:"value";i:32;}}}}}}"#;
     /// Условие накопительной скидки (3б): движок его не знает.
-    const CUMULATIVE_CONDITIONS: &str = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:2:{s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:1:{i:0;a:3:{s:8:"CLASS_ID";s:19:"CondCumulativeGroup";s:4:"DATA";a:2:{s:5:"logic";s:4:"EqGr";s:5:"Value";d:1000;}s:8:"CHILDREN";a:0:{}}}}"#;
+    const UNKNOWN_CONDITIONS: &str = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:2:{s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:1:{i:0;a:3:{s:8:"CLASS_ID";s:19:"CondBsktFooBarGroup";s:4:"DATA";a:2:{s:5:"logic";s:4:"EqGr";s:5:"Value";d:1000;}s:8:"CHILDREN";a:0:{}}}}"#;
     const RULE24_CONDITIONS: &str = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:2:{s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:0:{}}"#;
 
     #[test]
@@ -4755,7 +4755,7 @@ mod tests {
                     },
                     // Накопительная скидка (3б) — переносится, но не применяется
                     DiscountRow {
-                        conditions: CUMULATIVE_CONDITIONS.into(),
+                        conditions: UNKNOWN_CONDITIONS.into(),
                         priority: 5,
                         sort: 50,
                         last_level_discount: true,
@@ -4872,7 +4872,7 @@ mod tests {
                     5,
                     50,
                     [false, true, false],
-                    "CondCumulativeGroup",
+                    "CondBsktFooBarGroup",
                     ""
                 ),
                 r(28, "По купону", false, 1, 100, [false, false, true], "", ""),

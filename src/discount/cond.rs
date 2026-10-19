@@ -52,9 +52,9 @@ fn eval(node: &Node, item: Option<&CtxItem>, st: &State, hook: Hook) -> bool {
         return h.check(class, &node.data, st.ctx, item).unwrap_or(false);
     }
     match class {
-        "CondGroup" | "CondBsktSubGroup" | "ActSaleBsktGrp" | "ActSaleSubGrp" => {
-            group(node, item, st, hook)
-        }
+        "CondGroup" | "CondBsktSubGroup" | "ActSaleBsktGrp" | "ActSaleSubGrp"
+        | "CumulativeAction" => group(node, item, st, hook),
+        "CondCumulativeGroup" => cumulative(node, st),
         "CondBsktCntGroup" | "CondBsktAmtGroup" | "CondBsktAmtBaseGroup" | "CondBsktRowGroup" => {
             basket_total(node, st, hook)
         }
@@ -130,6 +130,20 @@ fn basket_total(node: &Node, st: &State, hook: Hook) -> bool {
         _ => rows.count() as f64,
     };
     compare(&[Value::from(total)], logic, &[&Value::from(value)])
+}
+
+/// `CSaleCondCtrlBasketGroup::getCodeForCumulativeGroupCondition`: накопленная сумма за
+/// период узла сравнивается с `Value`; суммы нет (гость, не загружена) — 0.
+fn cumulative(node: &Node, st: &State) -> bool {
+    let Some(logic) = logic(&node.data, L_NUM) else {
+        return false;
+    };
+    let Some(value) = node.data.get("Value").and_then(as_num) else {
+        return false;
+    };
+    let period = super::cumulative::from_condition(node);
+    let sum = st.ctx.cumulative.get(&period).copied().unwrap_or(0.0);
+    compare(&[Value::from(sum)], logic, &[&Value::from(value)])
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -499,6 +513,7 @@ mod tests {
             // Вторник 22:30 UTC — среда 01:30 по МСК
             now: Utc.with_ymd_and_hms(2026, 10, 13, 22, 30, 0).unwrap(),
             rounding: None,
+            cumulative: HashMap::new(),
         }
     }
 

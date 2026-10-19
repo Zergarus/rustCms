@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use super::cond::{self, State};
 use super::context::{Context, CtxItem};
+use super::cumulative;
 use super::model::{Coupon, CouponKind, Node, Rule, as_num, round2};
 use crate::bxapi::project::DiscountConditionHook;
 use crate::catalog::rounding::Rounding;
@@ -148,6 +149,7 @@ impl Calc<'_> {
             match act.class_id.as_str() {
                 "ActSaleBsktGrp" => self.apply_basket(act),
                 "ActSaleDelivery" => self.apply_delivery(act),
+                "CumulativeAction" => self.apply_cumulative(act),
                 _ => {}
             }
         }
@@ -280,6 +282,75 @@ impl Calc<'_> {
             units[i] = clamp(i, units[i] + adj);
         }
         Some(units.into_iter().map(|u| u as f64 / 100.0).collect())
+    }
+
+    /// `CSaleCumulativeAction::Generate` + `Actions::applyCumulativeToBasket`: пороги по `sum`,
+    /// действует последний с `накоплено >= sum`; скидка `P` — процент от текущей цены, `F` —
+    /// сумма на единицу. Позиции — по фильтру детей (`All`/`True`, как `buildSubsCode`).
+    fn apply_cumulative(&mut self, node: &Node) {
+        let d = &node.data;
+        let Some(ranges) = d.get("ranges").and_then(Value::as_array) else {
+            return;
+        };
+        let mut ranges: Vec<(f64, f64, &str)> = ranges
+            .iter()
+            .filter_map(|r| {
+                Some((
+                    as_num(r.get("sum")?)?,
+                    as_num(r.get("value")?)?,
+                    r.get("type")?.as_str()?,
+                ))
+            })
+            .collect();
+        ranges.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let total = self
+            .ctx
+            .cumulative
+            .get(&cumulative::from_action(d))
+            .copied()
+            .unwrap_or(0.0);
+        let Some(&(_, value, unit)) = ranges.iter().rfind(|r| total >= r.0) else {
+            return;
+        };
+        if !matches!(unit, "P" | "F") {
+            return;
+        }
+        let value = round_zero(-value);
+        if value == 0.0 {
+            return;
+        }
+        let more_profitable =
+            d.get("apply_if_more_profitable").and_then(Value::as_str) == Some("Y");
+        // Отклонение от `wrapFilterToFindMoreProfitableForCumulative`: у Битрикса позиция без
+        // скидок проходит мимо фильтра детей, у нас фильтр проверяется всегда.
+        let rows: Vec<(i64, f64)> = {
+            let st = State {
+                ctx: self.ctx,
+                prices: &self.prices,
+                applied: &self.applied,
+            };
+            self.ctx
+                .items
+                .iter()
+                .filter(|it| !it.custom_price && cond::check_item(node, it, &st, self.hook))
+                .map(|it| (it.key, it.base_price))
+                .collect()
+        };
+        for (key, base) in rows {
+            let current = self.price(key);
+            // «Только если выгоднее»: от базовой цены, предыдущие скидки позиции заменяются
+            let from = if more_profitable { base } else { current };
+            let calc = if unit == "P" {
+                round2(from * value / 100.0)
+            } else {
+                round2(value)
+            };
+            let result = round_zero(from + calc);
+            if result < 0.0 || (more_profitable && result >= current) {
+                continue;
+            }
+            self.prices.insert(key, round2(result));
+        }
     }
 
     /// `ActSaleDelivery::Generate` + `Actions::applyToDelivery`.
@@ -462,16 +533,21 @@ fn calculate_refs(rules: &[&Rule], ctx: &Context, hook: Hook) -> DiscountResult 
 }
 
 /// Правила для цены в каталоге (как `GetOptimalPrice`): без условий корзины и заказа
-/// (`CondBskt*`, `CondSale*`) и без купонов.
+/// (`CondBskt*`, `CondSale*`), без купонов и без накопительных классов (у Битрикса
+/// `EXECUTE_MODULE = sale`).
 pub fn product_rules(rules: &[Rule]) -> Vec<&Rule> {
     fn order_bound(node: &Node) -> bool {
         node.class_id.starts_with("CondBskt")
             || node.class_id.starts_with("CondSale")
+            || node.class_id == "CondCumulativeGroup"
             || node.children.iter().any(order_bound)
+    }
+    fn has_cumulative(node: &Node) -> bool {
+        node.class_id == "CumulativeAction" || node.children.iter().any(has_cumulative)
     }
     rules
         .iter()
-        .filter(|r| !r.use_coupons && !order_bound(&r.conditions))
+        .filter(|r| !r.use_coupons && !order_bound(&r.conditions) && !has_cumulative(&r.actions))
         .collect()
 }
 
@@ -514,6 +590,7 @@ pub fn catalog_price_with(
         order: Default::default(),
         now,
         rounding: rounding.cloned(),
+        cumulative: HashMap::new(),
     };
     let price = calculate_refs(rules, &ctx, hook)
         .items
@@ -532,6 +609,7 @@ mod tests {
 
     use super::*;
     use crate::discount::context::{CtxItem, OrderCtx};
+    use crate::discount::cumulative::CumulativePeriod;
     use crate::discount::model::{Coupon, CouponKind, Node};
 
     fn node(v: Value) -> Node {
@@ -621,6 +699,7 @@ mod tests {
             order: OrderCtx::default(),
             now: now(),
             rounding: None,
+            cumulative: HashMap::new(),
         }
     }
 
@@ -1567,5 +1646,225 @@ mod tests {
             catalog_price_with(&[&r], &it, None, &[], now(), hook, None),
             None
         );
+    }
+
+    /// Условия «накоплено `logic` `value`» с узлом периода `period`.
+    fn cumulative_cond(logic: &str, value: f64, period: Option<Value>) -> Node {
+        let children: Vec<Value> = period.into_iter().collect();
+        node(
+            json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": [
+                {"CLASS_ID": "CondCumulativeGroup", "DATA": {"logic": logic, "Value": value}, "CHILDREN": children}
+            ]}),
+        )
+    }
+
+    /// `CumulativeAction` за всё время с порогами `ranges` и фильтром позиций `filter`.
+    fn cumulative_act(ranges: Value, more_profitable: &str, filter: Vec<Value>) -> Value {
+        json!({
+            "CLASS_ID": "CumulativeAction",
+            "DATA": {
+                "ranges": ranges,
+                "type_sum_period": "all_time",
+                "sum_period_data": {
+                    "discount_sum_order_start": "", "discount_sum_order_end": "",
+                    "discount_sum_period_value": "", "discount_sum_period_type": ""
+                },
+                "apply_if_more_profitable": more_profitable,
+                "All": "AND",
+                "True": "True"
+            },
+            "CHILDREN": filter
+        })
+    }
+
+    fn with_sums(mut c: Context, sums: &[(CumulativePeriod, f64)]) -> Context {
+        c.cumulative = sums.iter().cloned().collect();
+        c
+    }
+
+    #[test]
+    fn cumulative_condition_logic() {
+        let c = with_sums(
+            ctx(vec![item(1, 1000.0, 1.0)]),
+            &[(CumulativePeriod::AllTime, 5000.0)],
+        );
+        let run = |c: &Context, logic: &str, value: f64| {
+            let mut r = rule(1, vec![bskt("Discount", 10.0, "Perc", 0.0, vec![])]);
+            r.conditions = cumulative_cond(logic, value, None);
+            !ids(&calculate(&[r], c, None)).is_empty()
+        };
+        assert!(run(&c, "Great", 4000.0));
+        assert!(!run(&c, "Less", 4000.0));
+        assert!(run(&c, "EqGr", 5000.0));
+        assert!(run(&c, "Equal", 5000.0));
+        assert!(!run(&c, "Not", 5000.0));
+        // Гость: суммы нет — 0
+        let mut guest = ctx(vec![item(1, 1000.0, 1.0)]);
+        guest.user_id = None;
+        assert!(run(&guest, "Less", 1000.0));
+        assert!(!run(&guest, "EqGr", 1000.0));
+    }
+
+    #[test]
+    fn cumulative_condition_uses_its_period() {
+        let c = with_sums(
+            ctx(vec![item(1, 1000.0, 1.0)]),
+            &[
+                (CumulativePeriod::AllTime, 9000.0),
+                (
+                    CumulativePeriod::Relative {
+                        value: 1,
+                        unit: 'M',
+                    },
+                    100.0,
+                ),
+            ],
+        );
+        let mut r = rule(1, vec![bskt("Discount", 10.0, "Perc", 0.0, vec![])]);
+        r.conditions = cumulative_cond(
+            "Great",
+            1000.0,
+            Some(
+                json!({"CLASS_ID": "PeriodRelative", "DATA": {"Value": 1, "TypeRelativePeriod": "M"}}),
+            ),
+        );
+        let res = calculate(std::slice::from_ref(&r), &c, None);
+        assert!(res.applied.is_empty());
+        assert_eq!(price(&res, 1), 1000.0);
+        // Без узла периода — за всё время
+        r.conditions = cumulative_cond("Great", 1000.0, None);
+        assert_eq!(price(&calculate(&[r], &c, None), 1), 900.0);
+    }
+
+    #[test]
+    fn cumulative_action_picks_highest_reached_range() {
+        let ranges = json!([
+            {"sum": 20000, "value": 10, "type": "P"},
+            {"sum": 5000, "value": 7, "type": "P"},
+            {"sum": 1000, "value": 3, "type": "P"}
+        ]);
+        let rules = [rule(1, vec![cumulative_act(ranges, "N", vec![])])];
+        let at = |sum: f64| {
+            with_sums(
+                ctx(vec![item(1, 1000.0, 2.0)]),
+                &[(CumulativePeriod::AllTime, sum)],
+            )
+        };
+        let r = calculate(&rules, &at(6000.0), None);
+        assert_eq!(price(&r, 1), 930.0);
+        assert_eq!(ids(&r), vec![1]);
+        assert_eq!(r.applied[0].items, vec![(1, 140.0)]);
+        assert_eq!(r.applied[0].sum, 140.0);
+        assert_eq!(r.items[&1].rules, vec![1]);
+
+        let r = calculate(&rules, &at(999.0), None);
+        assert_eq!(price(&r, 1), 1000.0);
+        assert!(r.applied.is_empty());
+
+        let fixed = [rule(
+            1,
+            vec![cumulative_act(
+                json!([{"sum": 0, "value": 50, "type": "F"}]),
+                "N",
+                vec![],
+            )],
+        )];
+        assert_eq!(price(&calculate(&fixed, &at(0.0), None), 1), 950.0);
+        // Скидка больше цены — к позиции не применяется
+        let over = [rule(
+            1,
+            vec![cumulative_act(
+                json!([{"sum": 0, "value": 1500, "type": "F"}]),
+                "N",
+                vec![],
+            )],
+        )];
+        assert!(calculate(&over, &at(0.0), None).applied.is_empty());
+    }
+
+    #[test]
+    fn cumulative_action_child_filter() {
+        let c = with_sums(
+            ctx(vec![item(1, 1000.0, 1.0), item(2, 1000.0, 1.0)]),
+            &[(CumulativePeriod::AllTime, 1000.0)],
+        );
+        let first = rule(
+            1,
+            vec![bskt("Discount", 5.0, "Perc", 0.0, vec![product(10)])],
+        );
+        let mut second = rule(
+            2,
+            vec![cumulative_act(
+                json!([{"sum": 1000, "value": 3, "type": "P"}]),
+                "N",
+                vec![
+                    json!({"CLASS_ID": "CondBsktAppliedDiscount", "DATA": {"logic": "Equal", "value": "N"}}),
+                ],
+            )],
+        );
+        second.sort = 200;
+        let r = calculate(&[first, second], &c, None);
+        assert_eq!(price(&r, 1), 950.0);
+        assert_eq!(price(&r, 2), 970.0);
+        assert_eq!(r.applied[1].items, vec![(2, 30.0)]);
+    }
+
+    #[test]
+    fn cumulative_more_profitable_keeps_better_discount() {
+        let c = with_sums(
+            ctx(vec![item(1, 1000.0, 2.0)]),
+            &[(CumulativePeriod::AllTime, 1000.0)],
+        );
+        let run = |percent: f64| {
+            let first = rule(1, vec![bskt("Discount", percent, "Perc", 0.0, vec![])]);
+            let mut second = rule(
+                2,
+                vec![cumulative_act(
+                    json!([{"sum": 1000, "value": 10, "type": "P"}]),
+                    "Y",
+                    vec![],
+                )],
+            );
+            second.sort = 200;
+            calculate(&[first, second], &c, None)
+        };
+        // Скидка 20 % выгоднее — позиция не меняется, правила нет в записях
+        let r = run(20.0);
+        assert_eq!(price(&r, 1), 800.0);
+        assert_eq!(ids(&r), vec![1]);
+        assert_eq!(r.items[&1].rules, vec![1]);
+        // 5 % (950) — накопительная от базовой: 900, в записи — изменение на 50 за единицу
+        let r = run(5.0);
+        assert_eq!(price(&r, 1), 900.0);
+        assert_eq!(r.items[&1].discount, 100.0);
+        assert_eq!(ids(&r), vec![1, 2]);
+        assert_eq!(r.applied[1].items, vec![(1, 100.0)]);
+        assert_eq!(r.applied[1].sum, 100.0);
+    }
+
+    #[test]
+    fn cumulative_rules_excluded_from_catalog() {
+        let mut by_condition = rule(2, vec![bskt("Discount", 10.0, "Perc", 0.0, vec![])]);
+        by_condition.conditions = node(
+            json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": [
+                {"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": [
+                    {"CLASS_ID": "CondCumulativeGroup", "DATA": {"logic": "EqGr", "Value": 0}, "CHILDREN": []}
+                ]}
+            ]}),
+        );
+        let rules = vec![
+            rule(1, vec![bskt("Discount", 10.0, "Perc", 0.0, vec![])]),
+            by_condition,
+            rule(
+                3,
+                vec![cumulative_act(
+                    json!([{"sum": 0, "value": 10, "type": "P"}]),
+                    "N",
+                    vec![],
+                )],
+            ),
+        ];
+        let ids: Vec<i64> = product_rules(&rules).iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![1]);
     }
 }
