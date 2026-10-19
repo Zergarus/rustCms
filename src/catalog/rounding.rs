@@ -40,7 +40,6 @@ impl RoundType {
     }
 
     /// Код типа в Битриксе: `ROUND_MATH` = 1, `ROUND_UP` = 2, `ROUND_DOWN` = 4.
-    #[allow(dead_code)] // потребитель (админка) появляется в следующих задачах
     pub fn from_bitrix(n: i64) -> Option<Self> {
         match n {
             1 => Some(RoundType::Math),

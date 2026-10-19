@@ -174,6 +174,21 @@ struct Discounts {
     coupons: Vec<CouponRow>,
     /// `b_catalog_discount`: (id, название) — старые скидки каталога, не переносятся.
     catalog: Vec<(i64, String)>,
+    /// `b_catalog_disc_save_group`: (id скидки, название) — накопительные программы каталога,
+    /// не переносятся.
+    disc_save: Vec<(i64, String)>,
+    /// `b_catalog_rounding`.
+    rounding: Vec<RoundingRow>,
+}
+
+/// Строка `b_catalog_rounding`; числа — десятичные строки как в базе.
+struct RoundingRow {
+    id: i64,
+    price_type_id: i64,
+    price: String,
+    /// `ROUND_TYPE`: 1 — математическое, 2 — вверх, 4 — вниз.
+    round_type: i64,
+    precision: String,
 }
 
 /// Строка `b_sale_discount`; деревья — как в базе, PHP-serialize.
@@ -640,6 +655,21 @@ fn bitrix_date(raw: &str) -> Option<DateTime<Utc>> {
             .single()?
             .with_timezone(&Utc),
     )
+}
+
+/// Дата в формате интерфейса Битрикса `DD.MM.YYYY[ HH:MI[:SS]]` (московское время) → unix-секунды.
+fn parse_bitrix_timestamp(raw: &str) -> Option<i64> {
+    let raw = raw.trim();
+    let naive = ["%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M"]
+        .iter()
+        .find_map(|f| NaiveDateTime::parse_from_str(raw, f).ok())
+        .or_else(|| {
+            chrono::NaiveDate::parse_from_str(raw, "%d.%m.%Y")
+                .ok()?
+                .and_hms_opt(0, 0, 0)
+        })?;
+    let offset = FixedOffset::east_opt(BITRIX_UTC_OFFSET_SECS)?;
+    Some(naive.and_local_timezone(offset).single()?.timestamp())
 }
 
 /// Код в формате CMS; если из исходного не получается — `fallback`.
@@ -1623,7 +1653,8 @@ fn php_unserialize(raw: &str) -> Result<Value, String> {
 /// становится объектом, `CHILDREN` с ключами не по порядку — списком. Значения свойств-
 /// справочников (`CondIBProp` поля из `directories`: поле → инфоблок HL) — внешние коды строк;
 /// они заменяются на id записей, ненайденные остаются как есть (их отметит проверка дерева).
-/// Прочие id сохраняются при переносе и не меняются.
+/// Границы периодов накопления (`Period`, `sum_period_data`) приводятся к unix-секундам.
+/// Прочие id (записи, разделы, типы цен) сохраняются при переносе и не меняются.
 fn discount_tree(
     raw: &str,
     directories: &HashMap<i64, i64>,
@@ -1646,6 +1677,41 @@ fn discount_tree(
         }
         if let Some(Value::Array(children)) = node.get_mut("CHILDREN") {
             children.iter_mut().for_each(normalize);
+        }
+        // Накопление: границы периода — число или дата; пустое — ключ удаляется
+        let class = node.get("CLASS_ID").and_then(Value::as_str);
+        let (target, keys): (Option<&mut Value>, &[&str]) = match class {
+            Some("Period") => (node.get_mut("DATA"), &["ValueStart", "ValueEnd"]),
+            Some("CumulativeAction") => (
+                node.get_mut("DATA")
+                    .and_then(|d| d.get_mut("sum_period_data")),
+                &[
+                    "discount_sum_order_start",
+                    "discount_sum_order_end",
+                    "discount_sum_period_value",
+                    "discount_sum_period_type",
+                ],
+            ),
+            _ => return,
+        };
+        let Some(Value::Object(data)) = target else {
+            return;
+        };
+        for key in keys {
+            match data.get(*key) {
+                Some(Value::Null) => {
+                    data.remove(*key);
+                }
+                Some(Value::String(s)) if s.trim().is_empty() => {
+                    data.remove(*key);
+                }
+                Some(Value::String(s)) => {
+                    if let Some(ts) = parse_bitrix_timestamp(s) {
+                        data.insert((*key).into(), Value::from(ts));
+                    }
+                }
+                _ => {}
+            }
         }
     }
     fn remap(
@@ -1682,6 +1748,63 @@ fn discount_tree(
     Ok(node)
 }
 
+/// Правила округления `b_catalog_rounding` заменяются целиком; тип цены — по id (типы цен
+/// переносятся с теми же id). Правило с неизвестным типом цены, `ROUND_TYPE` или точностью
+/// не переносится — предупреждение.
+async fn write_rounding(
+    tx: &mut sqlx::PgConnection,
+    rules: &[RoundingRow],
+    warnings: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    use crate::catalog::rounding::RoundType;
+    sqlx::query("DELETE FROM catalog_rounding")
+        .execute(&mut *tx)
+        .await?;
+    let price_types: HashSet<i64> = sqlx::query_scalar("SELECT id FROM catalog_price_types")
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+    let positive = |s: &str| s.trim().parse::<f64>().is_ok_and(|v| v > 0.0);
+    for r in rules {
+        let skip = |why: String| {
+            format!(
+                "правило округления {} (b_catalog_rounding) не перенесено: {why}",
+                r.id
+            )
+        };
+        let Some(round_type) = RoundType::from_bitrix(r.round_type) else {
+            warnings.push(skip(format!("неизвестный ROUND_TYPE {}", r.round_type)));
+            continue;
+        };
+        if !price_types.contains(&r.price_type_id) {
+            warnings.push(skip(format!("неизвестный тип цены {}", r.price_type_id)));
+            continue;
+        }
+        let price = r.price.trim();
+        if price.parse::<f64>().is_err() || !positive(&r.precision) {
+            warnings.push(skip(format!(
+                "цена «{price}» или точность «{}» некорректны",
+                r.precision
+            )));
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO catalog_rounding (price_type_id, price, round_type, precision)
+             VALUES ($1, $2::text::numeric, $3, $4::text::numeric)
+             ON CONFLICT (price_type_id, price) DO UPDATE SET round_type = EXCLUDED.round_type,
+                 precision = EXCLUDED.precision",
+        )
+        .bind(r.price_type_id)
+        .bind(price)
+        .bind(round_type.as_str())
+        .bind(r.precision.trim())
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(())
+}
+
 /// Группа Битрикса «Все пользователи (в том числе неавторизованные)»: правило для всех.
 const BITRIX_EVERYONE_GROUP: i64 = 2;
 
@@ -1703,6 +1826,18 @@ async fn write_discounts(tx: &mut sqlx::PgConnection, data: &Data) -> anyhow::Re
             list.join(", ")
         ));
     }
+    if !d.disc_save.is_empty() {
+        let list: Vec<String> = d
+            .disc_save
+            .iter()
+            .map(|(id, name)| format!("{id} «{name}»"))
+            .collect();
+        warnings.push(format!(
+            "накопительные программы каталога (b_catalog_disc_save_*) не переносятся: {}",
+            list.join(", ")
+        ));
+    }
+    write_rounding(tx, &d.rounding, &mut warnings).await?;
     let directories: HashMap<i64, i64> = data
         .properties
         .iter()
@@ -3181,6 +3316,42 @@ async fn read_discounts(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
             ));
         }
     }
+    if mysql_table_exists(my, "b_catalog_rounding").await? {
+        for row in sqlx::query(
+            "SELECT CAST(ID AS SIGNED), CAST(CATALOG_GROUP_ID AS SIGNED), CAST(PRICE AS CHAR),
+                    CAST(ROUND_TYPE AS SIGNED), CAST(ROUND_PRECISION AS CHAR)
+             FROM b_catalog_rounding ORDER BY ID",
+        )
+        .fetch_all(my)
+        .await?
+        {
+            d.rounding.push(RoundingRow {
+                id: int_col(&row, 0).context("b_catalog_rounding.ID")?,
+                price_type_id: int_col(&row, 1).unwrap_or(0),
+                price: str_col(&row, 2),
+                round_type: int_col(&row, 3).unwrap_or(0),
+                precision: str_col(&row, 4),
+            });
+        }
+    }
+    if mysql_table_exists(my, "b_catalog_disc_save_group").await? {
+        // Программа — скидка каталога (b_catalog_discount), группы повторяют её по строке
+        let named = mysql_table_exists(my, "b_catalog_discount").await?;
+        let sql = if named {
+            "SELECT DISTINCT CAST(g.DISCOUNT_ID AS SIGNED), CAST(IFNULL(d.NAME, '') AS CHAR)
+             FROM b_catalog_disc_save_group g
+             LEFT JOIN b_catalog_discount d ON d.ID = g.DISCOUNT_ID ORDER BY 1"
+        } else {
+            "SELECT DISTINCT CAST(DISCOUNT_ID AS SIGNED), '' FROM b_catalog_disc_save_group
+             ORDER BY 1"
+        };
+        for row in sqlx::query(sql).fetch_all(my).await? {
+            d.disc_save.push((
+                int_col(&row, 0).context("b_catalog_disc_save_group.DISCOUNT_ID")?,
+                str_col(&row, 1),
+            ));
+        }
+    }
     if !mysql_table_exists(my, "b_sale_discount").await? {
         return Ok(());
     }
@@ -4624,7 +4795,7 @@ mod tests {
     }
     /// `ACTIONS` правила №24 трансопта «+10%» из `b_sale_discount`.
     const RULE24_ACTIONS: &str = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:1:{s:3:"All";s:3:"AND";}s:8:"CHILDREN";a:1:{i:0;a:3:{s:8:"CLASS_ID";s:14:"ActSaleBsktGrp";s:4:"DATA";a:6:{s:4:"Type";s:5:"Extra";s:5:"Value";d:10;s:4:"Unit";s:4:"Perc";s:3:"Max";i:0;s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:1:{i:0;a:2:{s:8:"CLASS_ID";s:15:"CondIBProp:4:55";s:4:"DATA";a:2:{s:5:"logic";s:5:"Equal";s:5:"value";i:32;}}}}}}"#;
-    /// Условие накопительной скидки (3б): движок его не знает.
+    /// Условие несуществующего класса: движок его не знает.
     const UNKNOWN_CONDITIONS: &str = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:2:{s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:1:{i:0;a:3:{s:8:"CLASS_ID";s:19:"CondBsktFooBarGroup";s:4:"DATA";a:2:{s:5:"logic";s:4:"EqGr";s:5:"Value";d:1000;}s:8:"CHILDREN";a:0:{}}}}"#;
     const RULE24_CONDITIONS: &str = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:2:{s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:0:{}}"#;
 
@@ -4753,13 +4924,13 @@ mod tests {
                         xml_id: "plus10".into(),
                         ..rule(24, "+10%")
                     },
-                    // Накопительная скидка (3б) — переносится, но не применяется
+                    // Условие неизвестного класса — правило переносится, но не применяется
                     DiscountRow {
                         conditions: UNKNOWN_CONDITIONS.into(),
                         priority: 5,
                         sort: 50,
                         last_level_discount: true,
-                        ..rule(27, "Накопительная")
+                        ..rule(27, "Неизвестное условие")
                     },
                     DiscountRow {
                         use_coupons: true,
@@ -4811,6 +4982,7 @@ mod tests {
                     },
                 ],
                 catalog: vec![(7, "Старая скидка каталога".into())],
+                ..Discounts::default()
             },
             ..Data::default()
         };
@@ -4867,7 +5039,7 @@ mod tests {
                 r(24, "+10%", true, 1, 100, [true, false, false], "", "plus10"),
                 r(
                     27,
-                    "Накопительная",
+                    "Неизвестное условие",
                     true,
                     5,
                     50,
@@ -5007,6 +5179,178 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(next, (33, 4));
+    }
+
+    /// Данные с типом цены №1 и №2 для проверки округления и накопительных программ.
+    fn catalog_data() -> Data {
+        let mut data = Data::default();
+        for (id, code) in [(1, "BASE"), (2, "OPT")] {
+            data.catalog
+                .price_types
+                .push((id, code.into(), code.into(), id == 1, String::new()));
+        }
+        data
+    }
+
+    #[sqlx::test]
+    async fn import_carries_rounding(db: PgPool) {
+        let row = |id: i64, price_type_id: i64, price: &str, round_type: i64, precision: &str| {
+            RoundingRow {
+                id,
+                price_type_id,
+                price: price.into(),
+                round_type,
+                precision: precision.into(),
+            }
+        };
+        let mut data = catalog_data();
+        data.discounts.rounding = vec![
+            row(1, 1, "0.0000", 1, "10.0000"),
+            row(2, 1, "1000.0000", 2, "100.0000"),
+            row(3, 1, "5000.0000", 3, "1.0000"),
+            row(4, 99, "0.0000", 1, "1.0000"),
+        ];
+        let props = resolve_properties(&mut data);
+        let mut tx = db.begin().await.unwrap();
+        write_all(&mut tx, &data, &props).await.unwrap();
+        tx.commit().await.unwrap();
+        let rules: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT price_type_id, price::text, round_type, precision::text
+             FROM catalog_rounding ORDER BY price",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            rules,
+            vec![
+                (1, "0.00".into(), "math".into(), "10.0000".into()),
+                (1, "1000.00".into(), "up".into(), "100.0000".into()),
+            ]
+        );
+        // Повторный перенос заменяет правила целиком
+        data.discounts.rounding = vec![row(5, 2, "0", 4, "0.5")];
+        let mut tx = db.begin().await.unwrap();
+        write_all(&mut tx, &data, &props).await.unwrap();
+        tx.commit().await.unwrap();
+        let rules: Vec<(i64, String)> =
+            sqlx::query_as("SELECT price_type_id, round_type FROM catalog_rounding")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(rules, vec![(2, "down".to_string())]);
+
+        data.discounts.rounding = vec![
+            row(3, 1, "5000", 3, "1"),
+            row(4, 99, "0", 1, "1"),
+            row(6, 1, "1", 1, "0"),
+        ];
+        let mut tx = db.begin().await.unwrap();
+        let warnings = write_discounts(&mut tx, &data).await.unwrap();
+        tx.rollback().await.unwrap();
+        let joined = warnings.join("\n");
+        assert!(joined.contains("b_catalog_rounding"), "{joined}");
+        for needle in [
+            "правило округления 3",
+            "ROUND_TYPE 3",
+            "правило округления 4",
+            "тип цены 99",
+            "правило округления 6",
+        ] {
+            assert!(joined.contains(needle), "{needle}: {joined}");
+        }
+    }
+
+    #[sqlx::test]
+    async fn import_warns_disc_save(db: PgPool) {
+        let mut data = Data::default();
+        data.discounts.disc_save = vec![(3, "Накопительная 5%".into()), (8, String::new())];
+        let mut tx = db.begin().await.unwrap();
+        let warnings = write_discounts(&mut tx, &data).await.unwrap();
+        tx.commit().await.unwrap();
+        let joined = warnings.join("\n");
+        assert!(
+            joined.contains(
+                "накопительные программы каталога (b_catalog_disc_save_*) не переносятся: 3 «Накопительная 5%», 8 «»"
+            ),
+            "{joined}"
+        );
+        let clean = write_discounts(&mut db.begin().await.unwrap(), &Data::default())
+            .await
+            .unwrap();
+        assert!(clean.is_empty(), "{clean:?}");
+    }
+
+    #[sqlx::test]
+    async fn import_carries_cumulative_and_gift_rules(db: PgPool) {
+        sqlx::query("INSERT INTO groups (code, name, external_id) VALUES ('g', 'G', 'bitrix:16')")
+            .execute(&db)
+            .await
+            .unwrap();
+        let conditions = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:2:{s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:0:{}}"#;
+        let cumulative = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:1:{s:3:"All";s:3:"AND";}s:8:"CHILDREN";a:1:{i:0;a:3:{s:8:"CLASS_ID";s:16:"CumulativeAction";s:4:"DATA";a:5:{s:6:"ranges";a:1:{i:0;a:3:{s:3:"sum";i:1000;s:5:"value";i:5;s:4:"type";s:1:"P";}}s:15:"type_sum_period";s:8:"interval";s:15:"sum_period_data";a:2:{s:24:"discount_sum_order_start";s:19:"01.01.2026 00:00:00";s:22:"discount_sum_order_end";s:0:"";}s:24:"apply_if_more_profitable";s:1:"N";s:3:"All";s:3:"AND";}s:8:"CHILDREN";a:0:{}}}}"#;
+        let gift_conditions = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:2:{s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:0:{}}"#;
+        let gift = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:1:{s:3:"All";s:3:"AND";}s:8:"CHILDREN";a:1:{i:0;a:3:{s:8:"CLASS_ID";s:13:"GiftCondGroup";s:4:"DATA";a:3:{s:4:"Type";s:3:"one";s:3:"All";s:3:"AND";s:4:"True";s:4:"True";}s:8:"CHILDREN";a:1:{i:0;a:3:{s:8:"CLASS_ID";s:19:"GifterCondIBElement";s:4:"DATA";a:2:{s:4:"Type";s:3:"one";s:5:"Value";a:1:{i:0;i:77;}}s:8:"CHILDREN";a:0:{}}}}}}"#;
+        let rule = |id: i64, name: &str, conditions: &str, actions: &str| DiscountRow {
+            id,
+            name: name.into(),
+            active: true,
+            active_from: None,
+            active_to: None,
+            priority: 1,
+            sort: 100,
+            last_discount: false,
+            last_level_discount: false,
+            use_coupons: false,
+            conditions: conditions.into(),
+            actions: actions.into(),
+            xml_id: String::new(),
+        };
+        let mut data = Data::default();
+        data.discounts.rules = vec![
+            rule(40, "Накопительная", conditions, cumulative),
+            rule(41, "Подарок", gift_conditions, gift),
+        ];
+        data.discounts.groups = vec![(40, 16), (41, 16)];
+        let props = resolve_properties(&mut data);
+        let mut tx = db.begin().await.unwrap();
+        write_all(&mut tx, &data, &props).await.unwrap();
+        tx.commit().await.unwrap();
+        let rows: Vec<(i64, String, serde_json::Value)> =
+            sqlx::query_as("SELECT id, unsupported, actions FROM discounts ORDER BY id")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.1.is_empty()), "{rows:?}");
+        let data0 = &rows[0].2["CHILDREN"][0]["DATA"];
+        assert_eq!(
+            data0["sum_period_data"],
+            serde_json::json!({"discount_sum_order_start": 1767214800})
+        );
+        assert_eq!(
+            rows[1].2["CHILDREN"][0]["CHILDREN"][0]["DATA"]["Value"],
+            serde_json::json!([77])
+        );
+    }
+
+    #[test]
+    fn discount_tree_normalizes_cumulative_dates() {
+        use serde_json::json;
+        let raw = r#"a:3:{s:8:"CLASS_ID";s:9:"CondGroup";s:4:"DATA";a:0:{}s:8:"CHILDREN";a:2:{i:0;a:3:{s:8:"CLASS_ID";s:16:"CumulativeAction";s:4:"DATA";a:2:{s:15:"sum_period_data";a:3:{s:24:"discount_sum_order_start";i:100;s:22:"discount_sum_order_end";s:0:"";s:25:"discount_sum_period_value";N;}s:6:"ranges";a:0:{}}s:8:"CHILDREN";a:0:{}}i:1;a:3:{s:8:"CLASS_ID";s:6:"Period";s:4:"DATA";a:2:{s:10:"ValueStart";s:10:"01.01.2026";s:8:"ValueEnd";N;}s:8:"CHILDREN";a:0:{}}}}"#;
+        let node = discount_tree(raw, &HashMap::new(), &HashMap::new()).unwrap();
+        let v = serde_json::to_value(&node).unwrap();
+        assert_eq!(
+            v["CHILDREN"][0]["DATA"]["sum_period_data"],
+            json!({"discount_sum_order_start": 100})
+        );
+        assert_eq!(v["CHILDREN"][1]["DATA"], json!({"ValueStart": 1767214800}));
+        assert_eq!(
+            parse_bitrix_timestamp("01.01.2026 00:00:00"),
+            Some(1767214800)
+        );
+        assert_eq!(parse_bitrix_timestamp("01.01.2026 03:00"), Some(1767225600));
+        assert_eq!(parse_bitrix_timestamp("вчера"), None);
     }
 
     #[test]
