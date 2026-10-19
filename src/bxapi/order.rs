@@ -120,6 +120,18 @@ fn goods_total(basket: &Value) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Сумма позиций `ids` снимка корзины.
+fn selected_sum(basket: &Value, ids: &[i64]) -> f64 {
+    let sum = basket["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|it| it["id"].as_i64().is_some_and(|id| ids.contains(&id)))
+        .filter_map(|it| it["sum"].as_f64())
+        .sum::<f64>();
+    (sum * 100.0).round() / 100.0
+}
+
 fn currency(basket: &Value) -> String {
     basket
         .get("currency")
@@ -347,6 +359,21 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
     let product_ids: Vec<i64> = lines.iter().map(|l| l.product_id).collect();
     // Правила — до транзакции: в ней чтения только через её соединение
     let rules = discount_repo::active_rules(&state.db, chrono::Utc::now()).await?;
+    // Стоимость выбранных товаров, которую покупатель видел в итогах (с данными заказа)
+    let shown = if rules.is_empty() {
+        None
+    } else {
+        let base = cart_base(&state, &jar).await?;
+        let seen = priced_for(
+            &state,
+            base,
+            Some(person_type),
+            Some(payment.id),
+            Some((delivery.id, delivery.price)),
+        )
+        .await?;
+        Some(selected_sum(&seen.snapshot, &ids))
+    };
     let mut tx = state.db.begin().await?;
     let info = catalog::load_locked(&mut tx, &product_ids).await?;
     let checked = match lines
@@ -378,7 +405,9 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         &mut tx,
         &rules,
         &cart,
-        (cart_buyer, buyer),
+        // Цены — по сессии, как в корзине: гость считается гостем, даже если по его
+        // контактам найден пользователь (тот — только владелец заказа)
+        (cart_buyer, user_id),
         &ordered,
         &info,
         order_ctx,
@@ -467,11 +496,22 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         },
         "deliveryStores": form::delivery_stores(delivery, &cart.stores),
     });
+    let mut messages = pricing.messages;
+    if let Some(text) = shown.and_then(|s| price_change_message(s, goods, &messages)) {
+        messages.push(text);
+    }
     // Только если есть что сказать — иначе ответ прежний байт в байт
-    if !pricing.messages.is_empty() {
-        data["messages"] = json!(pricing.messages);
+    if !messages.is_empty() {
+        data["messages"] = json!(messages);
     }
     Ok(success(data))
+}
+
+/// Сообщение о том, что стоимость товаров заказа не та, что покупатель видел в корзине с
+/// данными заказа (`shown`); расхождение из-за купона уже объяснено его сообщением.
+fn price_change_message(shown: f64, goods: f64, messages: &[String]) -> Option<String> {
+    ((shown - goods).abs() > 0.005 && messages.is_empty())
+        .then(|| format!("Стоимость товаров изменилась: {goods:.2} вместо {shown:.2}"))
 }
 
 fn round2(v: f64) -> f64 {
@@ -501,7 +541,7 @@ async fn price_order(
     tx: &mut sqlx::PgConnection,
     rules: &[crate::discount::model::Rule],
     cart: &CartState,
-    (cart_buyer, user_id): (i64, i64),
+    (cart_buyer, user_id): (i64, Option<i64>),
     items: &[CartItem],
     info: &HashMap<i64, catalog::PurchaseInfo>,
     order: OrderCtx,
@@ -511,7 +551,7 @@ async fn price_order(
     let mut messages = Vec::new();
     for locked in discount_repo::lock_buyer_coupons(tx, cart_buyer).await? {
         let cp = locked.coupon;
-        match discount_repo::save_problem(&cp, locked.rule, Some(user_id), now) {
+        match discount_repo::save_problem(&cp, locked.rule, user_id, now) {
             None => coupons.push(cp),
             Some(text) => {
                 let was_applied = cart.discounts.coupons.iter().any(|(code, st)| {
@@ -523,7 +563,7 @@ async fn price_order(
             }
         }
     }
-    let ctx = context::for_cart(&mut *tx, items, info, Some(user_id), coupons, order).await?;
+    let ctx = context::for_cart(&mut *tx, items, info, user_id, coupons, order).await?;
     if ctx.items.iter().any(|it| {
         cart.bases
             .get(&it.key)
@@ -1030,6 +1070,89 @@ mod tests {
             .unwrap();
         assert_eq!(item["price"], json!(900.0));
         assert_eq!(item["basePrice"], json!(1000.0));
+    }
+
+    /// Гость без сессии оформляет с email пользователя из группы со скидкой −10 %: цена —
+    /// гостевая (как в корзине и итогах, что он видел), заказ — на найденного пользователя.
+    #[sqlx::test]
+    async fn guest_with_member_email_gets_guest_price(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let group: i64 = sqlx::query_scalar(
+            "INSERT INTO groups (code, name) VALUES ('vip', 'VIP') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let member: i64 = sqlx::query_scalar(
+            "INSERT INTO users (login, email, password_hash) VALUES ('vip', 'vip@e.x', '') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+            .bind(member)
+            .bind(group)
+            .execute(&db)
+            .await
+            .unwrap();
+        let rule_id = rule(&db, 10.0, 0.0, false, None).await;
+        sqlx::query("INSERT INTO discount_groups (discount_id, group_id) VALUES ($1, $2)")
+            .bind(rule_id)
+            .bind(group)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO order_properties (person_type_id, code, name, is_email) VALUES ($1, 'EMAIL', 'E-mail', TRUE)",
+        )
+        .bind(fx.f.person_type_id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let (_, cart) = send(&app, "GET", "/api/v1/cart", &fx.cookie, None).await;
+        assert_eq!(cart["data"]["totalPrice"], json!(2500), "{cart}");
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/api/v1/order/submit",
+            &fx.cookie,
+            Some(
+                json!({"personTypeId": fx.f.person_type_id, "deliveryId": 1, "paymentId": 1,
+                        "properties": {"EMAIL": "VIP@e.x"},
+                        "basketSnapshot": cart["data"]["snapshot"]}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = &body["data"];
+        assert_eq!(data["total"], json!(2800.0), "{body}");
+        assert!(data.get("messages").is_none(), "{body}");
+        let order_id = data["orderId"].as_i64().unwrap();
+        let (user, goods): (Option<i64>, f64) =
+            sqlx::query_as("SELECT user_id, goods_price::float8 FROM orders WHERE id = $1")
+                .bind(order_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(user, Some(member), "заказ — на найденного пользователя");
+        assert_eq!(goods, 2500.0);
+        assert_eq!(line(&db, fx.f.item_id).await, (1000.0, 0.0, 1000.0));
+    }
+
+    #[test]
+    fn price_change_message_only_on_difference() {
+        assert_eq!(price_change_message(2500.0, 2500.0, &[]), None);
+        assert_eq!(price_change_message(2500.0, 2500.004, &[]), None);
+        assert_eq!(
+            price_change_message(2500.0, 2250.0, &[]).as_deref(),
+            Some("Стоимость товаров изменилась: 2250.00 вместо 2500.00")
+        );
+        // Расхождение уже объяснено сообщением о купоне
+        assert_eq!(
+            price_change_message(2500.0, 2250.0, &["Купон X: купон неактивен".into()]),
+            None
+        );
     }
 
     /// Ждёт, пока `n` запросов встанут на блокировке строк.

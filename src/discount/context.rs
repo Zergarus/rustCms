@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Datelike, FixedOffset, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use serde_json::{Map, Value};
 
 use super::model::Coupon;
@@ -75,8 +75,10 @@ pub struct Context {
 impl Context {
     /// День недели по МСК (как время bxapi): 1 — понедельник … 7 — воскресенье (`date('N')`).
     pub fn day_of_week(&self) -> u32 {
-        let msk = FixedOffset::east_opt(3 * 3600).expect("valid offset");
-        self.now.with_timezone(&msk).weekday().number_from_monday()
+        self.now
+            .with_timezone(&super::msk())
+            .weekday()
+            .number_from_monday()
     }
 }
 

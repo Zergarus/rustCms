@@ -1561,8 +1561,8 @@ mod tests {
         )
         .await;
         sqlx::query(
-            "INSERT INTO shipments (order_id, delivery_id, delivery_name, price, store_id)
-             VALUES ($1, 1, 'Самовывоз', 100, 1)",
+            "INSERT INTO shipments (order_id, delivery_id, delivery_name, price, base_price, store_id)
+             VALUES ($1, 1, 'Самовывоз', 100, 100, 1)",
         )
         .bind(id)
         .execute(&db)

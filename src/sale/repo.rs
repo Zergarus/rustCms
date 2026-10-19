@@ -569,7 +569,8 @@ pub async fn recalc_totals_in(
 
 /// «Пересчитать скидки»: текущие правила к позициям заказа (купоны — те, что уже в
 /// `order_discounts`), цены позиций и доставки, суммы заказа и единственной неоплаченной
-/// оплаты, `order_discounts`. Базовые цены — из заказа. Оплаченный заказ — ошибка.
+/// оплаты, `order_discounts`. Базовые цены — из заказа; позиции с ценой, заданной вручную,
+/// не меняются. Оплаченный или отменённый заказ — ошибка.
 /// Без проектного условия правил; карточка заказа зовёт [`recalculate_discounts_with`].
 #[cfg_attr(not(test), allow(dead_code))]
 pub async fn recalculate_discounts(db: &PgPool, order_id: i64) -> anyhow::Result<()> {
@@ -587,15 +588,18 @@ pub async fn recalculate_discounts_with(
     // Правила — до транзакции: в ней чтения только через её соединение
     let rules = discount_repo::active_rules(db, Utc::now()).await?;
     let mut tx = db.begin().await?;
-    let Some((paid, person_type, user_id)): Option<(bool, i64, Option<i64>)> =
-        sqlx::query_as("SELECT paid, person_type_id, user_id FROM orders WHERE id = $1 FOR UPDATE")
-            .bind(order_id)
-            .fetch_optional(&mut *tx)
-            .await?
+    let Some((paid, canceled, person_type, user_id)): Option<(bool, bool, i64, Option<i64>)> =
+        sqlx::query_as(
+            "SELECT paid, canceled, person_type_id, user_id FROM orders WHERE id = $1 FOR UPDATE",
+        )
+        .bind(order_id)
+        .fetch_optional(&mut *tx)
+        .await?
     else {
         anyhow::bail!("заказ не найден");
     };
     anyhow::ensure!(!paid, "заказ оплачен");
+    anyhow::ensure!(!canceled, "заказ отменён");
 
     let rows: Vec<(i64, i64, Option<i64>, f64, String, f64)> = sqlx::query_as(
         "SELECT id, item_id, store_id, quantity::float8, name,
@@ -673,7 +677,8 @@ pub async fn recalculate_discounts_with(
     let ctx = context::for_lines(&mut tx, lines, user_id, coupons, order).await?;
     let result = engine::calculate(&rules, &ctx, hook);
 
-    for it in &ctx.items {
+    // Позиции с ценой, заданной вручную, остаются как есть (их базовая цена — не цена)
+    for it in ctx.items.iter().filter(|it| !it.custom_price) {
         let Some(r) = result.items.get(&it.key) else {
             continue;
         };
@@ -1245,6 +1250,60 @@ mod tests {
             (false, 1, 1, 0),
             "отмена купон не возвращает"
         );
+    }
+
+    /// Цена позиции, заданная вручную, при пересчёте не меняется — и её базовая тоже.
+    #[sqlx::test]
+    async fn recalculate_keeps_custom_price_line(db: PgPool) {
+        let id = place_order(&db, &order_fixture(&db).await, None).await;
+        sqlx::query(
+            "UPDATE cart_items SET base_price = 100, discount_price = 0, price = 80, custom_price = TRUE
+             WHERE order_id = $1",
+        )
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO discounts (name, actions) VALUES ('Скидка', $1)")
+            .bind(serde_json::json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND"}, "CHILDREN": [{
+                "CLASS_ID": "ActSaleBsktGrp",
+                "DATA": {"Type": "Discount", "Value": 10, "Unit": "Perc", "Max": 0, "All": "AND", "True": "True"},
+                "CHILDREN": []}]}))
+            .execute(&db)
+            .await
+            .unwrap();
+        recalculate_discounts(&db, id).await.unwrap();
+        let line: (f64, f64, f64) = sqlx::query_as(
+            "SELECT base_price::float8, discount_price::float8, price::float8 FROM cart_items WHERE order_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(line, (100.0, 0.0, 80.0));
+    }
+
+    /// Отменённый заказ, как и оплаченный, не пересчитывается.
+    #[sqlx::test]
+    async fn recalculate_refuses_canceled_order(db: PgPool) {
+        let id = place_order(&db, &order_fixture(&db).await, None).await;
+        assert!(set_canceled(&db, id, true, "передумал").await.unwrap());
+        let err = recalculate_discounts(&db, id).await.unwrap_err();
+        assert_eq!(err.to_string(), "заказ отменён");
+    }
+
+    /// У цены доставки до скидок нет значения по умолчанию: забытый `base_price` — ошибка.
+    #[sqlx::test]
+    async fn shipment_base_price_is_required(db: PgPool) {
+        let id = place_order(&db, &order_fixture(&db).await, None).await;
+        let res = sqlx::query(
+            "INSERT INTO shipments (order_id, delivery_id, delivery_name, price) VALUES ($1, 1, 'Курьер', 10)",
+        )
+        .bind(id)
+        .execute(&db)
+        .await;
+        let err = res.unwrap_err();
+        assert!(err.to_string().contains("base_price"), "{err}");
     }
 
     /// Пересчёт берёт все позиции заказа по его базовым ценам — и снятые с продажи.

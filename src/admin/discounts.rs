@@ -18,9 +18,12 @@ use sqlx::PgPool;
 use super::render;
 use crate::{
     access::{Access, DISCOUNTS_MANAGE},
-    discount::model::{
-        ACTION_CLASSES, CONDITION_CLASSES, CouponKind, Node, Refs, allowed_in, is_group,
-        unsupported_classes_with, validate_with,
+    discount::{
+        model::{
+            ACTION_CLASSES, CONDITION_CLASSES, CouponKind, Node, Refs, allowed_in, is_group,
+            unsupported_classes_with, validate_with,
+        },
+        msk,
     },
     error::{AppError, AppResult, is_unique_violation},
     state::AppState,
@@ -55,13 +58,14 @@ fn checked(fields: &FormFields, key: &str) -> bool {
     fields.iter().any(|(k, _)| k == key)
 }
 
+/// Даты в форме и списках — по Москве, как в Битриксе и движке скидок.
 fn input_date(dt: Option<DateTime<Utc>>) -> String {
-    dt.map(|d| d.format(DATETIME_FORMAT).to_string())
+    dt.map(|d| d.with_timezone(&msk()).format(DATETIME_FORMAT).to_string())
         .unwrap_or_default()
 }
 
 fn shown_date(dt: Option<DateTime<Utc>>) -> String {
-    dt.map(|d| d.format("%d.%m.%Y %H:%M").to_string())
+    dt.map(|d| d.with_timezone(&msk()).format("%d.%m.%Y %H:%M").to_string())
         .unwrap_or_default()
 }
 
@@ -69,7 +73,10 @@ fn parse_date(raw: &str, label: &str, errors: &mut Vec<String>) -> Option<DateTi
     match raw.trim() {
         "" => None,
         raw => match NaiveDateTime::parse_from_str(raw, DATETIME_FORMAT) {
-            Ok(dt) => Some(dt.and_utc()),
+            Ok(dt) => dt
+                .and_local_timezone(msk())
+                .single()
+                .map(|d| d.with_timezone(&Utc)),
             Err(_) => {
                 errors.push(format!("{label}: неверная дата"));
                 None
@@ -755,10 +762,13 @@ pub async fn delete(
     Path(id): Path<i64>,
 ) -> AppResult<Redirect> {
     user.require(DISCOUNTS_MANAGE)?;
-    sqlx::query("DELETE FROM discounts WHERE id = $1")
+    let deleted = sqlx::query("DELETE FROM discounts WHERE id = $1")
         .bind(id)
         .execute(&state.db)
         .await?;
+    if deleted.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
     Ok(Redirect::to("/admin/discounts"))
 }
 
@@ -955,7 +965,7 @@ async fn check(
     }))
 }
 
-async fn save_rule(db: &PgPool, id: Option<i64>, r: &RuleInput) -> sqlx::Result<i64> {
+async fn save_rule(db: &PgPool, id: Option<i64>, r: &RuleInput) -> AppResult<i64> {
     let mut tx = db.begin().await?;
     let conditions = serde_json::to_value(&r.conditions).unwrap_or_default();
     let actions = serde_json::to_value(&r.actions).unwrap_or_default();
@@ -987,8 +997,10 @@ async fn save_rule(db: &PgPool, id: Option<i64>, r: &RuleInput) -> sqlx::Result<
         .bind(conditions)
         .bind(actions)
         .bind(r.unsupported.join(","))
-        .fetch_one(&mut *tx)
-        .await?;
+        .fetch_optional(&mut *tx)
+        .await?
+        // Правило удалили, пока его правили
+        .ok_or(AppError::NotFound)?;
     sqlx::query("DELETE FROM discount_groups WHERE discount_id = $1")
         .bind(id)
         .execute(&mut *tx)
@@ -1754,7 +1766,8 @@ mod tests {
         let form = body(&[
             ("name", "Скидка 10%"),
             ("active", "on"),
-            ("active_from", "2026-01-01T00:00"),
+            // Время — московское, как у импорта из Битрикса и движка
+            ("active_from", "2026-10-20T23:59"),
             ("active_to", ""),
             ("priority", "5"),
             ("sort", "200"),
@@ -1810,14 +1823,16 @@ mod tests {
                 .fetch_one(&db)
                 .await
                 .unwrap();
-        assert_eq!(from.unwrap().to_rfc3339(), "2026-01-01T00:00:00+00:00");
+        assert_eq!(from.unwrap().to_rfc3339(), "2026-10-20T20:59:00+00:00");
+        let (_, list) = get(&app, "/admin/discounts", &cookie).await;
+        assert!(list.contains("20.10.2026 23:59"), "{list}");
 
         // форма правки показывает поля и дерево
         let (status, html) = get(&app, &format!("/admin/discounts/{id}"), &cookie).await;
         assert_eq!(status, StatusCode::OK);
         for s in [
             r#"value="Скидка 10%""#,
-            r#"value="2026-01-01T00:00""#,
+            r#"value="2026-10-20T23:59""#,
             r#"name="last_discount" checked"#,
             r#"name="use_coupons" checked"#,
             &format!(r#"value="{}" checked"#, c.group_id),
@@ -1966,6 +1981,49 @@ mod tests {
         assert!(list.contains("CondCumulativeGroup"), "{list}");
         let (_, html) = get(&app, &format!("/admin/discounts/{id}"), &cookie).await;
         assert!(html.contains("не применяется") && html.contains("CondCumulativeGroup"));
+    }
+
+    /// Правило удалили, пока его правили, — 404, а не 500.
+    #[sqlx::test]
+    async fn save_of_missing_rule_is_not_found(db: PgPool) {
+        let tree = |raw: &str| serde_json::from_str::<crate::discount::model::Node>(raw).unwrap();
+        let input = super::RuleInput {
+            name: "Нет такого".into(),
+            active: true,
+            active_from: None,
+            active_to: None,
+            priority: 1,
+            sort: 100,
+            last_discount: false,
+            last_level_discount: false,
+            use_coupons: false,
+            groups: Vec::new(),
+            conditions: tree(super::DEFAULT_CONDITIONS),
+            actions: tree(super::DEFAULT_ACTIONS),
+            unsupported: Vec::new(),
+        };
+        let res = super::save_rule(&db, Some(999), &input).await;
+        assert!(
+            matches!(res, Err(crate::error::AppError::NotFound)),
+            "{res:?}"
+        );
+        let rules: i64 = sqlx::query_scalar("SELECT count(*) FROM discounts")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(rules, 0);
+    }
+
+    #[sqlx::test]
+    async fn delete_of_missing_rule_is_not_found(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let (status, _) = post_form(&app, "/admin/discounts/999/delete", &cookie, "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let id = rule(&db, "Правило").await;
+        let path = format!("/admin/discounts/{id}/delete");
+        let (status, _) = post_form(&app, &path, &cookie, "").await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
     }
 
     #[sqlx::test]
