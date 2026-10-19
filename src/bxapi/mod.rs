@@ -10,6 +10,7 @@ mod cart;
 mod elements;
 mod filter;
 mod forms;
+mod gifts;
 mod images;
 mod location;
 mod nav;
@@ -41,6 +42,7 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/base/csrf/token", get(csrf_token))
+        .route("/catalog/gifts", get(gifts::catalog_gifts))
         .route("/cart", get(cart::get_cart))
         .route("/cart/items", post(cart::add_item))
         .route("/cart/items/{id}/quantity", post(cart::set_quantity))

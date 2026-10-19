@@ -104,6 +104,36 @@ pub async fn active_rules(db: &PgPool, now: DateTime<Utc>) -> sqlx::Result<Vec<R
         .collect())
 }
 
+/// Активные записи разделов и их потомков (`CCatalogGifterProduct`: подарки раздела), по id
+/// раздела; id записей по возрастанию, у раздела без записей — пустой список.
+pub async fn section_products(
+    db: &PgPool,
+    section_ids: &[i64],
+) -> sqlx::Result<HashMap<i64, Vec<i64>>> {
+    let mut out: HashMap<i64, Vec<i64>> = section_ids.iter().map(|&s| (s, Vec::new())).collect();
+    if section_ids.is_empty() {
+        return Ok(out);
+    }
+    let rows: Vec<(i64, i64)> = sqlx::query_as(
+        "WITH RECURSIVE t(root, id, depth) AS (
+             SELECT id, id, 0 FROM collection_sections WHERE id = ANY($1)
+             UNION ALL
+             SELECT t.root, s.id, t.depth + 1
+             FROM collection_sections s JOIN t ON s.parent_id = t.id WHERE t.depth < 100
+         )
+         SELECT DISTINCT t.root, i.id
+         FROM t JOIN collection_items i ON i.section_id = t.id AND i.active
+         ORDER BY 1, 2",
+    )
+    .bind(section_ids)
+    .fetch_all(db)
+    .await?;
+    for (root, id) in rows {
+        out.entry(root).or_default().push(id);
+    }
+    Ok(out)
+}
+
 #[derive(FromRow)]
 struct CouponRow {
     id: i64,

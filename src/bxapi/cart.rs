@@ -17,7 +17,7 @@ use sqlx::FromRow;
 use super::{
     BxError, BxResult,
     auth::current_user_id,
-    parse_body,
+    gifts, parse_body,
     query::{Select, number},
     serialize::{Env, Mode, load_rows, serialize},
     success,
@@ -496,6 +496,11 @@ pub(super) async fn priced(
         let list = coupon_list(state, &base, &discounts).await?;
         snapshot["coupons"] = Value::Array(list);
     }
+    // Ключ `gifts` — только при активных правилах с подарками (иначе ответ прежний)
+    if gifts::has_gift_rules(&rules) {
+        let list = gifts::offers_json(&state.db, &discounts.gifts).await?;
+        snapshot["gifts"] = Value::Array(list);
+    }
 
     // До скидок: позиция контекста — по своей базовой цене, остальные — как в снимке
     let ctx_base: HashMap<i64, f64> = ctx.items.iter().map(|i| (i.key, i.base_price)).collect();
@@ -523,6 +528,35 @@ pub(super) async fn priced(
         bases: ctx_base,
         snapshot,
     })
+}
+
+/// Доступные подарки корзины `base` с добавленной позицией `extra` (товар и его данные покупки);
+/// без неё — подарки самой корзины. Расчёт движком, цены в БД не пишутся.
+pub(super) async fn gift_offers(
+    state: &AppState,
+    base: &CartBase,
+    extra: Option<(CartItem, PurchaseInfo)>,
+    rules: &[crate::discount::model::Rule],
+) -> Result<Vec<crate::discount::model::GiftOffer>, BxError> {
+    let mut items = base.items.clone();
+    let mut info = base.info.clone();
+    if let Some((item, purchase)) = extra {
+        info.insert(item.product_id, purchase);
+        items.push(item);
+    }
+    let mut conn = state.db.acquire().await?;
+    let mut ctx = context::for_cart(
+        &mut conn,
+        &items,
+        &info,
+        base.user_id,
+        base.coupons.clone(),
+        OrderCtx::default(),
+    )
+    .await?;
+    context::load_extras(&mut conn, &mut ctx, rules).await?;
+    let hook = state.project.discount_condition_hook.as_deref();
+    Ok(engine::calculate(rules, &ctx, hook).gifts)
 }
 
 pub async fn get_cart(State(state): State<AppState>, jar: CookieJar) -> BxResult {
@@ -1439,5 +1473,166 @@ mod tests {
             ])
         );
         assert_eq!(cart["items"][0]["price"], json!(900));
+    }
+
+    /// Правило подарка: `kind` (`one`/`all`), `class` (`GifterCondIBElement`/`GifterCondIBSection`),
+    /// условие — сумма корзины по базовым ценам не меньше `min`.
+    async fn insert_gift_rule(
+        db: &sqlx::PgPool,
+        class: &str,
+        kind: &str,
+        value: Value,
+        conditions: Value,
+    ) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO discounts (name, conditions, actions) VALUES ('Подарок', $1, $2) RETURNING id",
+        )
+        .bind(conditions)
+        .bind(json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": [
+            {"CLASS_ID": "GiftCondGroup", "DATA": {"All": "AND"}, "CHILDREN": [
+                {"CLASS_ID": class, "DATA": {"Type": kind, "Value": value}}
+            ]}
+        ]}))
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    fn amount_at_least(min: f64) -> Value {
+        json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": [
+            {"CLASS_ID": "CondBsktAmtBaseGroup", "DATA": {"logic": "EqGr", "Value": min, "All": "AND"}, "CHILDREN": []}
+        ]})
+    }
+
+    #[sqlx::test]
+    async fn basket_lists_available_gifts(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        // В корзине остаётся только товар 2 x 1000 = 2000; предложение — подарок
+        sqlx::query("DELETE FROM cart_items WHERE id = $1")
+            .bind(fx.offer_item_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let rule = insert_gift_rule(
+            &db,
+            "GifterCondIBElement",
+            "one",
+            json!([fx.offer_id]),
+            amount_at_least(1000.0),
+        )
+        .await;
+        let (status, body) = send(&app, "GET", "/api/v1/cart", &fx.cookie, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            data(&body)["gifts"],
+            json!([{"ruleId": rule, "type": "one", "productIds": [fx.offer_id]}])
+        );
+        // Положили предложение: оно с ценой 0, подарков не осталось
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/api/v1/cart/items",
+            &fx.cookie,
+            Some(json!({"productId": fx.offer_id})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let cart = data(&body);
+        let line = cart["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["productId"] == json!(fx.offer_id))
+            .unwrap_or_else(|| panic!("{cart}"));
+        assert_eq!(line["price"], json!(0), "{cart}");
+        assert_eq!(cart["gifts"], json!([]));
+    }
+
+    #[sqlx::test]
+    async fn basket_gifts_absent_without_gift_rules(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        insert_rule(&db, 10.0, 0.0, false).await;
+        let (status, body) = send(&app, "GET", "/api/v1/cart", &fx.cookie, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(data(&body).get("gifts").is_none(), "{body}");
+    }
+
+    #[sqlx::test]
+    async fn section_gift_lists_section_products(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        // Неактивный товар раздела в подарки не попадает
+        let hidden: i64 = sqlx::query_scalar(
+            "INSERT INTO collection_items (collection_id, code, name, section_id, active)
+             SELECT collection_id, 'hidden', 'Скрытый', section_id, FALSE
+             FROM collection_items WHERE id = $1 RETURNING id",
+        )
+        .bind(fx.parent_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        // Предложение из корзины убрано: иначе его родитель был бы подарен и вычтен из списка
+        sqlx::query("DELETE FROM cart_items WHERE id = $1")
+            .bind(fx.offer_item_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let rule = insert_gift_rule(
+            &db,
+            "GifterCondIBSection",
+            "all",
+            json!(fx.section_id),
+            amount_at_least(0.0),
+        )
+        .await;
+        let (_, body) = send(&app, "GET", "/api/v1/cart", &fx.cookie, None).await;
+        let gifts = data(&body)["gifts"].clone();
+        assert_eq!(
+            gifts,
+            json!([{"ruleId": rule, "type": "all", "productIds": [fx.parent_id]}]),
+            "hidden = {hidden}"
+        );
+    }
+
+    /// Подарок раздела «все»: подаренный товар раздела уходит из `productIds`.
+    #[sqlx::test]
+    async fn section_gift_all_drops_gifted_product(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        // Второй товар раздела, чтобы список не опустел
+        let other: i64 = sqlx::query_scalar(
+            "INSERT INTO collection_items (collection_id, code, name, section_id)
+             SELECT collection_id, 'maslo-2', 'Масло 2', section_id
+             FROM collection_items WHERE id = $1 RETURNING id",
+        )
+        .bind(fx.parent_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let rule = insert_gift_rule(
+            &db,
+            "GifterCondIBSection",
+            "all",
+            json!(fx.section_id),
+            amount_at_least(0.0),
+        )
+        .await;
+        // Предложение (родитель — в разделе) в корзине становится подарком; родитель вычитается
+        let (_, body) = send(&app, "GET", "/api/v1/cart", &fx.cookie, None).await;
+        let cart = data(&body);
+        let line = cart["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["productId"] == json!(fx.offer_id))
+            .unwrap_or_else(|| panic!("{cart}"));
+        assert_eq!(line["price"], json!(0), "{cart}");
+        assert_eq!(
+            cart["gifts"],
+            json!([{"ruleId": rule, "type": "all", "productIds": [other]}]),
+            "{cart}"
+        );
     }
 }
