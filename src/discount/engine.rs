@@ -10,6 +10,7 @@ use super::cond::{self, State};
 use super::context::{Context, CtxItem};
 use super::model::{Coupon, CouponKind, Node, Rule, as_num, round2};
 use crate::bxapi::project::DiscountConditionHook;
+use crate::catalog::rounding::Rounding;
 
 /// Итог по позиции.
 #[derive(Debug, Clone, PartialEq)]
@@ -434,7 +435,11 @@ fn calculate_refs(rules: &[&Rule], ctx: &Context, hook: Hook) -> DiscountResult 
         .items
         .iter()
         .map(|it| {
-            let price = calc.price(it.key);
+            let mut price = calc.price(it.key);
+            // Округление — в самом конце: условия и суммы правил видят неокруглённые цены
+            if let Some(rounding) = ctx.rounding.as_ref().filter(|_| !it.custom_price) {
+                price = rounding.round(it.price_type_id, price);
+            }
             let res = ItemResult {
                 price,
                 discount: round2(it.base_price - price),
@@ -480,10 +485,12 @@ pub fn catalog_price(
     group_ids: &[i64],
     now: DateTime<Utc>,
 ) -> Option<f64> {
-    catalog_price_with(rules, item, None, group_ids, now, None)
+    catalog_price_with(rules, item, None, group_ids, now, None, None)
 }
 
-/// [`catalog_price`] для посетителя `user_id` (его видят условия проекта `hook`).
+/// [`catalog_price`] для посетителя `user_id` (его видят условия проекта `hook`) и правил
+/// округления `rounding`: цена в каталоге — округлённая; если она равна округлённой базовой,
+/// правила цену не меняют.
 pub fn catalog_price_with(
     rules: &[&Rule],
     item: &CtxItem,
@@ -491,6 +498,7 @@ pub fn catalog_price_with(
     group_ids: &[i64],
     now: DateTime<Utc>,
     hook: Hook,
+    rounding: Option<&Rounding>,
 ) -> Option<f64> {
     if rules.is_empty() || item.custom_price {
         return None;
@@ -505,12 +513,16 @@ pub fn catalog_price_with(
         coupons: Vec::new(),
         order: Default::default(),
         now,
+        rounding: rounding.cloned(),
     };
     let price = calculate_refs(rules, &ctx, hook)
         .items
         .get(&item.key)?
         .price;
-    (price != item.base_price).then_some(price)
+    let base = rounding.map_or(item.base_price, |r| {
+        r.round(item.price_type_id, item.base_price)
+    });
+    (price != base).then_some(price)
 }
 
 #[cfg(test)]
@@ -608,6 +620,7 @@ mod tests {
             coupons: vec![],
             order: OrderCtx::default(),
             now: now(),
+            rounding: None,
         }
     }
 
@@ -632,6 +645,54 @@ mod tests {
             use_count: 0,
             user_id: None,
         }
+    }
+
+    fn with_rounding(mut c: Context, t: crate::catalog::rounding::RoundType, p: f64) -> Context {
+        use crate::catalog::rounding::{RoundRule, Rounding};
+        c.rounding = Some(Rounding::new(vec![RoundRule {
+            price_type_id: 1,
+            price: 0.0,
+            round_type: t,
+            precision: p,
+        }]));
+        for it in &mut c.items {
+            it.price_type_id = Some(1);
+        }
+        c
+    }
+
+    #[test]
+    fn rounding_applies_to_final_price() {
+        use crate::catalog::rounding::RoundType;
+        let c = with_rounding(ctx(vec![item(1, 1234.56, 2.0)]), RoundType::Up, 10.0);
+        let r = calculate(
+            &[rule(1, vec![bskt("Discount", 10.0, "Perc", 0.0, vec![])])],
+            &c,
+            None,
+        );
+        // 1234.56 − 123.46 = 1111.10 → вверх до 10 = 1120
+        assert_eq!(
+            r.items[&1],
+            ItemResult {
+                price: 1120.0,
+                discount: 114.56,
+                rules: vec![1]
+            }
+        );
+        // Сумма правила — только его скидка, без округления
+        assert_eq!(r.applied[0].items, vec![(1, 246.92)]);
+        assert_eq!(r.applied[0].sum, 246.92);
+    }
+
+    #[test]
+    fn rounding_skips_custom_price_and_zero() {
+        use crate::catalog::rounding::RoundType;
+        let mut custom = item(1, 1234.56, 1.0);
+        custom.custom_price = true;
+        let c = with_rounding(ctx(vec![custom, item(2, 0.0, 1.0)]), RoundType::Up, 10.0);
+        let r = calculate(&[], &c, None);
+        assert_eq!(price(&r, 1), 1234.56);
+        assert_eq!(price(&r, 2), 0.0);
     }
 
     #[test]
@@ -1495,13 +1556,16 @@ mod tests {
         let it = item(1, 1000.0, 1.0);
         let hook: Hook = Some(&UserHook);
         assert_eq!(
-            catalog_price_with(&[&r], &it, Some(5), &[], now(), hook),
+            catalog_price_with(&[&r], &it, Some(5), &[], now(), hook, None),
             Some(900.0)
         );
         assert_eq!(
-            catalog_price_with(&[&r], &it, Some(6), &[], now(), hook),
+            catalog_price_with(&[&r], &it, Some(6), &[], now(), hook, None),
             None
         );
-        assert_eq!(catalog_price_with(&[&r], &it, None, &[], now(), hook), None);
+        assert_eq!(
+            catalog_price_with(&[&r], &it, None, &[], now(), hook, None),
+            None
+        );
     }
 }

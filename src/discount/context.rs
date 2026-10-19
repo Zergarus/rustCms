@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use chrono::{DateTime, Datelike, Utc};
 use serde_json::{Map, Value};
 
-use super::model::Coupon;
+use super::model::{Coupon, Rule};
+use crate::catalog::rounding::{self, Rounding};
 
 /// Родительский товар предложения: поля, которые условия товара проверяют и у родителя
 /// (`PARENT_*` у Битрикса).
@@ -46,6 +47,9 @@ pub struct CtxItem {
     /// Цена единицы до скидок.
     pub base_price: f64,
     pub custom_price: bool,
+    /// Тип цены, по которой взята `base_price`; `None` — цена не из каталога (ручная,
+    /// удалённый товар): округление к ней не применяется.
+    pub price_type_id: Option<i64>,
     /// Вес единицы.
     pub weight: f64,
     /// Остаток на складе.
@@ -70,6 +74,8 @@ pub struct Context {
     pub coupons: Vec<Coupon>,
     pub order: OrderCtx,
     pub now: DateTime<Utc>,
+    /// Правила округления цен; `None` — их нет (или не загружены).
+    pub rounding: Option<Rounding>,
 }
 
 impl Context {
@@ -116,9 +122,11 @@ pub async fn for_cart(
             if !(sellable(p) && p.available) {
                 return None;
             }
+            let price = main_price(&p.prices)?;
             Some(Line {
                 item: it,
-                base_price: main_price(&p.prices)?.price,
+                base_price: price.price,
+                price_type_id: Some(price.type_id),
                 stock: p.total,
             })
         })
@@ -130,6 +138,8 @@ pub async fn for_cart(
 pub struct Line<'a> {
     pub item: &'a crate::cart::CartItem,
     pub base_price: f64,
+    /// Тип цены `base_price`; `None` — не из каталога.
+    pub price_type_id: Option<i64>,
     pub stock: f64,
 }
 
@@ -144,12 +154,12 @@ pub async fn for_lines(
     order: OrderCtx,
 ) -> sqlx::Result<Context> {
     let group_ids = user_group_ids(&mut *db, user_id).await?;
-    let mut buyable: Vec<(&crate::cart::CartItem, f64, f64)> = lines
+    let mut buyable: Vec<(&crate::cart::CartItem, f64, Option<i64>, f64)> = lines
         .into_iter()
-        .map(|l| (l.item, l.base_price, l.stock))
+        .map(|l| (l.item, l.base_price, l.price_type_id, l.stock))
         .collect();
-    buyable.sort_by_key(|(it, _, _)| it.id);
-    let keys: Vec<i64> = buyable.iter().map(|(it, _, _)| it.id).collect();
+    buyable.sort_by_key(|(it, ..)| it.id);
+    let keys: Vec<i64> = buyable.iter().map(|(it, ..)| it.id).collect();
     let custom: HashMap<i64, Option<f64>> = if keys.is_empty() {
         HashMap::new()
     } else {
@@ -164,7 +174,7 @@ pub async fn for_lines(
     };
     let raw = buyable
         .into_iter()
-        .map(|(it, catalog_price, stock)| {
+        .map(|(it, catalog_price, price_type_id, stock)| {
             let custom_price = custom.get(&it.id);
             RawItem {
                 key: it.id,
@@ -173,6 +183,11 @@ pub async fn for_lines(
                 quantity: it.quantity,
                 base_price: custom_price.copied().flatten().unwrap_or(catalog_price),
                 custom_price: custom_price.is_some(),
+                price_type_id: if custom_price.is_some() {
+                    None
+                } else {
+                    price_type_id
+                },
                 stock,
             }
         })
@@ -184,7 +199,22 @@ pub async fn for_lines(
         coupons,
         order,
         now: Utc::now(),
+        rounding: None,
     })
+}
+
+/// Дополнительные данные расчёта, которых нет в `for_cart`/`for_lines`: правила округления
+/// (если у позиций есть тип цены). Вызывается после построения контекста везде, где считаются
+/// скидки; сюда же добавляются накопленные суммы покупателя.
+pub async fn load_extras(
+    db: &mut sqlx::PgConnection,
+    ctx: &mut Context,
+    _rules: &[Rule],
+) -> sqlx::Result<()> {
+    if ctx.items.iter().any(|it| it.price_type_id.is_some()) {
+        ctx.rounding = rounding::load(db).await?;
+    }
+    Ok(())
 }
 
 /// Группы пользователя; гость — без групп.
@@ -232,6 +262,7 @@ pub async fn for_products(
             quantity: 1.0,
             base_price: price,
             custom_price: false,
+            price_type_id: None,
             stock: stock.get(&id).copied().unwrap_or(0.0),
         })
         .collect();
@@ -247,6 +278,7 @@ struct RawItem {
     quantity: f64,
     base_price: f64,
     custom_price: bool,
+    price_type_id: Option<i64>,
     stock: f64,
 }
 
@@ -389,6 +421,7 @@ async fn load_items(
             quantity: it.quantity,
             base_price: it.base_price,
             custom_price: it.custom_price,
+            price_type_id: it.price_type_id,
             weight: rec.weight,
             stock_quantity: it.stock,
         });

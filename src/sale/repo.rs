@@ -665,6 +665,10 @@ pub async fn recalculate_discounts_with(
         .map(|it| context::Line {
             item: it,
             base_price: bases.get(&it.id).copied().unwrap_or(0.0),
+            price_type_id: info
+                .get(&it.product_id)
+                .and_then(|p| catalog::main_price(&p.prices))
+                .map(|p| p.type_id),
             stock: info.get(&it.product_id).map_or(0.0, |p| p.total),
         })
         .collect();
@@ -674,7 +678,8 @@ pub async fn recalculate_discounts_with(
         delivery_id: shipment.and_then(|s| s.1),
         delivery_price: shipment.map(|s| s.2),
     };
-    let ctx = context::for_lines(&mut tx, lines, user_id, coupons, order).await?;
+    let mut ctx = context::for_lines(&mut tx, lines, user_id, coupons, order).await?;
+    context::load_extras(&mut tx, &mut ctx, &rules).await?;
     let result = engine::calculate(&rules, &ctx, hook);
 
     // Позиции с ценой, заданной вручную, остаются как есть (их базовая цена — не цена)
@@ -1281,6 +1286,48 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(line, (100.0, 0.0, 80.0));
+    }
+
+    /// После появления правила округления пересчёт записывает округлённую цену.
+    #[sqlx::test]
+    async fn recalculate_rounds_prices(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        sqlx::query("INSERT INTO catalog_price_types (id, code, name, is_base, sort) VALUES (1, 'BASE', 'Розница', TRUE, 100)")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO catalog_prices (item_id, price_type_id, price, currency) VALUES ($1, 1, 1004, 'RUB')")
+            .bind(f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE cart_items SET base_price = 1004, discount_price = 0, price = 1004 WHERE order_id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        recalculate_discounts(&db, id).await.unwrap();
+        let line = || async {
+            sqlx::query_as::<_, (f64, f64, f64)>(
+                "SELECT base_price::float8, discount_price::float8, price::float8
+                 FROM cart_items WHERE order_id = $1",
+            )
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        assert_eq!(line().await, (1004.0, 0.0, 1004.0), "без правила как было");
+        sqlx::query(
+            "INSERT INTO catalog_rounding (price_type_id, price, round_type, precision)
+             VALUES (1, 0, 'math', 10)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        recalculate_discounts(&db, id).await.unwrap();
+        assert_eq!(line().await, (1004.0, 4.0, 1000.0));
     }
 
     /// Отменённый заказ, как и оплаченный, не пересчитывается.

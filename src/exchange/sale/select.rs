@@ -1712,4 +1712,20 @@ mod tests {
         .await;
         assert_eq!(one(&db, id).await.items[0].discount, -2.0);
     }
+
+    /// В выгрузку идёт цена позиции заказа — уже округлённая, скидка — разница с базовой.
+    #[sqlx::test]
+    async fn select_uses_rounded_price(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        exec(
+            &db,
+            "UPDATE cart_items SET quantity = 1, base_price = 1004, discount_price = 4, price = 1000
+             WHERE order_id = $1",
+            id,
+        )
+        .await;
+        let it = &one(&db, id).await.items[0];
+        assert_eq!((it.price, it.discount), (1000.0, 4.0));
+    }
 }

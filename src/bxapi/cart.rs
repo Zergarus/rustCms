@@ -456,7 +456,7 @@ pub(super) async fn priced(
 ) -> Result<CartState, BxError> {
     let rules = discount_repo::active_rules(&state.db, chrono::Utc::now()).await?;
     let mut conn = state.db.acquire().await?;
-    let ctx = context::for_cart(
+    let mut ctx = context::for_cart(
         &mut conn,
         &base.items,
         &base.info,
@@ -465,6 +465,7 @@ pub(super) async fn priced(
         order,
     )
     .await?;
+    context::load_extras(&mut conn, &mut ctx, &rules).await?;
     let hook = state.project.discount_condition_hook.as_deref();
     let discounts = engine::calculate(&rules, &ctx, hook);
     drop(conn);
@@ -1158,6 +1159,70 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(data(&body).get("coupons").is_none());
+    }
+
+    /// Округление вверх без правил скидок: цена позиции выше базовой, `discount_price`
+    /// отрицательный, строки «Скидка» в итогах нет, «Стоимость товаров» — по базовым ценам.
+    #[sqlx::test]
+    async fn rounding_up_without_discount_has_no_discount_line(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        sqlx::query(
+            "INSERT INTO catalog_rounding (price_type_id, price, round_type, precision)
+             VALUES (1, 0, 'up', 100)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let summary = || async {
+            let (status, body) = send(
+                &app,
+                "POST",
+                "/api/v1/order/summary",
+                &fx.cookie,
+                Some(json!({"deliveryId": 1, "paymentId": 1})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            data(&body)["summary"].clone()
+        };
+        // Цены кратны 100 — без изменений
+        let (_, cart) = send(&app, "GET", "/api/v1/cart", &fx.cookie, None).await;
+        assert_eq!(data(&cart)["items"][0]["price"], json!(1000));
+        let s = summary().await;
+        assert_eq!(s[0]["value"], json!(2500.0));
+        assert_eq!(s.as_array().unwrap().len(), 3, "{s}");
+
+        sqlx::query("UPDATE catalog_prices SET price = 1001 WHERE item_id = $1")
+            .bind(fx.f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let (_, cart) = send(&app, "GET", "/api/v1/cart", &fx.cookie, None).await;
+        let cart = data(&cart);
+        let line = cart["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == json!(fx.f.item_id))
+            .unwrap_or_else(|| panic!("{cart}"));
+        assert_eq!(line["price"], json!(1100), "{cart}");
+        let discount: f64 =
+            sqlx::query_scalar("SELECT discount_price::float8 FROM cart_items WHERE id = $1")
+                .bind(fx.f.item_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(discount, -99.0);
+        let s = summary().await;
+        assert_eq!(
+            s,
+            json!([
+                {"label": "Стоимость товаров", "value": 2502.0, "format": "price"},
+                {"label": "Доставка", "value": 300.0, "format": "price"},
+                {"label": "Итого", "value": 3000.0, "type": "total", "format": "price", "hint": "Счёт"},
+            ])
+        );
     }
 
     #[sqlx::test]

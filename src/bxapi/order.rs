@@ -563,7 +563,8 @@ async fn price_order(
             }
         }
     }
-    let ctx = context::for_cart(&mut *tx, items, info, user_id, coupons, order).await?;
+    let mut ctx = context::for_cart(&mut *tx, items, info, user_id, coupons, order).await?;
+    context::load_extras(&mut *tx, &mut ctx, rules).await?;
     if ctx.items.iter().any(|it| {
         cart.bases
             .get(&it.key)
@@ -866,6 +867,31 @@ mod tests {
                              {"cart_item_id": fx.offer_item_id, "value": 50.0}],
                    "delivery": 100.0})
         );
+    }
+
+    /// Округление без правил скидок: в заказ уходит округлённая цена, скидка — разница с базовой.
+    #[sqlx::test]
+    async fn order_stores_rounded_prices(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let (_, cookie) = login(&db, fx.f.buyer_id, "ivan").await;
+        sqlx::query("UPDATE catalog_prices SET price = 1004 WHERE item_id = $1")
+            .bind(fx.f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO catalog_rounding (price_type_id, price, round_type, precision)
+             VALUES (1, 0, 'math', 10)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let data = checkout(&app, &cookie, fx.f.person_type_id).await;
+        assert!(data["orderId"].as_i64().is_some(), "{data}");
+        // (базовая, скидка, цена): 1004 → 1000; предложение 500 кратно 10
+        assert_eq!(line(&db, fx.f.item_id).await, (1004.0, 4.0, 1000.0));
+        assert_eq!(line(&db, fx.offer_item_id).await, (500.0, 0.0, 500.0));
     }
 
     #[sqlx::test]

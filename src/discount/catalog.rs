@@ -44,8 +44,9 @@ impl CatalogRules {
         Ok(items
             .iter()
             .filter_map(|it| {
-                let price =
-                    engine::catalog_price_with(&rules, it, user_id, &group_ids, self.now, hook)?;
+                let price = engine::catalog_price_with(
+                    &rules, it, user_id, &group_ids, self.now, hook, None,
+                )?;
                 Some((it.key, price))
             })
             .collect())

@@ -91,7 +91,7 @@ async fn discounted(
     }
     let coupons = discount_repo::buyer_coupons(&state.db, buyer.id).await?;
     let mut conn = state.db.acquire().await?;
-    let ctx = context::for_cart(
+    let mut ctx = context::for_cart(
         &mut conn,
         items,
         info,
@@ -100,6 +100,7 @@ async fn discounted(
         context::OrderCtx::default(),
     )
     .await?;
+    context::load_extras(&mut conn, &mut ctx, rules).await?;
     let hook = state.project.discount_condition_hook.as_deref();
     Ok(engine::calculate(rules, &ctx, hook)
         .items

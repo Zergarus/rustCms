@@ -450,6 +450,7 @@ mod tests {
             quantity: 2.0,
             base_price: 1000.0,
             custom_price: false,
+            price_type_id: None,
             weight: 9.5,
             stock_quantity: 12.0,
         }
@@ -477,6 +478,7 @@ mod tests {
             quantity: 1.0,
             base_price: 500.0,
             custom_price: false,
+            price_type_id: None,
             weight: 7.0,
             stock_quantity: 0.0,
         }
@@ -496,6 +498,7 @@ mod tests {
             },
             // Вторник 22:30 UTC — среда 01:30 по МСК
             now: Utc.with_ymd_and_hms(2026, 10, 13, 22, 30, 0).unwrap(),
+            rounding: None,
         }
     }
 
