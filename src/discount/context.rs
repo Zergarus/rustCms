@@ -248,16 +248,16 @@ pub async fn user_group_ids(
     }
 }
 
-/// Записи каталога для цены в каталоге: (запись, цена единицы до скидок) → позиция в 1 шт.
-/// с ключом — id записи и остатком `catalog_products.quantity`.
+/// Записи каталога для цены в каталоге: (запись, цена единицы до скидок, тип цены) → позиция
+/// в 1 шт. с ключом — id записи и остатком `catalog_products.quantity`.
 pub async fn for_products(
     db: &mut sqlx::PgConnection,
-    products: &[(i64, f64)],
+    products: &[(i64, f64, Option<i64>)],
 ) -> sqlx::Result<Vec<CtxItem>> {
     if products.is_empty() {
         return Ok(Vec::new());
     }
-    let ids: Vec<i64> = products.iter().map(|(id, _)| *id).collect();
+    let ids: Vec<i64> = products.iter().map(|(id, ..)| *id).collect();
     let stock: HashMap<i64, f64> = sqlx::query_as::<_, (i64, f64)>(
         "SELECT item_id, quantity::float8 FROM catalog_products WHERE item_id = ANY($1)",
     )
@@ -268,14 +268,14 @@ pub async fn for_products(
     .collect();
     let raw = products
         .iter()
-        .map(|&(id, price)| RawItem {
+        .map(|&(id, price, price_type_id)| RawItem {
             key: id,
             product_id: id,
             name: String::new(),
             quantity: 1.0,
             base_price: price,
             custom_price: false,
-            price_type_id: None,
+            price_type_id,
             stock: stock.get(&id).copied().unwrap_or(0.0),
         })
         .collect();

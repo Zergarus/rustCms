@@ -22,7 +22,10 @@ use super::{
     to_camel, to_snake,
 };
 use crate::{
-    catalog,
+    catalog::{
+        self,
+        rounding::{self, Rounding},
+    },
     collection::Field,
     files::{self, FileRecord},
     state::AppState,
@@ -298,6 +301,8 @@ struct Loaded {
     from_offers: HashMap<i64, i64>,
     /// Цена основного типа со скидкой (`Project::catalog_price_discount`), только изменённые.
     discounts: HashMap<i64, f64>,
+    /// Правила округления цен (читаются один раз на запрос с `catalogPrice`).
+    rounding: Option<Rounding>,
 }
 
 /// Предложение, чья цена показывается у товара («от»): самая низкая основная цена среди
@@ -437,6 +442,7 @@ impl Loaded {
         if schema.collection.is_catalog && !row_ids.is_empty() {
             if select.has("catalogPrice") {
                 loaded.prices = catalog::load_prices(&env.state.db, &row_ids).await?;
+                loaded.rounding = rounding::load(&mut *env.state.db.acquire().await?).await?;
             }
             if select.has("stocks") {
                 let amounts: Vec<(i64, i64, f64)> = sqlx::query_as(
@@ -476,20 +482,26 @@ impl Loaded {
 
     /// Цены со скидкой для `catalogPrice`: у товара с ценой «от» — скидка того предложения.
     async fn load_discounts(&mut self, env: &Env<'_>) -> Result<(), BxError> {
-        let Some(rules) = crate::discount::catalog::CatalogRules::load(&env.state.db).await? else {
+        let Some(rules) = crate::discount::catalog::CatalogRules::load_rules(&env.state.db).await?
+        else {
             return Ok(());
         };
-        let sources: Vec<(i64, i64, f64)> = self
+        let rules = rules.with_rounding(self.rounding.clone());
+        let sources: Vec<(i64, i64, f64, i64)> = self
             .prices
             .iter()
             .filter_map(|(id, prices)| {
                 let source = self.from_offers.get(id).copied().unwrap_or(*id);
-                Some((*id, source, catalog::main_price(prices)?.price))
+                let main = catalog::main_price(prices)?;
+                Some((*id, source, main.price, main.type_id))
             })
             .collect();
-        let mut products: Vec<(i64, f64)> = sources.iter().map(|(_, src, p)| (*src, *p)).collect();
-        products.sort_by_key(|(id, _)| *id);
-        products.dedup_by_key(|(id, _)| *id);
+        let mut products: Vec<(i64, f64, Option<i64>)> = sources
+            .iter()
+            .map(|(_, src, p, t)| (*src, *p, Some(*t)))
+            .collect();
+        products.sort_by_key(|(id, ..)| *id);
+        products.dedup_by_key(|(id, ..)| *id);
         let discounted = rules
             .prices(
                 &env.state.db,
@@ -500,7 +512,7 @@ impl Loaded {
             .await?;
         self.discounts = sources
             .into_iter()
-            .filter_map(|(id, src, _)| Some((id, *discounted.get(&src)?)))
+            .filter_map(|(id, src, ..)| Some((id, *discounted.get(&src)?)))
             .collect();
         Ok(())
     }
@@ -790,24 +802,32 @@ impl Loaded {
             return Value::Array(Vec::new()); // Битрикс отдаёт пустой массив
         };
         let main = catalog::main_price(prices).unwrap_or(&prices[0]);
+        // Правила округления: базовая цена при выводе (как `isComponentResultMode` Битрикса)
+        let rounded = |p: &catalog::Price| {
+            self.rounding
+                .as_ref()
+                .map_or(p.price, |r| r.round(Some(p.type_id), p.price))
+        };
         let by_type: Vec<Value> = prices
             .iter()
             .map(|p| {
+                let price = rounded(p);
                 json!({
                     "priceTypeId": p.type_id,
                     "name": p.type_name,
-                    "value": number_value(p.price),
+                    "value": number_value(price),
                     "currency": p.currency,
-                    "formatted": format_price(p.price, snap.currencies.get(&p.currency)),
+                    "formatted": format_price(price, snap.currencies.get(&p.currency)),
                     "quantityFrom": p.quantity_from,
                     "quantityTo": p.quantity_to,
                 })
             })
             .collect();
+        let main_price = rounded(main);
         let mut value = json!({
-            "value": number_value(main.price),
+            "value": number_value(main_price),
             "currency": main.currency,
-            "formatted": format_price(main.price, snap.currencies.get(&main.currency)),
+            "formatted": format_price(main_price, snap.currencies.get(&main.currency)),
             "byType": by_type,
         });
         if let Some(price) = self.discounts.get(&item_id) {
@@ -1131,5 +1151,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(post(&on, list, "", body).await, before);
+    }
+
+    #[sqlx::test]
+    async fn catalog_price_is_rounded(db: sqlx::PgPool) {
+        use std::sync::Arc;
+
+        let fx = crate::test_support::cart_fixture(&db).await;
+        sqlx::query("UPDATE collections SET api_enabled = TRUE")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE catalog_prices SET price = 1001 WHERE item_id = $1")
+            .bind(fx.f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        // Второй тип цены без правил округления
+        sqlx::query(
+            "INSERT INTO catalog_price_types (id, code, name, sort) VALUES (2, 'OPT', 'Опт', 200)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO catalog_prices (item_id, price_type_id, price, currency) VALUES ($1, 2, 777, 'RUB')")
+            .bind(fx.f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let state = crate::test_support::test_state(db.clone());
+        let app = crate::app(state.clone());
+        let detail = "/api/v1/iblock/catalog/element/slug/tovar";
+        let body = json!({"select": ["id", "catalogPrice"]});
+        let price = |v: Value| v["data"]["item"]["catalogPrice"].clone();
+        let before = price(post(&app, detail, "", body.clone()).await);
+        assert_eq!(before["value"], json!(1001));
+
+        sqlx::query("INSERT INTO catalog_rounding (price_type_id, price, round_type, precision) VALUES (1, 0, 'up', 100)")
+            .execute(&db)
+            .await
+            .unwrap();
+        let after = price(post(&app, detail, "", body.clone()).await);
+        assert_eq!(after["value"], json!(1100));
+        assert_eq!(before["formatted"], json!("1001.00"));
+        assert_eq!(after["formatted"], json!("1100.00"));
+        let by_type = after["byType"].as_array().unwrap();
+        assert_eq!(by_type[0]["value"], json!(1100));
+        // Тип без правил — как есть
+        assert_eq!(by_type[1]["value"], json!(777));
+        assert_eq!(by_type[1]["formatted"], before["byType"][1]["formatted"]);
+
+        // Цена со скидкой: 1001 − 10 % = 900.9 → вверх до 1000
+        sqlx::query("INSERT INTO discounts (name, actions) VALUES ('Всем', $1)")
+            .bind(rule_actions(10.0))
+            .execute(&db)
+            .await
+            .unwrap();
+        let on = crate::app(crate::state::AppState {
+            project: Arc::new(crate::bxapi::project::Project {
+                catalog_price_discount: true,
+                ..Default::default()
+            }),
+            ..state
+        });
+        let with = price(post(&on, detail, "", body).await);
+        assert_eq!(with["value"], json!(1100));
+        assert_eq!(with["discountValue"], json!(1000));
     }
 }

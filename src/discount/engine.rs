@@ -1695,6 +1695,38 @@ mod tests {
         assert_eq!(catalog_price(&[&extra], &it, &[], now()), Some(1100.0));
     }
 
+    #[test]
+    fn catalog_price_rounds_discounted_price() {
+        use crate::catalog::rounding::{RoundRule, RoundType};
+
+        let rounding = Rounding::new(vec![RoundRule {
+            price_type_id: 1,
+            price: 0.0,
+            round_type: RoundType::Math,
+            precision: 10.0,
+        }]);
+        let mut it = item(1, 1004.0, 1.0);
+        it.price_type_id = Some(1);
+        // 10 %: 903.6 → 900
+        let r = rule(1, vec![bskt("Discount", 10.0, "Perc", 0.0, vec![])]);
+        assert_eq!(
+            catalog_price_with(&[&r], &it, None, &[], now(), None, Some(&rounding)),
+            Some(900.0)
+        );
+        // 0,2 %: 1001.99 → 1000, как округлённая базовая 1000 — цену правило не меняет
+        let tiny = rule(2, vec![bskt("Discount", 0.2, "Perc", 0.0, vec![])]);
+        assert_eq!(
+            catalog_price_with(&[&tiny], &it, None, &[], now(), None, Some(&rounding)),
+            None
+        );
+        // Тип цены без правил — цена как есть
+        it.price_type_id = Some(2);
+        assert_eq!(
+            catalog_price_with(&[&r], &it, None, &[], now(), None, Some(&rounding)),
+            Some(903.6)
+        );
+    }
+
     struct UserHook;
 
     impl DiscountConditionHook for UserHook {

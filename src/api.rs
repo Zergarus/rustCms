@@ -96,9 +96,12 @@ async fn fill_price_discount(
     };
     let ids: Vec<i64> = items.iter().map(|i| i.id).collect();
     let prices = crate::catalog::load_prices(&state.db, &ids).await?;
-    let base: Vec<(i64, f64)> = ids
+    let base: Vec<(i64, f64, Option<i64>)> = ids
         .iter()
-        .filter_map(|id| Some((*id, crate::catalog::main_price(prices.get(id)?)?.price)))
+        .filter_map(|id| {
+            let main = crate::catalog::main_price(prices.get(id)?)?;
+            Some((*id, main.price, Some(main.type_id)))
+        })
         .collect();
     let discounted = rules
         .prices(
@@ -438,5 +441,35 @@ mod tests {
         assert_eq!(by_code(&offers, "maslo-1l")["price_discount"], json!(400.0));
         let list = get(&app, "/api/v1/iblocks/catalog/elements").await;
         assert_eq!(by_code(&list, "tovar")["price_discount"], json!(720.0));
+    }
+
+    #[sqlx::test]
+    async fn api_price_discount_is_rounded(db: sqlx::PgPool) {
+        let fx = catalog(&db).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        sqlx::query("UPDATE catalog_prices SET price = 1004 WHERE item_id = $1")
+            .bind(fx.f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        insert_rule(
+            &db,
+            always(),
+            perc(
+                10.0,
+                json!([{"CLASS_ID": "CondBsktFldProduct", "DATA": {"logic": "Equal", "value": fx.f.product_id}}]),
+            ),
+        )
+        .await;
+        let list = get(&app, "/api/v1/iblocks/catalog/elements").await;
+        assert_eq!(by_code(&list, "tovar")["price_discount"], json!(903.6));
+        sqlx::query("INSERT INTO catalog_rounding (price_type_id, price, round_type, precision) VALUES (1, 0, 'math', 10)")
+            .execute(&db)
+            .await
+            .unwrap();
+        let list = get(&app, "/api/v1/iblocks/catalog/elements").await;
+        assert_eq!(by_code(&list, "tovar")["price_discount"], json!(900.0));
+        let detail = get(&app, "/api/v1/iblocks/catalog/elements/tovar").await;
+        assert_eq!(detail["price_discount"], json!(900.0));
     }
 }

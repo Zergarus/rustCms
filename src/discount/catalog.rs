@@ -8,23 +8,45 @@ use sqlx::PgPool;
 use super::model::Rule;
 use super::{context, engine, repo};
 use crate::bxapi::project::DiscountConditionHook;
+use crate::catalog::rounding::{self, Rounding};
 
 /// Действующие правила товара (`product_rules`), прочитанные один раз на запрос.
 pub struct CatalogRules {
     rules: Vec<Rule>,
+    /// Правила округления цен: цена со скидкой округляется по типу цены записи.
+    rounding: Option<Rounding>,
     now: DateTime<Utc>,
 }
 
 impl CatalogRules {
     /// `None` — правил товара нет: цены и данные записей читать не нужно.
     pub async fn load(db: &PgPool) -> sqlx::Result<Option<CatalogRules>> {
+        let Some(mut rules) = Self::load_rules(db).await? else {
+            return Ok(None);
+        };
+        rules.rounding = rounding::load(&mut *db.acquire().await?).await?;
+        Ok(Some(rules))
+    }
+
+    /// Только правила, без округления: вызывающий, читавший округление сам (bxapi — один раз
+    /// на запрос), задаёт его через [`CatalogRules::with_rounding`].
+    pub async fn load_rules(db: &PgPool) -> sqlx::Result<Option<CatalogRules>> {
         let now = Utc::now();
         let all = repo::active_rules(db, now).await?;
         let rules: Vec<Rule> = engine::product_rules(&all).into_iter().cloned().collect();
-        Ok((!rules.is_empty()).then_some(CatalogRules { rules, now }))
+        Ok((!rules.is_empty()).then_some(CatalogRules {
+            rules,
+            rounding: None,
+            now,
+        }))
     }
 
-    /// Цены со скидкой записей: (запись, цена единицы до скидок) → цена после правил для
+    pub fn with_rounding(mut self, rounding: Option<Rounding>) -> Self {
+        self.rounding = rounding;
+        self
+    }
+
+    /// Цены со скидкой записей: (запись, цена единицы до скидок, тип цены) → цена после правил для
     /// посетителя `user_id` (гость — `None`, без групп). Только записи, цену которых правила
     /// изменили.
     pub async fn prices(
@@ -32,7 +54,7 @@ impl CatalogRules {
         db: &PgPool,
         hook: Option<&dyn DiscountConditionHook>,
         user_id: Option<i64>,
-        products: &[(i64, f64)],
+        products: &[(i64, f64, Option<i64>)],
     ) -> sqlx::Result<HashMap<i64, f64>> {
         if products.is_empty() {
             return Ok(HashMap::new());
@@ -45,7 +67,13 @@ impl CatalogRules {
             .iter()
             .filter_map(|it| {
                 let price = engine::catalog_price_with(
-                    &rules, it, user_id, &group_ids, self.now, hook, None,
+                    &rules,
+                    it,
+                    user_id,
+                    &group_ids,
+                    self.now,
+                    hook,
+                    self.rounding.as_ref(),
                 )?;
                 Some((it.key, price))
             })
