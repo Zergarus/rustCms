@@ -119,7 +119,7 @@ custom_price), пользователь и группы, купоны, сумм�
 - **Каталог:** цена со скидкой товара — правила, у которых условия зависят только от
   товара и пользователя (без условий корзины и заказа), применённые к одной единице (как
   `GetOptimalPrice`). `/api/v1` — поле `price_discount`; bxapi — только при флаге проекта.
-- **Купоны в API (bxapi):** `POST /basket/coupon/add {coupon}`, `POST /basket/coupon/remove
+- **Купоны в API (bxapi):** `POST /cart/coupon/add {coupon}`, `POST /cart/coupon/remove
   {coupon}`, в ответе `basket` — список купонов (`coupons: [{coupon, status, text}]`, только если у
   покупателя есть купоны — иначе ответ прежний байт в байт).
   Ошибки — тексты `DiscountCouponsManager` Битрикса (не найден, не активен, истёк,
