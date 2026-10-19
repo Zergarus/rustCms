@@ -745,6 +745,38 @@ mod tests {
             .unwrap()
     }
 
+    /// Пустая корзина: «Стоимость товаров» — `0.0`, как до скидок (сумма пустого итератора
+    /// `f64` в Rust — `-0.0`).
+    #[sqlx::test]
+    async fn empty_cart_summary_is_positive_zero(db: sqlx::PgPool) {
+        use tower::ServiceExt;
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let summary = json!({"personTypeId": fx.f.person_type_id, "deliveryId": 1, "paymentId": 1});
+        for (method, path, body) in [
+            ("GET", "/api/v1/order/form", String::new()),
+            ("POST", "/api/v1/order/summary", summary.to_string()),
+        ] {
+            let req = axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{path}");
+            let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let text = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(
+                text.contains(r#"{"label":"Стоимость товаров","value":0.0,"format":"price"}"#),
+                "{path}: {text}"
+            );
+            assert!(!text.contains("-0.0"), "{path}: {text}");
+        }
+    }
+
     #[sqlx::test]
     async fn order_fixes_discounted_prices(db: sqlx::PgPool) {
         let fx = crate::test_support::cart_fixture(&db).await;

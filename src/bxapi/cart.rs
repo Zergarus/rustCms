@@ -510,7 +510,8 @@ pub(super) async fn priced(
             });
             unit * it.quantity
         })
-        .sum();
+        // Не `sum()`: у пустого итератора `f64` он даёт `-0.0` («Стоимость товаров» `-0.0`)
+        .fold(0.0, |acc, x| acc + x);
     Ok(CartState {
         buyer: base.buyer,
         items: base.items,
