@@ -1,8 +1,11 @@
 //! Периоды накопительных скидок (`CumulativeCalculator::createFilterBySumConfiguration`
 //! Битрикса): за какой срок считается сумма оплаченных заказов покупателя.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Duration, Months, Utc};
 use serde_json::{Map, Value};
+use sqlx::PgConnection;
 
 use super::model::{Node, Rule, as_num};
 
@@ -131,6 +134,49 @@ impl CumulativePeriod {
             }
         }
     }
+}
+
+/// Накопленные суммы покупателя по периодам одним запросом: `orders.price` (с доставкой)
+/// оплаченных и не отменённых заказов с `created_at` в границах периода. Курсов валют нет:
+/// считаются только заказы в валюте первого (по id) заказа периода, остальные пропускаются
+/// (`CumulativeCalculator` Битрикса пересчитывает по курсу). Нет заказов — 0.
+pub async fn sums(
+    db: &mut PgConnection,
+    user_id: i64,
+    periods: &[CumulativePeriod],
+    now: DateTime<Utc>,
+) -> sqlx::Result<HashMap<CumulativePeriod, f64>> {
+    if periods.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let (starts, ends): (Vec<_>, Vec<_>) = periods.iter().map(|p| p.start(now)).unzip();
+    let rows: Vec<(i64, f64)> = sqlx::query_as(
+        "SELECT p.i, COALESCE(s.total, 0)::float8
+         FROM unnest($2::timestamptz[], $3::timestamptz[]) WITH ORDINALITY AS p(s, e, i)
+         CROSS JOIN LATERAL (
+             SELECT SUM(x.price) FILTER (WHERE x.currency = x.first_currency) AS total
+             FROM (
+                 SELECT o.price, o.currency,
+                        first_value(o.currency) OVER (ORDER BY o.id) AS first_currency
+                 FROM orders o
+                 WHERE o.user_id = $1 AND o.paid AND NOT o.canceled
+                   AND (p.s IS NULL OR o.created_at >= p.s)
+                   AND (p.e IS NULL OR o.created_at < p.e)
+             ) x
+         ) s",
+    )
+    .bind(user_id)
+    .bind(&starts)
+    .bind(&ends)
+    .fetch_all(&mut *db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(i, sum)| {
+            let period = periods.get(usize::try_from(i).ok()?.checked_sub(1)?)?;
+            Some((period.clone(), sum))
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -301,5 +347,162 @@ mod tests {
             ]
         );
         assert!(periods(&rules[2..]).is_empty());
+    }
+
+    async fn order(db: &sqlx::PgPool, f: &crate::test_support::Fixture, user: i64) -> i64 {
+        crate::test_support::place_order(db, f, Some(user)).await
+    }
+
+    /// Оплаченный заказ на `price` за `days` дней назад.
+    async fn set_order(db: &sqlx::PgPool, id: i64, price: f64, days: i32, paid: bool) {
+        sqlx::query(
+            "UPDATE orders SET price = $2, paid = $3,
+                 created_at = now() - make_interval(days => $4) WHERE id = $1",
+        )
+        .bind(id)
+        .bind(price)
+        .bind(paid)
+        .bind(days)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    async fn user(db: &sqlx::PgPool, login: &str) -> i64 {
+        crate::test_support::user_cookie(db, login, false).await.0
+    }
+
+    #[sqlx::test]
+    async fn cumulative_sums_skip_canceled_and_unpaid(db: sqlx::PgPool) {
+        let f = crate::test_support::order_fixture(&db).await;
+        let (u, other) = (user(&db, "a").await, user(&db, "b").await);
+        let ids = [
+            order(&db, &f, u).await,
+            order(&db, &f, u).await,
+            order(&db, &f, u).await,
+            order(&db, &f, other).await,
+        ];
+        set_order(&db, ids[0], 3000.0, 1, true).await;
+        set_order(&db, ids[1], 5000.0, 1, true).await;
+        sqlx::query("UPDATE orders SET canceled = TRUE WHERE id = $1")
+            .bind(ids[1])
+            .execute(&db)
+            .await
+            .unwrap();
+        set_order(&db, ids[2], 7000.0, 1, false).await;
+        set_order(&db, ids[3], 9000.0, 1, true).await;
+        let mut conn = db.acquire().await.unwrap();
+        let got = sums(&mut conn, u, &[CumulativePeriod::AllTime], Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(got[&CumulativePeriod::AllTime], 3000.0);
+    }
+
+    #[sqlx::test]
+    async fn cumulative_sums_by_period(db: sqlx::PgPool) {
+        let f = crate::test_support::order_fixture(&db).await;
+        let u = user(&db, "a").await;
+        let (old, recent) = (order(&db, &f, u).await, order(&db, &f, u).await);
+        set_order(&db, old, 1000.0, 40, true).await;
+        set_order(&db, recent, 2000.0, 5, true).await;
+        let now = Utc::now();
+        let ten = (now - Duration::days(10)).timestamp();
+        let periods = [
+            CumulativePeriod::Relative {
+                value: 1,
+                unit: 'M',
+            },
+            CumulativePeriod::Relative {
+                value: 60,
+                unit: 'D',
+            },
+            CumulativePeriod::Interval {
+                start: Some(ten),
+                end: None,
+            },
+            CumulativePeriod::Interval {
+                start: None,
+                end: Some(ten),
+            },
+        ];
+        let mut conn = db.acquire().await.unwrap();
+        let got = sums(&mut conn, u, &periods, now).await.unwrap();
+        assert_eq!(got[&periods[0]], 2000.0);
+        assert_eq!(got[&periods[1]], 3000.0);
+        assert_eq!(got[&periods[2]], 2000.0);
+        assert_eq!(got[&periods[3]], 1000.0);
+    }
+
+    #[sqlx::test]
+    async fn cumulative_sums_first_currency_only(db: sqlx::PgPool) {
+        let f = crate::test_support::order_fixture(&db).await;
+        let u = user(&db, "a").await;
+        let (a, b) = (order(&db, &f, u).await, order(&db, &f, u).await);
+        set_order(&db, a, 1000.0, 2, true).await;
+        set_order(&db, b, 50.0, 1, true).await;
+        sqlx::query("UPDATE orders SET currency = 'USD' WHERE id = $1")
+            .bind(b)
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut conn = db.acquire().await.unwrap();
+        let got = sums(&mut conn, u, &[CumulativePeriod::AllTime], Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(got[&CumulativePeriod::AllTime], 1000.0);
+    }
+
+    #[sqlx::test]
+    async fn load_extras_skips_query_without_cumulative_rules(db: sqlx::PgPool) {
+        use crate::discount::context::{self, Context};
+        let f = crate::test_support::order_fixture(&db).await;
+        let u = user(&db, "a").await;
+        let id = order(&db, &f, u).await;
+        set_order(&db, id, 3000.0, 1, true).await;
+        let rule = |actions: Value| Rule {
+            id: 1,
+            name: String::new(),
+            active: true,
+            active_from: None,
+            active_to: None,
+            priority: 1,
+            sort: 100,
+            last_discount: false,
+            last_level_discount: false,
+            use_coupons: false,
+            conditions: node(
+                json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": []}),
+            ),
+            actions: node(actions),
+            group_ids: vec![],
+            unsupported: String::new(),
+            xml_id: String::new(),
+        };
+        let plain = rule(
+            json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": []}),
+        );
+        let cumulative = rule(
+            json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": [
+                {"CLASS_ID": "CumulativeAction", "DATA": {"ranges": [], "type_sum_period": "all_time", "sum_period_data": {}, "apply_if_more_profitable": "N"}}
+            ]}),
+        );
+        let mut conn = db.acquire().await.unwrap();
+        let mut ctx = Context {
+            user_id: Some(u),
+            ..Context::default()
+        };
+        context::load_extras(&mut conn, &mut ctx, std::slice::from_ref(&plain))
+            .await
+            .unwrap();
+        assert!(ctx.cumulative.is_empty());
+        let mut guest = Context::default();
+        context::load_extras(&mut conn, &mut guest, std::slice::from_ref(&cumulative))
+            .await
+            .unwrap();
+        assert!(guest.cumulative.is_empty());
+        context::load_extras(&mut conn, &mut ctx, std::slice::from_ref(&cumulative))
+            .await
+            .unwrap();
+        assert_eq!(ctx.cumulative[&CumulativePeriod::AllTime], 3000.0);
     }
 }

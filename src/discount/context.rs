@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Datelike, Utc};
 use serde_json::{Map, Value};
 
-use super::cumulative::CumulativePeriod;
+use super::cumulative::{self, CumulativePeriod};
 use super::model::{Coupon, Rule};
 use crate::catalog::rounding::{self, Rounding};
 
@@ -214,10 +214,18 @@ pub async fn for_lines(
 pub async fn load_extras(
     db: &mut sqlx::PgConnection,
     ctx: &mut Context,
-    _rules: &[Rule],
+    rules: &[Rule],
 ) -> sqlx::Result<()> {
     if ctx.items.iter().any(|it| it.price_type_id.is_some()) {
         ctx.rounding = rounding::load(db).await?;
+    }
+    // Накопленные суммы — только у покупателя-пользователя и при накопительных правилах;
+    // гость и правила без них не дают запроса (ключа нет — сумма 0)
+    if let Some(user_id) = ctx.user_id {
+        let periods = cumulative::periods(rules);
+        if !periods.is_empty() {
+            ctx.cumulative = cumulative::sums(db, user_id, &periods, ctx.now).await?;
+        }
     }
     Ok(())
 }

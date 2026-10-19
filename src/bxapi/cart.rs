@@ -962,6 +962,64 @@ mod tests {
         v["data"].clone()
     }
 
+    /// Накопительная скидка (пресет Битрикса): 10 % при накопленной сумме от 2000.
+    #[sqlx::test]
+    async fn cumulative_discount_in_cart_for_user(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        sqlx::query(
+            "INSERT INTO discounts (name, conditions, actions) VALUES ('Накопительная', $1, $2)",
+        )
+        .bind(json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": []}))
+        .bind(json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": [
+            {"CLASS_ID": "CumulativeAction", "DATA": {
+                "ranges": [{"sum": 2000, "value": 10, "type": "P"}],
+                "type_sum_period": "all_time", "sum_period_data": {},
+                "apply_if_more_profitable": "N"
+            }, "CHILDREN": []}
+        ]}))
+        .execute(&db)
+        .await
+        .unwrap();
+        // Гость — без скидки
+        let (_, body) = send(&app, "GET", "/api/v1/cart", &fx.cookie, None).await;
+        assert_eq!(data(&body)["items"][0]["price"], json!(1000));
+        // Покупатель с оплаченным заказом 2500: корзина фикстуры становится его корзиной
+        let user_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (login, email, password_hash) VALUES ('buyer', 'buyer@e.x', '') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO site_sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 day')",
+        )
+        .bind(crate::cart::repo::token_hash("sess"))
+        .bind(user_id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let cookie = format!("{}=sess", super::super::auth::COOKIE);
+        sqlx::query("UPDATE buyers SET user_id = $2 WHERE id = $1")
+            .bind(fx.f.buyer_id)
+            .bind(user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let order = crate::test_support::place_order(&db, &fx.f, Some(user_id)).await;
+        sqlx::query("UPDATE orders SET paid = TRUE, price = 2500 WHERE id = $1")
+            .bind(order)
+            .execute(&db)
+            .await
+            .unwrap();
+        let (status, body) = send(&app, "GET", "/api/v1/cart", &cookie, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let cart = data(&body);
+        assert_eq!(cart["items"][0]["price"], json!(900), "{body}");
+        assert_eq!(cart["items"][1]["price"], json!(450));
+        assert_eq!(cart["totalPrice"], json!(2250));
+    }
+
     #[sqlx::test]
     async fn cart_prices_with_rule(db: sqlx::PgPool) {
         let fx = crate::test_support::cart_fixture(&db).await;
