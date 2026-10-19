@@ -85,8 +85,9 @@ impl RoundingForm {
         } else {
             &self.precision_preset
         };
+        // В NUMERIC(18,4) значение хранится с 4 знаками: меньшее 0.00005 станет нулём
         let precision = parse_num(raw)
-            .filter(|p| *p > 0.0 && *p < 1e13)
+            .filter(|p| (*p * 1e4).round() > 0.0 && *p < 1e13)
             .ok_or("Точность должна быть числом больше нуля")?;
         Ok(RoundingInput {
             price_type_id,
@@ -424,12 +425,17 @@ mod tests {
             "price_type_id=1&price=777&round_type=up&precision_preset=&precision_custom=0",
             "price_type_id=1&price=777&round_type=up&precision_preset=&precision_custom=-5",
             "price_type_id=1&price=777&round_type=up&precision_preset=&precision_custom=abc",
+            // Меньше 0.00005 в NUMERIC(18,4) становится 0
+            "price_type_id=1&price=777&round_type=up&precision_preset=&precision_custom=0.00001",
             "price_type_id=99&price=777&round_type=up&precision_preset=10&precision_custom=",
         ] {
             let (s, html) = post_form(&app, "/admin/shop/rounding", &cookie, body).await;
             assert_eq!(s, StatusCode::OK, "{body}");
             assert!(html.contains("class=\"alert\""), "{body}: {html}");
             assert!(html.contains("value=\"777\""), "{body}: {html}");
+            if body.ends_with("0.00001") {
+                assert!(html.contains("value=\"0.00001\""), "{body}: {html}");
+            }
         }
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog_rounding")
             .fetch_one(&db)
