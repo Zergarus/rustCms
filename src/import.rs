@@ -177,8 +177,8 @@ struct Discounts {
     /// `b_catalog_disc_save_group`: (id скидки, название) — накопительные программы каталога,
     /// не переносятся.
     disc_save: Vec<(i64, String)>,
-    /// `b_catalog_rounding`.
-    rounding: Vec<RoundingRow>,
+    /// `b_catalog_rounding`; `None` — таблицы в источнике нет.
+    rounding: Option<Vec<RoundingRow>>,
 }
 
 /// Строка `b_catalog_rounding`; числа — десятичные строки как в базе.
@@ -1748,7 +1748,8 @@ fn discount_tree(
     Ok(node)
 }
 
-/// Правила округления `b_catalog_rounding` заменяются целиком; тип цены — по id (типы цен
+/// Правила округления `b_catalog_rounding` заменяются целиком (если таблицы в источнике нет,
+/// функция не вызывается и правила из админки остаются — см. `write_all`); тип цены — по id (типы цен
 /// переносятся с теми же id). Правило с неизвестным типом цены, `ROUND_TYPE` или точностью
 /// не переносится — предупреждение.
 async fn write_rounding(
@@ -1837,7 +1838,9 @@ async fn write_discounts(tx: &mut sqlx::PgConnection, data: &Data) -> anyhow::Re
             list.join(", ")
         ));
     }
-    write_rounding(tx, &d.rounding, &mut warnings).await?;
+    if let Some(rounding) = &d.rounding {
+        write_rounding(tx, rounding, &mut warnings).await?;
+    }
     let directories: HashMap<i64, i64> = data
         .properties
         .iter()
@@ -2996,7 +2999,30 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
         qb.build().execute(&mut *tx).await?;
     }
 
+    // Без `b_catalog_rounding` в источнике правила округления из админки остаются; типы цен
+    // перезаписываются (каскад), поэтому правила откладываются и возвращаются к тем же id
+    let keep_rounding = data.discounts.rounding.is_none();
+    if keep_rounding {
+        sqlx::query(
+            "CREATE TEMP TABLE import_kept_rounding ON COMMIT DROP AS
+             SELECT * FROM catalog_rounding",
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
     write_catalog(&mut *tx, &data.catalog).await?;
+    if keep_rounding {
+        sqlx::query(
+            "INSERT INTO catalog_rounding SELECT k.* FROM import_kept_rounding k
+             WHERE k.price_type_id IN (SELECT id FROM catalog_price_types)
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DROP TABLE import_kept_rounding")
+            .execute(&mut *tx)
+            .await?;
+    }
     write_sku(&mut *tx, data, props).await?;
     write_sale(&mut *tx, &data.sale).await?;
     write_discounts(&mut *tx, data).await?;
@@ -3317,6 +3343,7 @@ async fn read_discounts(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
         }
     }
     if mysql_table_exists(my, "b_catalog_rounding").await? {
+        let rounding = d.rounding.get_or_insert_default();
         for row in sqlx::query(
             "SELECT CAST(ID AS SIGNED), CAST(CATALOG_GROUP_ID AS SIGNED), CAST(PRICE AS CHAR),
                     CAST(ROUND_TYPE AS SIGNED), CAST(ROUND_PRECISION AS CHAR)
@@ -3325,7 +3352,7 @@ async fn read_discounts(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
         .fetch_all(my)
         .await?
         {
-            d.rounding.push(RoundingRow {
+            rounding.push(RoundingRow {
                 id: int_col(&row, 0).context("b_catalog_rounding.ID")?,
                 price_type_id: int_col(&row, 1).unwrap_or(0),
                 price: str_col(&row, 2),
@@ -5204,12 +5231,12 @@ mod tests {
             }
         };
         let mut data = catalog_data();
-        data.discounts.rounding = vec![
+        data.discounts.rounding = Some(vec![
             row(1, 1, "0.0000", 1, "10.0000"),
             row(2, 1, "1000.0000", 2, "100.0000"),
             row(3, 1, "5000.0000", 3, "1.0000"),
             row(4, 99, "0.0000", 1, "1.0000"),
-        ];
+        ]);
         let props = resolve_properties(&mut data);
         let mut tx = db.begin().await.unwrap();
         write_all(&mut tx, &data, &props).await.unwrap();
@@ -5229,7 +5256,7 @@ mod tests {
             ]
         );
         // Повторный перенос заменяет правила целиком
-        data.discounts.rounding = vec![row(5, 2, "0", 4, "0.5")];
+        data.discounts.rounding = Some(vec![row(5, 2, "0", 4, "0.5")]);
         let mut tx = db.begin().await.unwrap();
         write_all(&mut tx, &data, &props).await.unwrap();
         tx.commit().await.unwrap();
@@ -5240,11 +5267,11 @@ mod tests {
                 .unwrap();
         assert_eq!(rules, vec![(2, "down".to_string())]);
 
-        data.discounts.rounding = vec![
+        data.discounts.rounding = Some(vec![
             row(3, 1, "5000", 3, "1"),
             row(4, 99, "0", 1, "1"),
             row(6, 1, "1", 1, "0"),
-        ];
+        ]);
         let mut tx = db.begin().await.unwrap();
         let warnings = write_discounts(&mut tx, &data).await.unwrap();
         tx.rollback().await.unwrap();
@@ -5259,6 +5286,42 @@ mod tests {
         ] {
             assert!(joined.contains(needle), "{needle}: {joined}");
         }
+    }
+
+    #[sqlx::test]
+    async fn import_without_rounding_table_keeps_rules(db: PgPool) {
+        let mut data = catalog_data();
+        let props = resolve_properties(&mut data);
+        let mut tx = db.begin().await.unwrap();
+        write_all(&mut tx, &data, &props).await.unwrap();
+        tx.commit().await.unwrap();
+        // Правило из админки
+        sqlx::query(
+            "INSERT INTO catalog_rounding (price_type_id, price, round_type, precision)
+             VALUES (1, 0, 'up', 10)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        // Таблицы b_catalog_rounding в источнике нет — правила не трогаются
+        let mut tx = db.begin().await.unwrap();
+        write_all(&mut tx, &data, &props).await.unwrap();
+        tx.commit().await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog_rounding")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        // Таблица есть, но пустая — заменяет целиком
+        data.discounts.rounding = Some(vec![]);
+        let mut tx = db.begin().await.unwrap();
+        write_all(&mut tx, &data, &props).await.unwrap();
+        tx.commit().await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog_rounding")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     #[sqlx::test]
