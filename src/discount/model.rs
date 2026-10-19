@@ -142,13 +142,63 @@ pub const CONDITION_CLASSES: &[&str] = &[
 ];
 
 /// Классы действий (`CSaleActionCtrlBasketGroup`, `CSaleActionCtrlSubGroup`, `CSaleActionCtrlDelivery`,
-/// `CSaleCumulativeAction`).
+/// `CSaleCumulativeAction`, `CSaleActionGiftCtrlGroup` и подарки `CCatalogGifterProduct`).
 pub const ACTION_CLASSES: &[&str] = &[
     "ActSaleBsktGrp",
     "ActSaleSubGrp",
     "ActSaleDelivery",
     "CumulativeAction",
+    "GiftCondGroup",
+    "GifterCondIBElement",
+    "GifterCondIBSection",
 ];
+
+/// Сколько подарков даёт правило: `GIFT_SELECT_TYPE_ONE`/`GIFT_SELECT_TYPE_ALL` Битрикса.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GiftType {
+    /// Один из списка.
+    One,
+    /// Все из списка.
+    All,
+}
+
+impl GiftType {
+    pub fn parse(s: &str) -> Option<GiftType> {
+        match s {
+            "one" => Some(GiftType::One),
+            "all" => Some(GiftType::All),
+            _ => None,
+        }
+    }
+}
+
+/// Доступный подарок правила (`Gift\Collection` у `Gift\Manager::getCollectionsByBasket`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GiftOffer {
+    pub rule_id: i64,
+    pub kind: GiftType,
+    /// Записи-подарки (`GifterCondIBElement`).
+    pub product_ids: Vec<i64>,
+    /// Раздел подарков (`GifterCondIBSection`); товары раздела раскрывает вызывающий.
+    pub section_id: Option<i64>,
+}
+
+/// Подарок узла `GiftCondGroup`: его единственный `Gifter*` (`ProvideGiftProductData` берёт
+/// первого ребёнка). `None` — узел не подарок или данные неверны.
+pub fn gift_spec(node: &Node) -> Option<(GiftType, Vec<i64>, Option<i64>)> {
+    if node.class_id != "GiftCondGroup" {
+        return None;
+    }
+    let gifter = node.children.first()?;
+    let kind = GiftType::parse(gifter.data.get("Type")?.as_str()?)?;
+    let value = gifter.data.get("Value")?;
+    match gifter.class_id.as_str() {
+        "GifterCondIBElement" => Some((kind, ids(value)?, None)),
+        "GifterCondIBSection" => Some((kind, Vec::new(), Some(as_id(value)?))),
+        _ => None,
+    }
+}
 
 const PROP_PREFIX: &str = "CondIBProp:";
 
@@ -302,6 +352,9 @@ fn mentioned(node: &Node, want: &mut HashMap<Ref, Vec<i64>>) {
     }) = leaf(&node.class_id)
     {
         want.entry(r).or_default().extend(value_ids());
+    } else if let Some(r) = gifter_ref(&node.class_id) {
+        let gift_ids = node.data.get("Value").and_then(ids).unwrap_or_default();
+        want.entry(r).or_default().extend(gift_ids);
     }
     for child in &node.children {
         mentioned(child, want);
@@ -353,6 +406,15 @@ fn leaf(class_id: &str) -> Option<Leaf> {
     Some(Leaf { logic, value })
 }
 
+/// На что ссылается `Value` подарка.
+fn gifter_ref(class_id: &str) -> Option<Ref> {
+    match class_id {
+        "GifterCondIBElement" => Some(Ref::Item),
+        "GifterCondIBSection" => Some(Ref::Section),
+        _ => None,
+    }
+}
+
 /// Условия строки корзины: внутри групп по позициям и групп действий.
 fn is_row_condition(class_id: &str) -> bool {
     class_id.starts_with("CondBsktFld")
@@ -365,7 +427,9 @@ fn is_row_condition(class_id: &str) -> bool {
 pub fn allowed_in(parent: &str, child: &str, parent_is_root: bool) -> bool {
     match parent {
         "CondGroup" => match child {
-            "ActSaleBsktGrp" | "ActSaleDelivery" | "CumulativeAction" => parent_is_root,
+            "ActSaleBsktGrp" | "ActSaleDelivery" | "CumulativeAction" | "GiftCondGroup" => {
+                parent_is_root
+            }
             "CondGroup"
             | "CondCumulativeGroup"
             | "CondBsktCntGroup"
@@ -386,6 +450,8 @@ pub fn allowed_in(parent: &str, child: &str, parent_is_root: bool) -> bool {
         "CondCumulativeGroup" => matches!(child, "Period" | "PeriodRelative"),
         // Фильтр позиций (`buildSubsCode`): только условия строки
         "CumulativeAction" => is_row_condition(child),
+        // `CSaleActionGiftCtrlGroup::GetControlDescr` (`FORCED_SHOW_LIST`)
+        "GiftCondGroup" => matches!(child, "GifterCondIBElement" | "GifterCondIBSection"),
         _ => false,
     }
 }
@@ -404,6 +470,7 @@ pub fn is_group(class_id: &str) -> bool {
             | "ActSaleBsktGrp"
             | "ActSaleSubGrp"
             | "CumulativeAction"
+            | "GiftCondGroup"
     )
 }
 
@@ -495,6 +562,16 @@ fn check_data(node: &Node, refs: &Refs, e: &mut Vec<String>) {
             choice(d, "TypeRelativePeriod", &["D", "M", "Y"], true, e);
         }
         "CumulativeAction" => check_cumulative_action(d, e),
+        // `containsOneAction`: ровно один подарок
+        "GiftCondGroup" => {
+            if node.children.len() != 1 {
+                e.push("в «GiftCondGroup» должен быть ровно один подарок".to_string());
+            }
+        }
+        "GifterCondIBElement" | "GifterCondIBSection" => {
+            choice(d, "Type", &["one", "all"], true, e);
+            check_gift_value(node, refs, e);
+        }
         "ActSaleBsktGrp" => {
             choice(d, "Type", &["Discount", "Extra", "Closeout"], true, e);
             number(d, "Value", true, e);
@@ -566,6 +643,30 @@ fn check_cumulative_action(d: &Map<String, Value>, e: &mut Vec<String>) {
     choice(d, "apply_if_more_profitable", &["Y", "N", ""], false, e);
     choice(d, "All", ALL, false, e);
     choice(d, "True", TRUE, false, e);
+}
+
+/// `Value` подарка: список записей (`GifterCondIBElement`) или один раздел.
+fn check_gift_value(node: &Node, refs: &Refs, e: &mut Vec<String>) {
+    let Some(v) = node.data.get("Value") else {
+        e.push("не задано Value".to_string());
+        return;
+    };
+    let section = node.class_id == "GifterCondIBSection";
+    let list: Vec<Value> = match v {
+        Value::Array(a) if !section => a.clone(),
+        v => vec![v.clone()],
+    };
+    if list.is_empty() {
+        e.push("не задано Value".to_string());
+    }
+    let r = if section { Ref::Section } else { Ref::Item };
+    for item in &list {
+        match as_id(item) {
+            None => e.push(bad("Value", item)),
+            Some(id) if !refs.has(r, id) => e.push(r.missing(id)),
+            Some(_) => {}
+        }
+    }
 }
 
 /// Unix-время: необязательно, пустая строка — не задано.
@@ -1077,6 +1178,68 @@ mod tests {
                     "0.2.0",
                     "«CumulativeAction» нельзя вложить в «ActSaleBsktGrp»"
                 ),
+            ]
+        );
+    }
+
+    #[test]
+    fn validate_gift_nodes() {
+        let refs = Refs {
+            items: HashSet::from([10, 11]),
+            sections: HashSet::from([5]),
+            ..Refs::default()
+        };
+        let gift = |children: Value| json!({"CLASS_ID": "GiftCondGroup", "DATA": {"All": "AND"}, "CHILDREN": children});
+        let actions = node(json!({
+            "CLASS_ID": "CondGroup", "DATA": {"All": "AND"},
+            "CHILDREN": [
+                gift(json!([{"CLASS_ID": "GifterCondIBElement", "DATA": {"Type": "one", "Value": [10, 11]}}])),
+                gift(json!([{"CLASS_ID": "GifterCondIBSection", "DATA": {"Type": "all", "Value": 5}}]))
+            ]
+        }));
+        assert_eq!(validate(&actions, &refs), vec![]);
+        assert!(unsupported_classes(&node(rule24_conditions()), &actions).is_empty());
+        // Ссылки подарков попадают в загрузку `Refs`
+        let mut want = HashMap::new();
+        mentioned(&actions, &mut want);
+        assert_eq!(want.get(&Ref::Item), Some(&vec![10, 11]));
+        assert_eq!(want.get(&Ref::Section), Some(&vec![5]));
+
+        let s = |p: &str, m: &str| (p.to_string(), m.to_string());
+        let actions = node(json!({
+            "CLASS_ID": "CondGroup", "DATA": {"All": "AND"},
+            "CHILDREN": [
+                gift(json!([{"CLASS_ID": "GifterCondIBElement", "DATA": {"Type": "some", "Value": [10, 12]}}])),
+                gift(json!([{"CLASS_ID": "GifterCondIBSection", "DATA": {"Type": "one", "Value": 6}}])),
+                gift(json!([])),
+                gift(json!([
+                    {"CLASS_ID": "GifterCondIBSection", "DATA": {"Type": "one", "Value": 5}},
+                    {"CLASS_ID": "GifterCondIBElement", "DATA": {"Type": "one", "Value": [10]}}
+                ])),
+                gift(json!([{"CLASS_ID": "CondBsktFldPrice", "DATA": {"logic": "Great", "value": 1}}])),
+                {"CLASS_ID": "ActSaleBsktGrp",
+                 "DATA": {"Type": "Discount", "Value": 5, "Unit": "Perc", "Max": 0, "All": "AND", "True": "True"},
+                 "CHILDREN": [gift(json!([{"CLASS_ID": "GifterCondIBElement", "DATA": {"Type": "one", "Value": [10]}}]))]},
+                {"CLASS_ID": "GifterCondIBElement", "DATA": {"Type": "one", "Value": [10]}},
+                gift(json!([{"CLASS_ID": "GifterCondIBElement", "DATA": {"Value": []}}]))
+            ]
+        }));
+        assert_eq!(
+            validate(&actions, &refs),
+            vec![
+                s("0.0.0", "недопустимое значение Type «some»"),
+                s("0.0.0", "запись 12 не найдена"),
+                s("0.1.0", "раздел 6 не найден"),
+                s("0.2", "в «GiftCondGroup» должен быть ровно один подарок"),
+                s("0.3", "в «GiftCondGroup» должен быть ровно один подарок"),
+                s(
+                    "0.4.0",
+                    "«CondBsktFldPrice» нельзя вложить в «GiftCondGroup»"
+                ),
+                s("0.5.0", "«GiftCondGroup» нельзя вложить в «ActSaleBsktGrp»"),
+                s("0.6", "«GifterCondIBElement» нельзя вложить в «CondGroup»"),
+                s("0.7.0", "не задано Type"),
+                s("0.7.0", "не задано Value"),
             ]
         );
     }

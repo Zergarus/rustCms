@@ -9,7 +9,9 @@ use serde_json::Value;
 use super::cond::{self, State};
 use super::context::{Context, CtxItem};
 use super::cumulative;
-use super::model::{Coupon, CouponKind, Node, Rule, as_num, round2};
+use super::model::{
+    Coupon, CouponKind, GiftOffer, GiftType, Node, Rule, as_num, gift_spec, round2,
+};
 use crate::bxapi::project::DiscountConditionHook;
 use crate::catalog::rounding::Rounding;
 
@@ -58,6 +60,9 @@ pub struct DiscountResult {
     pub delivery_price: Option<f64>,
     pub applied: Vec<Applied>,
     pub coupons: Vec<(String, CouponStatus)>,
+    /// Доступные подарки: правила с подарком, дошедшие до проверки условий и с выполненными
+    /// условиями, без уже подаренного (`Gift\Manager::getCollectionsByBasket`).
+    pub gifts: Vec<GiftOffer>,
 }
 
 type Hook<'a> = Option<&'a dyn DiscountConditionHook>;
@@ -127,6 +132,8 @@ struct Calc<'a> {
     prices: HashMap<i64, f64>,
     applied: HashMap<i64, Vec<i64>>,
     delivery: Option<f64>,
+    /// Позиции, подаренные действиями текущего правила.
+    gifted: Vec<i64>,
 }
 
 impl Calc<'_> {
@@ -150,6 +157,7 @@ impl Calc<'_> {
                 "ActSaleBsktGrp" => self.apply_basket(act),
                 "ActSaleDelivery" => self.apply_delivery(act),
                 "CumulativeAction" => self.apply_cumulative(act),
+                "GiftCondGroup" => self.apply_gift(act),
                 _ => {}
             }
         }
@@ -353,6 +361,40 @@ impl Calc<'_> {
         }
     }
 
+    /// `CSaleActionGiftCtrlGroup::Generate` + `Actions::applySimpleGift`: позиции по возрастанию
+    /// текущей цены; подходит товар из списка (у предложения — и родитель) или из раздела, в
+    /// количестве ровно 1, с ценой > 0 и без ручной цены (`GenerateApplyCallableFilter`,
+    /// `filterBasketForAction`). `one` — первая подходящая, `all` — все; цена становится 0.
+    fn apply_gift(&mut self, node: &Node) {
+        let Some((kind, products, section)) = gift_spec(node) else {
+            return;
+        };
+        let matches = |it: &CtxItem| match section {
+            Some(s) => it.section_ids.contains(&s),
+            None => {
+                products.contains(&it.product_id)
+                    || it.parent.as_ref().is_some_and(|p| products.contains(&p.id))
+            }
+        };
+        let mut rows: Vec<(i64, f64)> = self
+            .ctx
+            .items
+            .iter()
+            .filter(|it| {
+                it.quantity == 1.0 && !it.custom_price && self.price(it.key) > 0.0 && matches(it)
+            })
+            .map(|it| (it.key, self.price(it.key)))
+            .collect();
+        rows.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        if kind == GiftType::One {
+            rows.truncate(1);
+        }
+        for (key, _) in rows {
+            self.prices.insert(key, 0.0);
+            self.gifted.push(key);
+        }
+    }
+
     /// `ActSaleDelivery::Generate` + `Actions::applyToDelivery`.
     fn apply_delivery(&mut self, node: &Node) {
         let d = &node.data;
@@ -408,6 +450,7 @@ fn calculate_refs(rules: &[&Rule], ctx: &Context, hook: Hook) -> DiscountResult 
         prices: ctx.items.iter().map(|it| (it.key, it.base_price)).collect(),
         applied: HashMap::new(),
         delivery: ctx.order.delivery_price,
+        gifted: Vec::new(),
     };
 
     let mut coupons: Vec<CouponStatus> = ctx
@@ -435,6 +478,7 @@ fn calculate_refs(rules: &[&Rule], ctx: &Context, hook: Hook) -> DiscountResult 
     list.sort_by_key(|(r, _)| (std::cmp::Reverse(r.priority), r.sort, r.id));
 
     let mut applied = Vec::new();
+    let mut gifts = Vec::new();
     let mut skip_level: Option<i32> = None;
     for (rule, coupon) in list {
         if skip_level == Some(rule.priority) {
@@ -446,6 +490,7 @@ fn calculate_refs(rules: &[&Rule], ctx: &Context, hook: Hook) -> DiscountResult 
         }
         let old_prices = calc.prices.clone();
         let old_delivery = calc.delivery;
+        calc.gifted.clear();
         calc.run_actions(&rule.actions);
 
         let mut changed: Vec<(i64, f64)> = ctx
@@ -470,6 +515,14 @@ fn calculate_refs(rules: &[&Rule], ctx: &Context, hook: Hook) -> DiscountResult 
             }
             changed.retain(|&(key, _)| key == keep);
         }
+        // Подаренное правилом (у предложения — и родитель, `ExtendProductIds`)
+        let gifted: Vec<i64> = ctx
+            .items
+            .iter()
+            .filter(|it| calc.gifted.contains(&it.key) && changed.iter().any(|c| c.0 == it.key))
+            .flat_map(|it| std::iter::once(it.product_id).chain(it.parent.as_ref().map(|p| p.id)))
+            .collect();
+        gifts.extend(available_gifts(rule, &gifted));
         let delivery = round2(old_delivery.unwrap_or(0.0) - calc.delivery.unwrap_or(0.0));
         if changed.is_empty() && calc.delivery == old_delivery {
             continue;
@@ -529,11 +582,44 @@ fn calculate_refs(rules: &[&Rule], ctx: &Context, hook: Hook) -> DiscountResult 
             .zip(coupons)
             .map(|(cp, st)| (cp.coupon.clone(), st))
             .collect(),
+        gifts,
     }
 }
 
+/// Подарки правила без уже подаренных им товаров `gifted` (`deleteGiftedProducts`): `one` с
+/// подаренным исчезает, у `all` подаренные убираются, пустой исчезает; раздел `one` исчезает,
+/// если правило что-то подарило, `all` остаётся.
+fn available_gifts(rule: &Rule, gifted: &[i64]) -> Vec<GiftOffer> {
+    rule.actions
+        .children
+        .iter()
+        .filter_map(gift_spec)
+        .filter_map(|(kind, mut product_ids, section_id)| {
+            match (kind, section_id) {
+                (GiftType::One, Some(_)) if !gifted.is_empty() => return None,
+                (GiftType::One, None) if product_ids.iter().any(|p| gifted.contains(p)) => {
+                    return None;
+                }
+                (GiftType::All, None) => {
+                    product_ids.retain(|p| !gifted.contains(p));
+                    if product_ids.is_empty() {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+            Some(GiftOffer {
+                rule_id: rule.id,
+                kind,
+                product_ids,
+                section_id,
+            })
+        })
+        .collect()
+}
+
 /// Правила для цены в каталоге (как `GetOptimalPrice`): без условий корзины и заказа
-/// (`CondBskt*`, `CondSale*`), без купонов и без накопительных классов (у Битрикса
+/// (`CondBskt*`, `CondSale*`), без купонов, без накопительных классов и подарков (у Битрикса
 /// `EXECUTE_MODULE = sale`).
 pub fn product_rules(rules: &[Rule]) -> Vec<&Rule> {
     fn order_bound(node: &Node) -> bool {
@@ -542,12 +628,14 @@ pub fn product_rules(rules: &[Rule]) -> Vec<&Rule> {
             || node.class_id == "CondCumulativeGroup"
             || node.children.iter().any(order_bound)
     }
-    fn has_cumulative(node: &Node) -> bool {
-        node.class_id == "CumulativeAction" || node.children.iter().any(has_cumulative)
+    // Накопительные и подарки — только в корзине
+    fn sale_only(node: &Node) -> bool {
+        matches!(node.class_id.as_str(), "CumulativeAction" | "GiftCondGroup")
+            || node.children.iter().any(sale_only)
     }
     rules
         .iter()
-        .filter(|r| !r.use_coupons && !order_bound(&r.conditions) && !has_cumulative(&r.actions))
+        .filter(|r| !r.use_coupons && !order_bound(&r.conditions) && !sale_only(&r.actions))
         .collect()
 }
 
@@ -1863,6 +1951,183 @@ mod tests {
                     vec![],
                 )],
             ),
+        ];
+        let ids: Vec<i64> = product_rules(&rules).iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![1]);
+    }
+
+    /// Действие «Подарок» (`GiftCondGroup` с одним `Gifter*`).
+    fn gift(class: &str, kind: &str, value: Value) -> Value {
+        json!({"CLASS_ID": "GiftCondGroup", "DATA": {"All": "AND"}, "CHILDREN": [
+            {"CLASS_ID": class, "DATA": {"Type": kind, "Value": value}}
+        ]})
+    }
+
+    /// Позиция `key` с товаром `product`.
+    fn line(key: i64, product: i64, price: f64, qty: f64) -> CtxItem {
+        CtxItem {
+            product_id: product,
+            ..item(key, price, qty)
+        }
+    }
+
+    #[test]
+    fn gift_one_makes_cheapest_free() {
+        let rules = [rule(
+            1,
+            vec![gift("GifterCondIBElement", "one", json!([10, 11]))],
+        )];
+        let c = ctx(vec![line(1, 10, 300.0, 1.0), line(2, 11, 200.0, 1.0)]);
+        let r = calculate(&rules, &c, None);
+        assert_eq!(price(&r, 2), 0.0);
+        assert_eq!(r.items[&2].discount, 200.0);
+        assert_eq!(r.items[&2].rules, vec![1]);
+        assert_eq!(price(&r, 1), 300.0);
+        assert_eq!(ids(&r), vec![1]);
+        assert_eq!(r.applied[0].items, vec![(2, 200.0)]);
+        assert_eq!(r.applied[0].sum, 200.0);
+        assert!(r.gifts.is_empty(), "{:?}", r.gifts);
+    }
+
+    #[test]
+    fn gift_all_makes_every_match_free() {
+        let rules = [rule(
+            1,
+            vec![gift("GifterCondIBElement", "all", json!([10, 11]))],
+        )];
+        let c = ctx(vec![line(1, 10, 300.0, 1.0), line(2, 11, 200.0, 1.0)]);
+        let r = calculate(&rules, &c, None);
+        assert_eq!(price(&r, 1), 0.0);
+        assert_eq!(price(&r, 2), 0.0);
+        assert_eq!(r.applied[0].sum, 500.0);
+        assert!(r.gifts.is_empty(), "{:?}", r.gifts);
+
+        let r = calculate(&rules, &ctx(vec![line(1, 10, 300.0, 1.0)]), None);
+        assert_eq!(price(&r, 1), 0.0);
+        assert_eq!(
+            r.gifts,
+            vec![GiftOffer {
+                rule_id: 1,
+                kind: GiftType::All,
+                product_ids: vec![11],
+                section_id: None
+            }]
+        );
+    }
+
+    #[test]
+    fn gift_requires_quantity_one() {
+        let rules = [rule(
+            1,
+            vec![gift("GifterCondIBElement", "one", json!([10, 11]))],
+        )];
+        let r = calculate(&rules, &ctx(vec![line(1, 10, 300.0, 2.0)]), None);
+        assert_eq!(price(&r, 1), 300.0);
+        assert!(r.applied.is_empty());
+        assert_eq!(
+            r.gifts,
+            vec![GiftOffer {
+                rule_id: 1,
+                kind: GiftType::One,
+                product_ids: vec![10, 11],
+                section_id: None
+            }]
+        );
+    }
+
+    #[test]
+    fn gift_by_parent_of_offer() {
+        use crate::discount::context::CtxParent;
+        let rules = [rule(
+            1,
+            vec![gift("GifterCondIBElement", "one", json!([7]))],
+        )];
+        let mut offer = line(1, 70, 500.0, 1.0);
+        offer.parent = Some(CtxParent {
+            id: 7,
+            ..CtxParent::default()
+        });
+        let r = calculate(&rules, &ctx(vec![offer]), None);
+        assert_eq!(price(&r, 1), 0.0);
+        assert_eq!(r.items[&1].discount, 500.0);
+        assert!(r.gifts.is_empty(), "{:?}", r.gifts);
+    }
+
+    #[test]
+    fn gift_by_section() {
+        let rules = [rule(1, vec![gift("GifterCondIBSection", "one", json!(5))])];
+        let mut inside = line(1, 10, 300.0, 1.0);
+        inside.section_ids = vec![3, 5];
+        let mut outside = line(2, 11, 100.0, 1.0);
+        outside.section_ids = vec![3];
+        let r = calculate(&rules, &ctx(vec![inside.clone(), outside]), None);
+        assert_eq!(price(&r, 1), 0.0);
+        assert_eq!(price(&r, 2), 100.0);
+        assert!(r.gifts.is_empty(), "{:?}", r.gifts);
+
+        // «Все» из раздела — остаётся доступным и после подарка
+        let rules = [rule(1, vec![gift("GifterCondIBSection", "all", json!(5))])];
+        let r = calculate(&rules, &ctx(vec![inside]), None);
+        assert_eq!(price(&r, 1), 0.0);
+        assert_eq!(
+            r.gifts,
+            vec![GiftOffer {
+                rule_id: 1,
+                kind: GiftType::All,
+                product_ids: vec![],
+                section_id: Some(5)
+            }]
+        );
+    }
+
+    #[test]
+    fn gift_offered_only_when_conditions_pass() {
+        let mut r1 = rule(1, vec![gift("GifterCondIBElement", "one", json!([99]))]);
+        r1.conditions = node(
+            json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": [
+                {"CLASS_ID": "CondBsktAmtGroup", "DATA": {"logic": "EqGr", "Value": 5000, "All": "AND"}, "CHILDREN": []}
+            ]}),
+        );
+        let rules = [r1];
+        let r = calculate(&rules, &ctx(vec![line(1, 10, 3000.0, 1.0)]), None);
+        assert!(r.gifts.is_empty(), "{:?}", r.gifts);
+        let r = calculate(&rules, &ctx(vec![line(1, 10, 6000.0, 1.0)]), None);
+        assert_eq!(
+            r.gifts,
+            vec![GiftOffer {
+                rule_id: 1,
+                kind: GiftType::One,
+                product_ids: vec![99],
+                section_id: None
+            }]
+        );
+        assert_eq!(price(&r, 1), 6000.0);
+        assert!(r.applied.is_empty());
+    }
+
+    #[test]
+    fn gift_skips_custom_price_and_zero() {
+        let rules = [rule(
+            1,
+            vec![gift("GifterCondIBElement", "all", json!([10, 11]))],
+        )];
+        let mut custom = line(1, 10, 300.0, 1.0);
+        custom.custom_price = true;
+        let zero = line(2, 11, 0.0, 1.0);
+        let r = calculate(&rules, &ctx(vec![custom, zero]), None);
+        assert_eq!(price(&r, 1), 300.0);
+        assert_eq!(price(&r, 2), 0.0);
+        assert!(r.applied.is_empty());
+        assert!(r.items[&2].rules.is_empty());
+        assert_eq!(r.gifts.len(), 1);
+        assert_eq!(r.gifts[0].product_ids, vec![10, 11]);
+    }
+
+    #[test]
+    fn gift_rules_excluded_from_catalog() {
+        let rules = vec![
+            rule(1, vec![bskt("Discount", 10.0, "Perc", 0.0, vec![])]),
+            rule(2, vec![gift("GifterCondIBElement", "one", json!([10]))]),
         ];
         let ids: Vec<i64> = product_rules(&rules).iter().map(|r| r.id).collect();
         assert_eq!(ids, vec![1]);
