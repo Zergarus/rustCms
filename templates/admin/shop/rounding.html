@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "rounding" %}
+{% block title %}Правила округления{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="page-head">
+  <h1>Правила округления <span class="muted count">{{ total }}</span></h1>
+  <a class="btn primary" href="/admin/shop/rounding/new">Добавить правило</a>
+</div>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+{% for g in groups %}
+<h2>{{ g.type_name }}</h2>
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>Для цен</th><th>Способ</th><th>Точность</th><th></th></tr></thead>
+    <tbody>
+      {% for r in g.rules %}
+      <tr>
+        <td><a href="/admin/shop/rounding/{{ r.id }}">&gt; {{ r.price }}</a></td>
+        <td>{{ r.round_type }}</td>
+        <td>{{ r.precision }}</td>
+        <td class="actions">
+          <form method="post" action="/admin/shop/rounding/{{ r.id }}/delete" hx-confirm="Удалить правило округления?">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card"><p class="muted">Правил округления пока нет.</p></div>
+{% endfor %}
+{% endblock %}

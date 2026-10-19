@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "rounding" %}
+{% block title %}{% if id %}Правило округления{% else %}Новое правило округления{% endif %}{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="breadcrumbs"><a href="/admin/shop/rounding">Правила округления</a> /</div>
+<h1>{% if id %}Правило округления{% else %}Новое правило округления{% endif %}</h1>
+<form class="card form" method="post" action="{% if id %}/admin/shop/rounding/{{ id }}{% else %}/admin/shop/rounding{% endif %}">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <div class="grid-2">
+    <label>Тип цены *
+      <select name="price_type_id" required>
+        <option value="">—</option>
+        {% for t in price_types %}
+        <option value="{{ t[0] }}" {% if form.price_type_id == t[0]|string %}selected{% endif %}>{{ t[1] }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Для цен больше<input name="price" value="{{ form.price }}"></label>
+  </div>
+  <div class="grid-2">
+    <label>Способ округления *
+      <select name="round_type">
+        {% for t in [("math", "Математически"), ("up", "Вверх"), ("down", "Вниз")] %}
+        <option value="{{ t[0] }}" {% if form.round_type == t[0] %}selected{% endif %}>{{ t[1] }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Точность
+      <select name="precision_preset">
+        <option value="">Своё значение</option>
+        {% for p in presets %}
+        <option value="{{ p }}" {% if form.precision_preset == p %}selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+  <div class="grid-2">
+    <label>Своя точность (больше 0, если не выбран пресет)<input name="precision_custom" value="{{ form.precision_custom }}"></label>
+  </div>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/shop/rounding">Отмена</a>
+  </div>
+</form>
+{% endblock %}

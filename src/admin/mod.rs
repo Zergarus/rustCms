@@ -204,6 +204,16 @@ pub fn router(state: AppState) -> Router<AppState> {
             post(shop::price_types::delete),
         )
         .route(
+            "/shop/rounding",
+            get(shop::rounding::list).post(shop::rounding::create),
+        )
+        .route("/shop/rounding/new", get(shop::rounding::new_form))
+        .route(
+            "/shop/rounding/{id}",
+            get(shop::rounding::edit_form).post(shop::rounding::update),
+        )
+        .route("/shop/rounding/{id}/delete", post(shop::rounding::delete))
+        .route(
             "/shop/currencies",
             get(shop::currencies::list).post(shop::currencies::create),
         )

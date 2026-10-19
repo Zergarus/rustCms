@@ -10,6 +10,7 @@ pub mod orders;
 pub mod pay_systems;
 pub mod person_types;
 pub mod price_types;
+pub mod rounding;
 pub mod settings;
 pub mod statuses;
 pub mod stores;

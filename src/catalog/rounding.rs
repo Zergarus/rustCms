@@ -8,7 +8,6 @@ use crate::discount::model::round2;
 const VALUE_EPS: f64 = 1e-6;
 
 /// Пресеты точности округления в форме правила.
-#[allow(dead_code)] // потребитель (админка) появляется в следующих задачах
 pub const PRESET_PRECISIONS: &[f64] = &[
     0.0001, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0,
     200.0, 500.0, 1000.0, 5000.0,
@@ -23,7 +22,6 @@ pub enum RoundType {
 }
 
 impl RoundType {
-    #[allow(dead_code)] // потребитель (админка) появляется в следующих задачах
     pub fn as_str(self) -> &'static str {
         match self {
             RoundType::Math => "math",
