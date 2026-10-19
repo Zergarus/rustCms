@@ -134,6 +134,9 @@ struct Calc<'a> {
     delivery: Option<f64>,
     /// Позиции, подаренные действиями текущего правила.
     gifted: Vec<i64>,
+    /// Позиции, на которых накопительная «только если выгоднее» текущего правила заменила
+    /// предыдущие скидки (`REVERT_APPLY`).
+    replaced: Vec<i64>,
 }
 
 impl Calc<'_> {
@@ -358,6 +361,9 @@ impl Calc<'_> {
                 continue;
             }
             self.prices.insert(key, round2(result));
+            if more_profitable {
+                self.replaced.push(key);
+            }
         }
     }
 
@@ -444,6 +450,8 @@ pub fn calculate(rules: &[Rule], ctx: &Context, hook: Hook) -> DiscountResult {
 }
 
 fn calculate_refs(rules: &[&Rule], ctx: &Context, hook: Hook) -> DiscountResult {
+    let base_prices: HashMap<i64, f64> =
+        ctx.items.iter().map(|it| (it.key, it.base_price)).collect();
     let mut calc = Calc {
         ctx,
         hook,
@@ -451,6 +459,7 @@ fn calculate_refs(rules: &[&Rule], ctx: &Context, hook: Hook) -> DiscountResult 
         applied: HashMap::new(),
         delivery: ctx.order.delivery_price,
         gifted: Vec::new(),
+        replaced: Vec::new(),
     };
 
     let mut coupons: Vec<CouponStatus> = ctx
@@ -477,7 +486,9 @@ fn calculate_refs(rules: &[&Rule], ctx: &Context, hook: Hook) -> DiscountResult 
         .collect();
     list.sort_by_key(|(r, _)| (std::cmp::Reverse(r.priority), r.sort, r.id));
 
-    let mut applied = Vec::new();
+    let mut applied: Vec<Applied> = Vec::new();
+    // Купон каждой записи `applied` (индекс в `ctx.coupons`)
+    let mut applied_coupons: Vec<Option<usize>> = Vec::new();
     let mut gifts = Vec::new();
     let mut skip_level: Option<i32> = None;
     for (rule, coupon) in list {
@@ -491,6 +502,7 @@ fn calculate_refs(rules: &[&Rule], ctx: &Context, hook: Hook) -> DiscountResult 
         let old_prices = calc.prices.clone();
         let old_delivery = calc.delivery;
         calc.gifted.clear();
+        calc.replaced.clear();
         calc.run_actions(&rule.actions);
 
         let mut changed: Vec<(i64, f64)> = ctx
@@ -528,9 +540,44 @@ fn calculate_refs(rules: &[&Rule], ctx: &Context, hook: Hook) -> DiscountResult 
             continue;
         }
 
+        // «Только если выгоднее»: предыдущие применения к позиции отменяются
+        // (`tryToRevertApplyStatusInBlocks`), запись правила — от базовой цены
+        let replaced: Vec<i64> = changed
+            .iter()
+            .map(|c| c.0)
+            .filter(|key| calc.replaced.contains(key))
+            .collect();
+        if !replaced.is_empty() {
+            for key in &replaced {
+                calc.applied.remove(key);
+            }
+            let mut i = 0;
+            while i < applied.len() {
+                let a = &mut applied[i];
+                a.items.retain(|(key, _)| !replaced.contains(key));
+                if a.items.is_empty() && a.delivery == 0.0 {
+                    // Купон правила, не оставившего ни одной позиции, не применён
+                    if let Some(c) = applied_coupons[i] {
+                        coupons[c] = CouponStatus::NotApplied;
+                    }
+                    applied.remove(i);
+                    applied_coupons.remove(i);
+                    continue;
+                }
+                a.sum = round2(a.items.iter().map(|(_, s)| s).sum::<f64>() + a.delivery);
+                i += 1;
+            }
+        }
         let items: Vec<(i64, f64)> = changed
             .iter()
-            .map(|&(key, qty)| (key, round2((old_prices[&key] - calc.prices[&key]) * qty)))
+            .map(|&(key, qty)| {
+                let from = if replaced.contains(&key) {
+                    base_prices[&key]
+                } else {
+                    old_prices[&key]
+                };
+                (key, round2((from - calc.prices[&key]) * qty))
+            })
             .collect();
         for &(key, _) in &changed {
             calc.applied.entry(key).or_default().push(rule.id);
@@ -539,6 +586,7 @@ fn calculate_refs(rules: &[&Rule], ctx: &Context, hook: Hook) -> DiscountResult 
         if let Some(i) = coupon {
             coupons[i] = CouponStatus::Applied;
         }
+        applied_coupons.push(coupon);
         applied.push(Applied {
             discount_id: rule.id,
             name: rule.name.clone(),
@@ -1954,13 +2002,99 @@ mod tests {
         assert_eq!(price(&r, 1), 800.0);
         assert_eq!(ids(&r), vec![1]);
         assert_eq!(r.items[&1].rules, vec![1]);
-        // 5 % (950) — накопительная от базовой: 900, в записи — изменение на 50 за единицу
+        // 5 % (950) — накопительная от базовой: 900, предыдущая скидка позиции заменяется
+        // (`REVERT_APPLY`): в записях только накопительное правило с «базовая − новая»
         let r = run(5.0);
         assert_eq!(price(&r, 1), 900.0);
         assert_eq!(r.items[&1].discount, 100.0);
-        assert_eq!(ids(&r), vec![1, 2]);
+        assert_eq!(r.items[&1].rules, vec![2]);
+        assert_eq!(ids(&r), vec![2]);
+        assert_eq!(r.applied[0].items, vec![(1, 200.0)]);
+        assert_eq!(r.applied[0].sum, 200.0);
+    }
+
+    #[test]
+    fn cumulative_more_profitable_reverts_previous_records() {
+        let mut c = with_sums(
+            ctx(vec![item(1, 1000.0, 1.0), item(2, 500.0, 1.0)]),
+            &[(CumulativePeriod::AllTime, 1000.0)],
+        );
+        c.order.delivery_price = Some(300.0);
+        // Правило 1: 5 % на обе позиции и 100 на доставку — позиция 1 заменяется, запись
+        // остаётся с позицией 2 и доставкой
+        let first = rule(
+            1,
+            vec![
+                bskt("Discount", 5.0, "Perc", 0.0, vec![]),
+                delivery("Discount", 100.0, "Cur"),
+            ],
+        );
+        // Правило 2 по купону: 1 % только на позицию 1 — запись исчезает, купон не применён
+        let mut by_coupon = rule(
+            2,
+            vec![bskt("Discount", 1.0, "Perc", 0.0, vec![product(10)])],
+        );
+        by_coupon.use_coupons = true;
+        by_coupon.sort = 150;
+        c.coupons = vec![coupon("ONE", 2)];
+        let mut cumulative = rule(
+            3,
+            vec![cumulative_act(
+                json!([{"sum": 1000, "value": 10, "type": "P"}]),
+                "Y",
+                vec![product(10)],
+            )],
+        );
+        cumulative.sort = 200;
+        let r = calculate(&[first, by_coupon, cumulative], &c, None);
+        assert_eq!(price(&r, 1), 900.0);
+        assert_eq!(price(&r, 2), 475.0);
+        assert_eq!(r.items[&1].rules, vec![3]);
+        assert_eq!(r.items[&2].rules, vec![1]);
+        assert_eq!(ids(&r), vec![1, 3]);
+        assert_eq!(r.applied[0].items, vec![(2, 25.0)]);
+        assert_eq!(r.applied[0].delivery, 100.0);
+        assert_eq!(r.applied[0].sum, 125.0);
         assert_eq!(r.applied[1].items, vec![(1, 100.0)]);
         assert_eq!(r.applied[1].sum, 100.0);
+        assert_eq!(
+            r.coupons,
+            vec![("ONE".to_string(), CouponStatus::NotApplied)]
+        );
+    }
+
+    #[test]
+    fn gift_cumulative_and_rounding_together() {
+        use crate::catalog::rounding::RoundType;
+        let c = with_rounding(
+            with_sums(
+                ctx(vec![line(1, 10, 1234.56, 1.0), line(2, 20, 300.0, 1.0)]),
+                &[(CumulativePeriod::AllTime, 1000.0)],
+            ),
+            RoundType::Up,
+            10.0,
+        );
+        let gift_rule = rule(1, vec![gift("GifterCondIBElement", "one", json!([20]))]);
+        let mut cumulative = rule(
+            2,
+            vec![cumulative_act(
+                json!([{"sum": 1000, "value": 10, "type": "P"}]),
+                "Y",
+                vec![],
+            )],
+        );
+        cumulative.sort = 200;
+        let r = calculate(&[gift_rule, cumulative], &c, None);
+        // Подарок остаётся бесплатным и не округляется
+        assert_eq!(price(&r, 2), 0.0);
+        assert_eq!(r.items[&2].rules, vec![1]);
+        // 1234.56 − 123.46 = 1111.10 → вверх до 10 = 1120 (округление после накопительной)
+        assert_eq!(price(&r, 1), 1120.0);
+        assert_eq!(r.items[&1].discount, 114.56);
+        assert_eq!(r.items[&1].rules, vec![2]);
+        assert_eq!(ids(&r), vec![1, 2]);
+        assert_eq!(r.applied[0].items, vec![(2, 300.0)]);
+        assert_eq!(r.applied[1].items, vec![(1, 123.46)]);
     }
 
     #[test]
