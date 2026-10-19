@@ -4,7 +4,10 @@
 {% block content %}
 <div class="page-head">
   <h1>Правила работы с корзиной <span class="muted count">{{ items|length }}</span></h1>
-  <a class="btn primary" href="/admin/discounts/new">Добавить правило</a>
+  <div class="head-actions">
+    <a class="btn" href="/admin/discounts/cumulative">Накопительная скидка</a>
+    <a class="btn primary" href="/admin/discounts/new">Добавить правило</a>
+  </div>
 </div>
 
 {% if items %}

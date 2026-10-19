@@ -220,6 +220,10 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/discounts/new", get(discounts::new_form))
         .route("/discounts/names", get(discounts::names_lookup))
         .route(
+            "/discounts/cumulative",
+            get(discounts::cumulative_form).post(discounts::cumulative_create),
+        )
+        .route(
             "/discounts/{id}",
             get(discounts::edit_form).post(discounts::update),
         )

@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% set section = "discounts" %}
+{% block title %}Накопительная скидка{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/admin/discounts">Правила работы с корзиной</a> /</div>
+<div class="page-head">
+  <h1>Накопительная скидка</h1>
+</div>
+
+<form class="card form" method="post" action="/admin/discounts/cumulative">
+  {% if errors %}
+  <div class="alert">
+    Исправьте ошибки:
+    <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+  <p class="muted hint">Скидка на товары корзины по сумме оплаченных заказов покупателя. После сохранения правило можно изменить в обычной форме.</p>
+
+  <div class="grid-2">
+    <label>Название *
+      <input name="name" value="{{ form.name }}" required>
+    </label>
+    <label class="check">
+      <input type="checkbox" name="active" {% if form.active %}checked{% endif %}> Активно
+    </label>
+  </div>
+
+  <fieldset>
+    <legend>Группы пользователей</legend>
+    {% if groups %}
+    <p class="muted hint">Ни одной не отмечено — правило для всех.</p>
+    {% for g in groups %}
+    <label class="check"><input type="checkbox" name="group" value="{{ g[0] }}" {% if g[0] in form.groups %}checked{% endif %}> {{ g[1] }}</label>
+    {% endfor %}
+    {% else %}
+    <p class="muted hint">Групп нет — правило для всех.</p>
+    {% endif %}
+  </fieldset>
+
+  <fieldset>
+    <legend>Величины скидки</legend>
+    <table class="range-table">
+      <thead><tr><th>Сумма оплаченных заказов, от (не менее)</th><th>Величина скидки</th></tr></thead>
+      <tbody id="range-rows">
+        {% for r in form.ranges %}
+        <tr>
+          <td><input name="range_sum" value="{{ r.sum }}" inputmode="decimal"></td>
+          <td>
+            <input name="range_value" value="{{ r.value }}" inputmode="decimal">
+            <select name="range_type">
+              {% for k in kinds %}<option value="{{ k[0] }}"{% if k[0] == r.kind %} selected{% endif %}>{{ k[1] }}</option>{% endfor %}
+            </select>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <button class="btn" type="button" id="range-add">Ещё</button>
+  </fieldset>
+
+  <fieldset>
+    <legend>Период для суммирования оплаченных заказов</legend>
+    <label>
+      <select name="type_sum_period" id="type-sum-period">
+        {% for p in periods %}<option value="{{ p[0] }}"{% if p[0] == form.type_sum_period %} selected{% endif %}>{{ p[1] }}</option>{% endfor %}
+      </select>
+    </label>
+    <div class="grid-2" data-period="interval">
+      <label>от <small>по Москве</small>
+        <input name="sum_order_start" type="datetime-local" value="{{ form.sum_order_start }}">
+      </label>
+      <label>до <small>по Москве</small>
+        <input name="sum_order_end" type="datetime-local" value="{{ form.sum_order_end }}">
+      </label>
+    </div>
+    <div class="grid-2" data-period="relative">
+      <label>За последние
+        <input name="sum_period_value" value="{{ form.sum_period_value }}" inputmode="numeric">
+      </label>
+      <label>&nbsp;
+        <select name="sum_period_type">
+          {% for u in units %}<option value="{{ u[0] }}"{% if u[0] == form.sum_period_type %} selected{% endif %}>{{ u[1] }}</option>{% endfor %}
+        </select>
+      </label>
+    </div>
+  </fieldset>
+
+  <label class="check"><input type="checkbox" name="skip_discounted" value="Y" {% if form.skip_discounted %}checked{% endif %}> Не действовать, если есть скидки на товар</label>
+  <label class="check"><input type="checkbox" name="apply_if_more_profitable" value="Y" {% if form.apply_if_more_profitable %}checked{% endif %}> Отменять скидки на товар, если накопительная скидка больше</label>
+
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/discounts">Отмена</a>
+  </div>
+</form>
+<script>
+(function () {
+  "use strict";
+  var rows = document.getElementById("range-rows");
+  document.getElementById("range-add").addEventListener("click", function () {
+    var row = rows.rows[rows.rows.length - 1].cloneNode(true);
+    row.querySelectorAll("input").forEach(function (i) { i.value = ""; });
+    row.querySelector("select").value = "P";
+    rows.appendChild(row);
+  });
+  var period = document.getElementById("type-sum-period");
+  function toggle() {
+    document.querySelectorAll("[data-period]").forEach(function (b) {
+      b.hidden = b.getAttribute("data-period") !== period.value;
+    });
+  }
+  period.addEventListener("change", toggle);
+  toggle();
+})();
+</script>
+{% endblock %}

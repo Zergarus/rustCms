@@ -238,3 +238,8 @@ select[multiple] { min-height: 6em; }
 .dt-add { margin: 4px 0 4px 12px; }
 .dt-hint { color: var(--muted); font-size: 13px; }
 .dt-error, .danger-text { color: var(--danger); font-size: 13px; }
+.dt-ranges { display: flex; flex-direction: column; gap: 4px; }
+.dt-ranges .dt-range { display: flex; gap: 6px; align-items: center; }
+.dt-head input.dt-datetime { width: 190px; }
+.range-table td { padding: 4px 6px 4px 0; }
+.range-table input { width: 140px; }

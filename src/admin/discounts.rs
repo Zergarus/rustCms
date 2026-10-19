@@ -113,11 +113,17 @@ struct FieldDef {
     /// Текст перед полем.
     label: &'static str,
     /// `choice` — один из вариантов, `multi` — несколько (id), `number`, `text`,
-    /// `ids` — id через запятую с подсказкой названий (`lookup`), `json` — весь `DATA`.
+    /// `ids` — id через запятую с подсказкой названий (`lookup`), `json` — весь `DATA`,
+    /// `datetime` — дата и время по Москве в unix-секундах (пусто — ключа нет),
+    /// `ranges` — таблица порогов `[{sum, value, type}]`, `const` — значение без поля.
+    /// Ключ с точкой — вложенный: `sum_period_data.discount_sum_period_type`.
     kind: &'static str,
     options: Vec<(String, String)>,
+    /// `null` — ключ в новый узел не пишется.
     default: Value,
     lookup: Option<&'static str>,
+    /// У `ids`: одно значение вместо списка (раздел-подарок).
+    single: bool,
 }
 
 impl FieldDef {
@@ -129,6 +135,7 @@ impl FieldDef {
             options: Vec::new(),
             default,
             lookup: None,
+            single: false,
         }
     }
 
@@ -151,10 +158,31 @@ impl FieldDef {
     }
 
     fn ids(lookup: &'static str) -> Self {
+        FieldDef::ids_at("value", lookup)
+    }
+
+    fn ids_at(key: &'static str, lookup: &'static str) -> Self {
         FieldDef {
             lookup: Some(lookup),
-            ..FieldDef::new("value", "", "ids", json!([]))
+            ..FieldDef::new(key, "", "ids", json!([]))
         }
+    }
+
+    /// Одно id (`Value` раздела-подарка).
+    fn id_at(key: &'static str, lookup: &'static str) -> Self {
+        FieldDef {
+            single: true,
+            default: json!(""),
+            ..FieldDef::ids_at(key, lookup)
+        }
+    }
+
+    fn datetime(key: &'static str, label: &'static str) -> Self {
+        FieldDef::new(key, label, "datetime", Value::Null)
+    }
+
+    fn fixed(key: &'static str, value: &str) -> Self {
+        FieldDef::new(key, "", "const", Value::from(value))
     }
 }
 
@@ -258,8 +286,12 @@ const G_PRODUCT: &str = "Поля и характеристики товара";
 const G_ORDER: &str = "Параметры заказа";
 const G_COMMON: &str = "Общие условия";
 const G_ACTIONS: &str = "Действия";
+const G_CUMULATIVE: &str = "Накопительные скидки";
+const G_GIFTS: &str = "Подарки";
 const G_PROJECT: &str = "Условия проекта";
 const ROW_ALL: (&str, &str) = ("всем условиям", "любому из условий");
+const PERIOD_UNITS: &[(&str, &str)] = &[("D", "Дней"), ("M", "Месяцев"), ("Y", "Лет")];
+const GIFT_TYPES: &[(&str, &str)] = &[("one", "один из"), ("all", "все")];
 
 /// Все классы конструктора: подписи — из `sale_cond.php`, `sale_act.php`, `catalog_cond.php`
 /// (инфоблок — наша коллекция), свойства — по полям коллекций.
@@ -510,6 +542,90 @@ fn class_defs(d: &Dicts, hooks: &[&str]) -> Vec<ClassDef> {
                 FieldDef::choice("Unit", "", &[("Perc", "%"), ("Cur", "валюта сайта")]),
             ],
         ),
+        // `CSaleCondCumulativeCtrl`: сумма оплаченных заказов, период — вложенным узлом
+        def(
+            "CondCumulativeGroup",
+            "Накопительная сумма заказов",
+            G_ORDER,
+            vec![logic(LOGIC_NUM), number("Value", "")],
+        ),
+        def(
+            "Period",
+            "Период: с … по …",
+            G_ORDER,
+            vec![
+                FieldDef::datetime("ValueStart", "с"),
+                FieldDef::datetime("ValueEnd", "по"),
+            ],
+        ),
+        def(
+            "PeriodRelative",
+            "Период: последние N …",
+            G_ORDER,
+            vec![
+                number("Value", "последние"),
+                FieldDef::choice("TypeRelativePeriod", "", PERIOD_UNITS),
+            ],
+        ),
+        // `CSaleCumulativeAction` — как пресет «Накопительная скидка»
+        def(
+            "CumulativeAction",
+            "Накопительная скидка",
+            G_CUMULATIVE,
+            vec![
+                FieldDef::new("ranges", "пороги", "ranges", json!([])),
+                FieldDef::choice(
+                    "type_sum_period",
+                    "сумма заказов",
+                    &[
+                        ("all_time", "за всё время"),
+                        ("interval", "за период"),
+                        ("relative", "за последние"),
+                    ],
+                ),
+                FieldDef::datetime("sum_period_data.discount_sum_order_start", "от"),
+                FieldDef::datetime("sum_period_data.discount_sum_order_end", "до"),
+                FieldDef::new(
+                    "sum_period_data.discount_sum_period_value",
+                    "последние",
+                    "number",
+                    json!(""),
+                ),
+                FieldDef::choice("sum_period_data.discount_sum_period_type", "", PERIOD_UNITS),
+                FieldDef::choice(
+                    "apply_if_more_profitable",
+                    "только если выгоднее",
+                    &[("N", "нет"), ("Y", "да")],
+                ),
+                all("к товарам, для которых", "все условия", "любое из условий"),
+                truth(),
+            ],
+        ),
+        // `CSaleActionGiftCtrlGroup` с одним `CCatalogGifterProduct`
+        def(
+            "GiftCondGroup",
+            "Подарок",
+            G_GIFTS,
+            vec![FieldDef::fixed("All", "AND")],
+        ),
+        def(
+            "GifterCondIBElement",
+            "Товары",
+            G_GIFTS,
+            vec![
+                FieldDef::choice("Type", "", GIFT_TYPES),
+                FieldDef::ids_at("Value", "items"),
+            ],
+        ),
+        def(
+            "GifterCondIBSection",
+            "Раздел",
+            G_GIFTS,
+            vec![
+                FieldDef::choice("Type", "", GIFT_TYPES),
+                FieldDef::id_at("Value", "sections"),
+            ],
+        ),
     ];
 
     // Свойства: «Свойства инфоблока #NAME# [#ID#]» / «Свойство #NAME#»
@@ -552,6 +668,14 @@ fn class_defs(d: &Dicts, hooks: &[&str]) -> Vec<ClassDef> {
     out
 }
 
+/// Действия корня дерева действий.
+const ROOT_ACTIONS: &[&str] = &[
+    "ActSaleBsktGrp",
+    "ActSaleDelivery",
+    "CumulativeAction",
+    "GiftCondGroup",
+];
+
 /// Какие классы можно добавить внутрь группы, по деревьям (`#root` — корень дерева).
 /// Как `GetShowIn` контролов Битрикса; классы проекта — в любую группу условий.
 fn children_map(classes: &[ClassDef], hooks: &[&str]) -> Value {
@@ -582,7 +706,7 @@ fn children_map(classes: &[ClassDef], hooks: &[&str]) -> Value {
     let mut act = BTreeMap::new();
     act.insert(
         "#root".to_string(),
-        vec!["ActSaleBsktGrp".to_string(), "ActSaleDelivery".to_string()],
+        ROOT_ACTIONS.iter().map(|c| c.to_string()).collect(),
     );
     for parent in ["ActSaleBsktGrp", "ActSaleSubGrp"] {
         act.insert(
@@ -590,6 +714,18 @@ fn children_map(classes: &[ClassDef], hooks: &[&str]) -> Value {
             allowed(parent, false, &["ActSaleSubGrp"]),
         );
     }
+    act.insert(
+        "CumulativeAction".to_string(),
+        allowed("CumulativeAction", false, &[]),
+    );
+    act.insert(
+        "GiftCondGroup".to_string(),
+        allowed(
+            "GiftCondGroup",
+            false,
+            &["GifterCondIBElement", "GifterCondIBSection"],
+        ),
+    );
     json!({ "conditions": cond, "actions": act })
 }
 
@@ -609,20 +745,24 @@ fn value_ids(v: Option<&Value>) -> Vec<i64> {
 
 /// Названия записей и разделов, упомянутых в деревьях (подсказки у полей id).
 async fn tree_names(db: &PgPool, classes: &[ClassDef], trees: &[&Node]) -> sqlx::Result<Value> {
-    let lookups: HashMap<&str, &str> = classes
+    let lookups: HashMap<&str, (&str, &str)> = classes
         .iter()
         .filter_map(|c| {
             c.fields
                 .iter()
-                .find_map(|f| f.lookup)
-                .map(|l| (c.id.as_str(), l))
+                .find_map(|f| f.lookup.map(|l| (f.key, l)))
+                .map(|kl| (c.id.as_str(), kl))
         })
         .collect();
-    fn walk(node: &Node, lookups: &HashMap<&str, &str>, out: &mut HashMap<String, Vec<i64>>) {
-        if let Some(l) = lookups.get(node.class_id.as_str()) {
+    fn walk(
+        node: &Node,
+        lookups: &HashMap<&str, (&str, &str)>,
+        out: &mut HashMap<String, Vec<i64>>,
+    ) {
+        if let Some((key, l)) = lookups.get(node.class_id.as_str()) {
             out.entry(l.to_string())
                 .or_default()
-                .extend(value_ids(node.data.get("value")));
+                .extend(value_ids(node.data.get(*key)));
         }
         for c in &node.children {
             walk(c, lookups, out);
@@ -882,7 +1022,7 @@ fn scope_errors(conditions: &Node, actions: &Node, errs: &mut Vec<TreeError>) {
         let known = CONDITION_CLASSES.contains(&class)
             || ACTION_CLASSES.contains(&class)
             || class.starts_with("CondIBProp:");
-        if known && !matches!(class, "ActSaleBsktGrp" | "ActSaleDelivery") {
+        if known && !ROOT_ACTIONS.contains(&class) {
             errs.push(TreeError {
                 tree: "actions",
                 path: format!("0.{i}"),
@@ -1625,6 +1765,322 @@ pub async fn delete_coupon(
     Ok(Redirect::to(&coupons_url(id)).into_response())
 }
 
+// ---------- Пресет «Накопительная скидка» ----------
+
+/// Строка порога, как введена.
+#[derive(Serialize, Clone)]
+struct RangeRow {
+    sum: String,
+    value: String,
+    /// `P` | `F`
+    kind: String,
+}
+
+impl RangeRow {
+    fn empty() -> RangeRow {
+        RangeRow {
+            sum: String::new(),
+            value: String::new(),
+            kind: "P".into(),
+        }
+    }
+}
+
+/// Форма пресета (`Handlers\DiscountPreset\Cumulative`): введённое сохраняется при ошибке.
+#[derive(Serialize)]
+struct CumulativeForm {
+    name: String,
+    active: bool,
+    groups: Vec<i64>,
+    ranges: Vec<RangeRow>,
+    /// `all_time` | `interval` | `relative`
+    type_sum_period: String,
+    sum_order_start: String,
+    sum_order_end: String,
+    sum_period_value: String,
+    sum_period_type: String,
+    apply_if_more_profitable: bool,
+    skip_discounted: bool,
+}
+
+/// Пустых строк порогов в новой форме (у Битрикса — четыре).
+const EMPTY_RANGE_ROWS: usize = 4;
+
+impl Default for CumulativeForm {
+    fn default() -> Self {
+        CumulativeForm {
+            name: String::new(),
+            active: true,
+            groups: Vec::new(),
+            ranges: vec![RangeRow::empty(); EMPTY_RANGE_ROWS],
+            type_sum_period: "all_time".into(),
+            sum_order_start: String::new(),
+            sum_order_end: String::new(),
+            sum_period_value: String::new(),
+            sum_period_type: "Y".into(),
+            apply_if_more_profitable: false,
+            skip_discounted: false,
+        }
+    }
+}
+
+impl CumulativeForm {
+    fn from_fields(fields: &FormFields) -> CumulativeForm {
+        let all = |key: &str| -> Vec<&str> {
+            fields
+                .iter()
+                .filter(|(k, _)| k == key)
+                .map(|(_, v)| v.trim())
+                .collect()
+        };
+        let (sums, values, kinds) = (all("range_sum"), all("range_value"), all("range_type"));
+        let mut ranges: Vec<RangeRow> = sums
+            .iter()
+            .enumerate()
+            .map(|(i, sum)| RangeRow {
+                sum: sum.to_string(),
+                value: values.get(i).copied().unwrap_or("").to_string(),
+                kind: match kinds.get(i).copied() {
+                    Some("F") => "F".into(),
+                    _ => "P".into(),
+                },
+            })
+            .collect();
+        if ranges.is_empty() {
+            ranges = vec![RangeRow::empty(); EMPTY_RANGE_ROWS];
+        }
+        let get = |k: &str| field(fields, k).trim().to_string();
+        CumulativeForm {
+            name: get("name"),
+            active: checked(fields, "active"),
+            groups: fields
+                .iter()
+                .filter(|(k, _)| k == "group")
+                .filter_map(|(_, v)| v.parse().ok())
+                .collect(),
+            ranges,
+            type_sum_period: get("type_sum_period"),
+            sum_order_start: get("sum_order_start"),
+            sum_order_end: get("sum_order_end"),
+            sum_period_value: get("sum_period_value"),
+            sum_period_type: get("sum_period_type"),
+            apply_if_more_profitable: field(fields, "apply_if_more_profitable") == "Y",
+            skip_discounted: field(fields, "skip_discounted") == "Y",
+        }
+    }
+}
+
+/// Число формы: запятая — как точка (`str_replace(",", ".")` пресета).
+fn parse_amount(raw: &str) -> Option<f64> {
+    raw.replace(',', ".")
+        .parse::<f64>()
+        .ok()
+        .filter(|n| n.is_finite())
+}
+
+/// Число в `DATA`: целое — без дробной части, как значения из Битрикса.
+fn json_number(n: f64) -> Value {
+    if n.fract() == 0.0 && n.abs() < 1e15 {
+        Value::from(n as i64)
+    } else {
+        Value::from(n)
+    }
+}
+
+/// Пороги как `buildRangesFromState`: пустые строки пропускаются, величина > 0 (процент —
+/// не больше 100), сортировка по сумме, без повторов границ.
+fn cumulative_ranges(rows: &[RangeRow], errors: &mut Vec<String>) -> Vec<(f64, f64, String)> {
+    const BAD_VALUE: &str = "Неверное значение величины скидки для диапазона";
+    let mut out: Vec<(f64, f64, String)> = Vec::new();
+    for r in rows {
+        if r.sum.is_empty() && r.value.is_empty() {
+            continue;
+        }
+        let Some(sum) = parse_amount(&r.sum).filter(|s| *s >= 0.0) else {
+            errors.push("Неверное значение границы диапазона".into());
+            return Vec::new();
+        };
+        match parse_amount(&r.value) {
+            Some(v) if v > 0.0 && !(r.kind == "P" && v > 100.0) => {
+                out.push((sum, v, r.kind.clone()))
+            }
+            _ => {
+                errors.push(BAD_VALUE.into());
+                return Vec::new();
+            }
+        }
+    }
+    if out.is_empty() {
+        errors.push("Не указаны величины скидок".into());
+        return out;
+    }
+    out.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if out.windows(2).any(|w| w[0].0 == w[1].0) {
+        errors.push("Дублируются границы диапазонов".into());
+        return Vec::new();
+    }
+    out
+}
+
+/// Дерево действий пресета (`Cumulative::generateDiscount`); незаданные поля периода — пустые.
+fn cumulative_actions(form: &CumulativeForm, errors: &mut Vec<String>) -> Option<Node> {
+    let ranges = cumulative_ranges(&form.ranges, errors);
+    let empty = || Value::from("");
+    let mut period = json!({
+        "discount_sum_order_start": "",
+        "discount_sum_order_end": "",
+        "discount_sum_period_value": "",
+        "discount_sum_period_type": "",
+    });
+    match form.type_sum_period.as_str() {
+        "all_time" => {}
+        "interval" => {
+            let ts = |d: Option<DateTime<Utc>>| d.map_or_else(empty, |d| d.timestamp().into());
+            period["discount_sum_order_start"] =
+                ts(parse_date(&form.sum_order_start, "Период: от", errors));
+            period["discount_sum_order_end"] =
+                ts(parse_date(&form.sum_order_end, "Период: до", errors));
+        }
+        "relative" => {
+            match form.sum_period_value.parse::<i64>() {
+                Ok(n) if n > 0 => period["discount_sum_period_value"] = n.into(),
+                _ => errors.push("За последние: целое число больше 0".into()),
+            }
+            match form.sum_period_type.as_str() {
+                t @ ("D" | "M" | "Y") => period["discount_sum_period_type"] = t.into(),
+                _ => errors.push("За последние: неизвестная единица периода".into()),
+            }
+        }
+        _ => errors.push("Неизвестный период для суммирования заказов".into()),
+    }
+    if !errors.is_empty() {
+        return None;
+    }
+    let ranges: Vec<Value> = ranges
+        .into_iter()
+        .map(|(sum, value, kind)| {
+            json!({"sum": json_number(sum), "value": json_number(value), "type": kind})
+        })
+        .collect();
+    let filter: Vec<Value> = if form.skip_discounted {
+        vec![json!({
+            "CLASS_ID": "CondBsktAppliedDiscount",
+            "DATA": {"logic": "Equal", "value": "N"},
+            "CHILDREN": [],
+        })]
+    } else {
+        Vec::new()
+    };
+    let tree = json!({
+        "CLASS_ID": "CondGroup",
+        "DATA": {"All": "AND"},
+        "CHILDREN": [{
+            "CLASS_ID": "CumulativeAction",
+            "DATA": {
+                "ranges": ranges,
+                "type_sum_period": form.type_sum_period,
+                "sum_period_data": period,
+                "apply_if_more_profitable": if form.apply_if_more_profitable { "Y" } else { "N" },
+                "All": "AND",
+                "True": "True",
+            },
+            "CHILDREN": filter,
+        }],
+    });
+    serde_json::from_value(tree).ok()
+}
+
+async fn render_cumulative(
+    state: &AppState,
+    user: Access,
+    form: CumulativeForm,
+    errors: Vec<String>,
+) -> AppResult<Html<String>> {
+    let groups: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, name FROM groups ORDER BY sort, name")
+            .fetch_all(&state.db)
+            .await?;
+    render(
+        state,
+        "discount_cumulative.html",
+        context! {
+            user,
+            form,
+            errors,
+            groups,
+            periods => vec![
+                ("all_time", "За все время"),
+                ("interval", "За период"),
+                ("relative", "За последние"),
+            ],
+            units => vec![("Y", "год"), ("M", "месяц"), ("D", "день")],
+            kinds => vec![("P", "В процентах"), ("F", "Фиксированная сумма")],
+        },
+    )
+}
+
+/// `GET /admin/discounts/cumulative` — форма пресета «Накопительная скидка».
+pub async fn cumulative_form(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+) -> AppResult<Html<String>> {
+    user.require(DISCOUNTS_MANAGE)?;
+    render_cumulative(&state, user, CumulativeForm::default(), vec![]).await
+}
+
+/// `POST /admin/discounts/cumulative` — правило из пресета: пустые условия и одно действие
+/// `CumulativeAction`; дальше его можно править в обычной форме.
+pub async fn cumulative_create(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Form(fields): Form<FormFields>,
+) -> AppResult<Response> {
+    user.require(DISCOUNTS_MANAGE)?;
+    let form = CumulativeForm::from_fields(&fields);
+    let mut errors = Vec::new();
+    if form.name.is_empty() {
+        errors.push("Укажите название".to_string());
+    }
+    let actions = cumulative_actions(&form, &mut errors);
+    let conditions: Node = serde_json::from_str(DEFAULT_CONDITIONS).expect("пустые условия");
+    if let Some(actions) = &actions {
+        // Собранное дерево проверяется как любое другое
+        let refs = Refs::load(&state.db, &[&conditions, actions]).await?;
+        errors.extend(
+            validate_with(actions, &refs, &[])
+                .into_iter()
+                .map(|(path, m)| format!("Действия, элемент {path}: {m}")),
+        );
+    }
+    let (Some(actions), true) = (actions, errors.is_empty()) else {
+        return Ok(render_cumulative(&state, user, form, errors)
+            .await?
+            .into_response());
+    };
+    let groups: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM groups WHERE id = ANY($1) ORDER BY id")
+            .bind(&form.groups)
+            .fetch_all(&state.db)
+            .await?;
+    let input = RuleInput {
+        name: form.name,
+        active: form.active,
+        active_from: None,
+        active_to: None,
+        priority: 1,
+        sort: 100,
+        last_discount: false,
+        last_level_discount: false,
+        use_coupons: false,
+        groups,
+        conditions,
+        actions,
+        unsupported: Vec::new(),
+    };
+    save_rule(&state.db, None, &input).await?;
+    Ok(Redirect::to("/admin/discounts").into_response())
+}
+
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;
@@ -1706,6 +2162,7 @@ mod tests {
             format!("/admin/discounts/{id}"),
             format!("/admin/discounts/{id}/coupons"),
             "/admin/discounts/names?items=1".to_string(),
+            "/admin/discounts/cumulative".to_string(),
         ];
         for path in &gets {
             let (status, _) = get(&app, path, &none).await;
@@ -1715,6 +2172,10 @@ mod tests {
         }
         let posts = [
             ("/admin/discounts".to_string(), "name=x".to_string()),
+            (
+                "/admin/discounts/cumulative".to_string(),
+                "name=x".to_string(),
+            ),
             (format!("/admin/discounts/{id}"), "name=x".to_string()),
             (
                 format!("/admin/discounts/{id}/active"),
@@ -2266,5 +2727,437 @@ mod tests {
         assert_eq!(v["items"][c.item_id.to_string()], "Первая новость");
         assert!(v["items"].get("999").is_none());
         assert_eq!(v["sections"][c.section_id.to_string()], "Раздел А");
+    }
+
+    /// Дерево пресета «Накопительная скидка» Битрикса (`Cumulative::generateDiscount`).
+    fn cumulative_tree() -> Value {
+        json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND"}, "CHILDREN": [{
+            "CLASS_ID": "CumulativeAction",
+            "DATA": {
+                "ranges": [
+                    {"sum": 1000, "value": 3, "type": "P"},
+                    {"sum": 5000, "value": 7, "type": "P"}
+                ],
+                "type_sum_period": "relative",
+                "sum_period_data": {
+                    "discount_sum_order_start": "",
+                    "discount_sum_order_end": "",
+                    "discount_sum_period_value": 12,
+                    "discount_sum_period_type": "M"
+                },
+                "apply_if_more_profitable": "N",
+                "All": "AND",
+                "True": "True"
+            },
+            "CHILDREN": [
+                {"CLASS_ID": "CondBsktAppliedDiscount", "DATA": {"logic": "Equal", "value": "N"}, "CHILDREN": []}
+            ]
+        }]})
+    }
+
+    #[sqlx::test]
+    async fn cumulative_preset_creates_rule(db: PgPool) {
+        let c = content_fixture(&db).await;
+        let app = app(&db);
+        let cookie = permitted_cookie(&db, "manager", &["discounts.manage"]).await;
+        let (status, html) = get(&app, "/admin/discounts", &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            html.contains("&#x2f;admin&#x2f;discounts&#x2f;cumulative")
+                || html.contains("/admin/discounts/cumulative"),
+            "{html}"
+        );
+        let (status, html) = get(&app, "/admin/discounts/cumulative", &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        assert!(html.contains("Накопительная скидка"), "{html}");
+
+        let group = c.group_id.to_string();
+        // Порядок строк — не по сумме: пресет сортирует пороги, пустые строки пропускает
+        let form = body(&[
+            ("name", "Накопительная"),
+            ("active", "on"),
+            ("group", &group),
+            ("range_sum", "5000"),
+            ("range_value", "7"),
+            ("range_type", "P"),
+            ("range_sum", ""),
+            ("range_value", ""),
+            ("range_type", "P"),
+            ("range_sum", "1000"),
+            ("range_value", "3,0"),
+            ("range_type", "P"),
+            ("type_sum_period", "relative"),
+            ("sum_order_start", "2026-01-01T00:00"),
+            ("sum_order_end", ""),
+            ("sum_period_value", "12"),
+            ("sum_period_type", "M"),
+            ("skip_discounted", "Y"),
+        ]);
+        let (status, html) = post_form(&app, "/admin/discounts/cumulative", &cookie, &form).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{html}");
+        let (id, name, active, conditions, actions, unsupported): (
+            i64,
+            String,
+            bool,
+            Value,
+            Value,
+            String,
+        ) = sqlx::query_as(
+            "SELECT id, name, active, conditions, actions, unsupported FROM discounts",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            (&name[..], active, &unsupported[..]),
+            ("Накопительная", true, "")
+        );
+        assert_eq!(
+            conditions,
+            json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": []})
+        );
+        assert_eq!(actions, cumulative_tree());
+        let groups: Vec<i64> =
+            sqlx::query_scalar("SELECT group_id FROM discount_groups WHERE discount_id = $1")
+                .bind(id)
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(groups, vec![c.group_id]);
+
+        // Интервал «выгоднее» без «пропускать»: даты — московские, в unix-секундах
+        let form = body(&[
+            ("name", "Интервал"),
+            ("range_sum", "0"),
+            ("range_value", "100"),
+            ("range_type", "F"),
+            ("type_sum_period", "interval"),
+            ("sum_order_start", "2026-01-01T00:00"),
+            ("sum_order_end", ""),
+            ("sum_period_value", "12"),
+            ("sum_period_type", "M"),
+            ("apply_if_more_profitable", "Y"),
+        ]);
+        let (status, html) = post_form(&app, "/admin/discounts/cumulative", &cookie, &form).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{html}");
+        let (active, actions): (bool, Value) =
+            sqlx::query_as("SELECT active, actions FROM discounts WHERE name = 'Интервал'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(!active);
+        let action = &actions["CHILDREN"][0];
+        assert_eq!(
+            action["DATA"]["ranges"],
+            json!([{"sum": 0, "value": 100, "type": "F"}])
+        );
+        assert_eq!(
+            action["DATA"]["sum_period_data"],
+            json!({
+                "discount_sum_order_start": 1_767_214_800,
+                "discount_sum_order_end": "",
+                "discount_sum_period_value": "",
+                "discount_sum_period_type": ""
+            })
+        );
+        assert_eq!(action["DATA"]["apply_if_more_profitable"], "Y");
+        assert_eq!(action["CHILDREN"], json!([]));
+    }
+
+    #[sqlx::test]
+    async fn cumulative_preset_validates_ranges(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let form = body(&[
+            ("name", "Пустая"),
+            ("range_sum", ""),
+            ("range_value", ""),
+            ("range_type", "P"),
+            ("type_sum_period", "relative"),
+            ("sum_period_value", "6"),
+            ("sum_period_type", "M"),
+            ("skip_discounted", "Y"),
+        ]);
+        let (status, html) = post_form(&app, "/admin/discounts/cumulative", &cookie, &form).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(r#"class="alert""#), "{html}");
+        assert!(html.contains("Не указаны величины скидок"), "{html}");
+        assert!(html.contains(r#"value="Пустая""#), "{html}");
+        assert!(
+            html.contains(r#"name="sum_period_value" value="6""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"value="relative" selected"#), "{html}");
+        assert!(
+            html.contains(r#"name="skip_discounted" value="Y" checked"#),
+            "{html}"
+        );
+
+        let form = body(&[
+            ("name", "Больше ста"),
+            ("range_sum", "1000"),
+            ("range_value", "150"),
+            ("range_type", "P"),
+            ("range_sum", "2000"),
+            ("range_value", "500"),
+            ("range_type", "F"),
+            ("type_sum_period", "all_time"),
+        ]);
+        let (status, html) = post_form(&app, "/admin/discounts/cumulative", &cookie, &form).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            html.contains("Неверное значение величины скидки для диапазона"),
+            "{html}"
+        );
+        assert!(html.contains(r#"value="Больше ста""#), "{html}");
+        // введённые строки на месте, со своими типами
+        assert!(html.contains(r#"name="range_value" value="150""#), "{html}");
+        assert!(html.contains(r#"name="range_value" value="500""#), "{html}");
+        assert!(html.contains(r#"value="F" selected"#), "{html}");
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM discounts")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[sqlx::test]
+    async fn discount_form_saves_gift_rule(db: PgPool) {
+        let c = content_fixture(&db).await;
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let gift = |value: Value| {
+            json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND"}, "CHILDREN": [{
+                "CLASS_ID": "GiftCondGroup", "DATA": {"All": "AND"}, "CHILDREN": [
+                    {"CLASS_ID": "GifterCondIBElement", "DATA": {"Type": "one", "Value": value}, "CHILDREN": []}
+                ]
+            }]})
+        };
+        let form = body(&[
+            ("name", "Подарок"),
+            ("conditions", &conditions().to_string()),
+            ("actions", &gift(json!([c.item_id])).to_string()),
+        ]);
+        let (status, html) = post_form(&app, "/admin/discounts", &cookie, &form).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{html}");
+        let (id, actions, unsupported): (i64, Value, String) =
+            sqlx::query_as("SELECT id, actions, unsupported FROM discounts")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(actions, gift(json!([c.item_id])));
+        assert_eq!(unsupported, "");
+        // в форме правки — название подарка в подсказке
+        let (_, html) = get(&app, &format!("/admin/discounts/{id}"), &cookie).await;
+        assert!(html.contains("Первая новость"), "{html}");
+
+        // раздел-подарок — одним id
+        let section = json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND"}, "CHILDREN": [{
+            "CLASS_ID": "GiftCondGroup", "DATA": {"All": "AND"}, "CHILDREN": [
+                {"CLASS_ID": "GifterCondIBSection", "DATA": {"Type": "all", "Value": c.section_id}, "CHILDREN": []}
+            ]
+        }]});
+        let form = body(&[
+            ("name", "Подарок из раздела"),
+            ("conditions", &conditions().to_string()),
+            ("actions", &section.to_string()),
+        ]);
+        let (status, html) = post_form(&app, "/admin/discounts", &cookie, &form).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{html}");
+
+        let form = body(&[
+            ("name", "Нет товара"),
+            ("conditions", &conditions().to_string()),
+            ("actions", &gift(json!([999_999])).to_string()),
+        ]);
+        let (status, html) = post_form(&app, "/admin/discounts", &cookie, &form).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            html.contains("Действия, элемент 0.0.0: запись 999999 не найдена"),
+            "{html}"
+        );
+        assert!(html.contains(r#"value="Нет товара""#), "{html}");
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM discounts")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    /// Правило с накопительной скидкой (из пресета или Битрикса) сохраняется из формы правки.
+    #[sqlx::test]
+    async fn cumulative_rule_resaves(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let id = rule(&db, "Накопительная").await;
+        sqlx::query("UPDATE discounts SET actions = $2 WHERE id = $1")
+            .bind(id)
+            .bind(cumulative_tree())
+            .execute(&db)
+            .await
+            .unwrap();
+        let conds = json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND", "True": "True"}, "CHILDREN": [
+            {"CLASS_ID": "CondCumulativeGroup", "DATA": {"logic": "EqGr", "Value": 1000}, "CHILDREN": [
+                {"CLASS_ID": "PeriodRelative", "DATA": {"Value": 1, "TypeRelativePeriod": "Y"}, "CHILDREN": []}
+            ]}
+        ]});
+        let form = body(&[
+            ("name", "Накопительная"),
+            ("conditions", &conds.to_string()),
+            ("actions", &cumulative_tree().to_string()),
+        ]);
+        let (status, html) =
+            post_form(&app, &format!("/admin/discounts/{id}"), &cookie, &form).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{html}");
+        let (stored, unsupported): (Value, String) =
+            sqlx::query_as("SELECT actions, unsupported FROM discounts WHERE id = $1")
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(stored, cumulative_tree());
+        assert_eq!(unsupported, "");
+    }
+
+    /// Значение скрытого поля `#discount-tree-data` (экранировано в атрибуте).
+    fn tree_data(html: &str) -> Value {
+        let start = html
+            .find(r#"id="discount-tree-data" value=""#)
+            .expect("нет данных")
+            + r#"id="discount-tree-data" value=""#.len();
+        let raw = &html[start..start + html[start..].find('"').unwrap()];
+        let raw = raw
+            .replace("&quot;", "\"")
+            .replace("&#x27;", "'")
+            .replace("&#x2f;", "/")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&");
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[sqlx::test]
+    async fn tree_data_lists_new_classes(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let (status, html) = get(&app, "/admin/discounts/new", &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        let data = tree_data(&html);
+        let class = |id: &str| -> Value {
+            data["classes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == id)
+                .cloned()
+                .unwrap_or_else(|| panic!("нет класса {id}"))
+        };
+        let kinds = |id: &str| -> Vec<(String, String)> {
+            class(id)["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| {
+                    (
+                        f["key"].as_str().unwrap().to_string(),
+                        f["kind"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect()
+        };
+        let has = |id: &str, key: &str, kind: &str| {
+            assert!(
+                kinds(id).contains(&(key.to_string(), kind.to_string())),
+                "{id}: {:?}",
+                kinds(id)
+            );
+        };
+        for (id, label) in [
+            ("CondCumulativeGroup", "Накопительная сумма заказов"),
+            ("Period", "Период: с … по …"),
+            ("PeriodRelative", "Период: последние N …"),
+            ("CumulativeAction", "Накопительная скидка"),
+            ("GiftCondGroup", "Подарок"),
+            ("GifterCondIBElement", "Товары"),
+            ("GifterCondIBSection", "Раздел"),
+        ] {
+            assert_eq!(class(id)["label"], label, "{id}");
+        }
+        has("CondCumulativeGroup", "logic", "choice");
+        has("CondCumulativeGroup", "Value", "number");
+        has("Period", "ValueStart", "datetime");
+        has("Period", "ValueEnd", "datetime");
+        has("PeriodRelative", "Value", "number");
+        has("PeriodRelative", "TypeRelativePeriod", "choice");
+        has("CumulativeAction", "ranges", "ranges");
+        has("CumulativeAction", "type_sum_period", "choice");
+        has(
+            "CumulativeAction",
+            "sum_period_data.discount_sum_order_start",
+            "datetime",
+        );
+        has(
+            "CumulativeAction",
+            "sum_period_data.discount_sum_period_type",
+            "choice",
+        );
+        has("CumulativeAction", "apply_if_more_profitable", "choice");
+        has("GifterCondIBElement", "Type", "choice");
+        has("GifterCondIBElement", "Value", "ids");
+        has("GifterCondIBSection", "Value", "ids");
+        let units = &class("PeriodRelative")["fields"][1]["options"];
+        assert_eq!(
+            units,
+            &json!([["D", "Дней"], ["M", "Месяцев"], ["Y", "Лет"]])
+        );
+        let gift_types = &class("GifterCondIBElement")["fields"][0]["options"];
+        assert_eq!(gift_types, &json!([["one", "один из"], ["all", "все"]]));
+        assert_eq!(class("GifterCondIBElement")["fields"][1]["lookup"], "items");
+        assert_eq!(
+            class("GifterCondIBSection")["fields"][1]["lookup"],
+            "sections"
+        );
+        assert_eq!(class("GifterCondIBSection")["fields"][1]["single"], true);
+
+        let contains =
+            |list: &Value, id: &str| list.as_array().is_some_and(|l| l.iter().any(|c| c == id));
+        let ch = &data["children"];
+        assert!(
+            contains(&ch["conditions"]["#root"], "CondCumulativeGroup"),
+            "{ch}"
+        );
+        assert!(!contains(&ch["conditions"]["#root"], "Period"), "{ch}");
+        assert!(
+            contains(&ch["conditions"]["CondCumulativeGroup"], "Period"),
+            "{ch}"
+        );
+        assert!(
+            contains(&ch["conditions"]["CondCumulativeGroup"], "PeriodRelative"),
+            "{ch}"
+        );
+        assert!(
+            contains(&ch["actions"]["#root"], "CumulativeAction"),
+            "{ch}"
+        );
+        assert!(contains(&ch["actions"]["#root"], "GiftCondGroup"), "{ch}");
+        assert!(
+            contains(
+                &ch["actions"]["CumulativeAction"],
+                "CondBsktAppliedDiscount"
+            ),
+            "{ch}"
+        );
+        assert!(
+            !contains(&ch["actions"]["CumulativeAction"], "ActSaleSubGrp"),
+            "{ch}"
+        );
+        assert!(
+            contains(&ch["actions"]["GiftCondGroup"], "GifterCondIBElement"),
+            "{ch}"
+        );
+        assert!(
+            contains(&ch["actions"]["GiftCondGroup"], "GifterCondIBSection"),
+            "{ch}"
+        );
     }
 }

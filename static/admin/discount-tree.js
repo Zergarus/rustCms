@@ -27,12 +27,50 @@
 
   function clone(v) { return JSON.parse(JSON.stringify(v)); }
 
+  // Ключ с точкой — вложенный объект DATA (sum_period_data.discount_sum_period_type)
+  function getKey(data, key) {
+    var parts = key.split(".");
+    var o = data;
+    for (var i = 0; i < parts.length; i++) {
+      if (o === null || typeof o !== "object") return undefined;
+      o = o[parts[i]];
+    }
+    return o;
+  }
+
+  function setKey(data, key, v) {
+    var parts = key.split(".");
+    var o = data;
+    for (var i = 0; i < parts.length - 1; i++) {
+      if (o[parts[i]] === null || typeof o[parts[i]] !== "object" || Array.isArray(o[parts[i]])) o[parts[i]] = {};
+      o = o[parts[i]];
+    }
+    if (v === undefined) delete o[parts[parts.length - 1]];
+    else o[parts[parts.length - 1]] = v;
+  }
+
   function newNode(classId) {
     var data = {};
     classes[classId].fields.forEach(function (f) {
-      if (f.kind !== "json") data[f.key] = clone(f.default);
+      if (f.kind !== "json" && f.default !== null) setKey(data, f.key, clone(f.default));
     });
     return { CLASS_ID: classId, DATA: data, CHILDREN: [] };
+  }
+
+  // Даты — по Москве (UTC+3, без перехода на летнее время), хранятся unix-секундами
+  var MSK = 3 * 3600;
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+  function toInput(ts) {
+    var n = Number(ts);
+    if (ts === "" || ts === null || ts === undefined || !isFinite(n) || n === 0) return "";
+    var d = new Date((n + MSK) * 1000);
+    return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate()) +
+      "T" + pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes());
+  }
+  function fromInput(s) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(s);
+    if (!m) return undefined;
+    return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) / 1000 - MSK;
   }
 
   document.querySelectorAll(".discount-tree").forEach(mountTree);
@@ -119,13 +157,14 @@
     }
 
     function control(head, node, f) {
+      if (f.kind === "const") return;
       if (f.label) head.appendChild(el("span", { "class": "muted" }, f.label));
       var data = node.DATA;
       var c;
       if (f.kind === "choice" || f.kind === "multi") {
         var multi = f.kind === "multi";
         c = el("select", multi ? { multiple: "", size: String(Math.min(Math.max(f.options.length, 2), 6)) } : {});
-        var current = (multi ? asList(data[f.key]) : [data[f.key]]).map(String);
+        var current = (multi ? asList(getKey(data, f.key)) : [getKey(data, f.key)]).map(String);
         var seen = {};
         f.options.forEach(function (o) {
           var opt = el("option", { value: o[0] }, o[1]);
@@ -141,37 +180,46 @@
           c.appendChild(opt);
         });
         on(c, function () {
-          if (!multi) { data[f.key] = c.value; return; }
-          data[f.key] = Array.prototype.filter.call(c.options, function (o) { return o.selected; })
-            .map(function (o) { return /^\d+$/.test(o.value) ? Number(o.value) : o.value; });
+          if (!multi) { setKey(data, f.key, c.value); return; }
+          setKey(data, f.key, Array.prototype.filter.call(c.options, function (o) { return o.selected; })
+            .map(function (o) { return /^\d+$/.test(o.value) ? Number(o.value) : o.value; }));
         });
       } else if (f.kind === "number" || f.kind === "text") {
         c = el("input", { type: "text", "class": "dt-" + f.kind });
-        c.value = data[f.key] === undefined ? "" : String(data[f.key]);
+        var cur = getKey(data, f.key);
+        c.value = cur === undefined || cur === null ? "" : String(cur);
         on(c, function () {
           var v = c.value.trim();
-          data[f.key] = f.kind === "number" && v !== "" && isFinite(v) ? Number(v) : c.value;
+          setKey(data, f.key, f.kind === "number" && v !== "" && isFinite(v) ? Number(v) : c.value);
         });
+      } else if (f.kind === "datetime") {
+        c = el("input", { type: "datetime-local", "class": "dt-datetime", title: "по Москве" });
+        c.value = toInput(getKey(data, f.key));
+        on(c, function () { setKey(data, f.key, fromInput(c.value)); });
+      } else if (f.kind === "ranges") {
+        rangesControl(head, data, f);
+        return;
       } else if (f.kind === "ids") {
-        c = el("input", { type: "text", "class": "dt-ids", placeholder: "id через запятую" });
-        c.value = asList(data[f.key]).join(", ");
+        c = el("input", { type: "text", "class": "dt-ids", placeholder: f.single ? "id" : "id через запятую" });
+        c.value = asList(getKey(data, f.key)).join(", ");
         var hint = el("span", { "class": "dt-hint" });
         var showHint = function () {
-          hint.textContent = asList(data[f.key]).map(function (id) {
+          hint.textContent = asList(getKey(data, f.key)).map(function (id) {
             var n = (names[f.lookup] || {})[id];
             if (n) return n;
             return asked[f.lookup][id] ? id + " — не найдено" : "";
           }).filter(Boolean).join("; ");
         };
         on(c, function () {
-          data[f.key] = c.value.split(/[\s,;]+/).filter(Boolean).map(function (s) {
+          var ids = c.value.split(/[\s,;]+/).filter(Boolean).map(function (s) {
             return /^\d+$/.test(s) ? Number(s) : s;
           });
+          setKey(data, f.key, f.single ? (ids.length ? ids[0] : "") : ids);
         });
-        c.addEventListener("change", function () { lookup(f.lookup, asList(data[f.key]), showHint); });
+        c.addEventListener("change", function () { lookup(f.lookup, asList(getKey(data, f.key)), showHint); });
         head.appendChild(c);
         head.appendChild(hint);
-        lookup(f.lookup, asList(data[f.key]), showHint);
+        lookup(f.lookup, asList(getKey(data, f.key)), showHint);
         return;
       } else if (f.kind === "json") {
         c = el("textarea", { rows: "2", "class": "dt-json" });
@@ -189,6 +237,53 @@
         return;
       }
       head.appendChild(c);
+    }
+
+    // Пороги [{sum, value, type}]: строки добавляются и удаляются
+    function rangesControl(head, data, f) {
+      var box = el("div", { "class": "dt-ranges" });
+      var rows = function () {
+        var v = getKey(data, f.key);
+        if (!Array.isArray(v)) { v = []; setKey(data, f.key, v); }
+        return v;
+      };
+      var num = function (s) {
+        var t = s.trim().replace(",", ".");
+        return t !== "" && isFinite(t) ? Number(t) : s;
+      };
+      function draw() {
+        box.replaceChildren();
+        rows().forEach(function (r, i) {
+          var line = el("div", { "class": "dt-range" });
+          line.appendChild(el("span", { "class": "muted" }, "от"));
+          var sum = el("input", { type: "text", "class": "dt-number" });
+          sum.value = r.sum === undefined ? "" : String(r.sum);
+          on(sum, function () { r.sum = num(sum.value); });
+          var value = el("input", { type: "text", "class": "dt-number" });
+          value.value = r.value === undefined ? "" : String(r.value);
+          on(value, function () { r.value = num(value.value); });
+          var type = el("select", {});
+          [["P", "%"], ["F", "руб. на каждый товар"]].forEach(function (o) {
+            var opt = el("option", { value: o[0] }, o[1]);
+            opt.selected = r.type === o[0];
+            type.appendChild(opt);
+          });
+          on(type, function () { r.type = type.value; });
+          var del = el("button", { type: "button", "class": "link danger" }, "×");
+          del.addEventListener("click", function () { rows().splice(i, 1); draw(); sync(); });
+          [sum, el("span", { "class": "muted" }, "скидка"), value, type, del].forEach(function (x) { line.appendChild(x); });
+          box.appendChild(line);
+        });
+        var add = el("button", { type: "button", "class": "link" }, "Добавить порог");
+        add.addEventListener("click", function () {
+          rows().push({ sum: 0, value: 0, type: "P" });
+          draw();
+          sync();
+        });
+        box.appendChild(add);
+      }
+      draw();
+      head.appendChild(box);
     }
 
     function on(c, apply) {
