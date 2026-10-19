@@ -559,7 +559,7 @@ fn choice(
 /// Деньги до копеек, как `round($v, 2)` PHP (`Sale\PriceMaths::roundPrecision`):
 /// значение × 100 предокругляется до 15 значащих цифр (как `_php_math_round`), затем
 /// половина округляется от нуля.
-pub(super) fn round2(x: f64) -> f64 {
+pub(crate) fn round2(x: f64) -> f64 {
     let scaled = x * 100.0;
     if !scaled.is_finite() {
         return x;

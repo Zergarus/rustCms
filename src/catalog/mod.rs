@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+pub mod rounding;
+
 use sqlx::{FromRow, PgConnection, PgPool};
 
 /// Коды типов товара (как `CATALOG_TYPE` в Битриксе).
