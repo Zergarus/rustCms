@@ -613,6 +613,7 @@ fn available_gifts(rule: &Rule, gifted: &[i64]) -> Vec<GiftOffer> {
                 kind,
                 product_ids,
                 section_id,
+                gifted: gifted.to_vec(),
             })
         })
         .collect()
@@ -2010,7 +2011,8 @@ mod tests {
                 rule_id: 1,
                 kind: GiftType::All,
                 product_ids: vec![11],
-                section_id: None
+                section_id: None,
+                gifted: vec![10]
             }]
         );
     }
@@ -2030,7 +2032,8 @@ mod tests {
                 rule_id: 1,
                 kind: GiftType::One,
                 product_ids: vec![10, 11],
-                section_id: None
+                section_id: None,
+                gifted: vec![]
             }]
         );
     }
@@ -2065,17 +2068,47 @@ mod tests {
         assert_eq!(price(&r, 2), 100.0);
         assert!(r.gifts.is_empty(), "{:?}", r.gifts);
 
-        // «Все» из раздела — остаётся доступным и после подарка
+        // Ничего не подарено (2 шт.) — «один из» раздела доступен, подаренного нет
+        let mut two = line(1, 10, 300.0, 2.0);
+        two.section_ids = vec![5];
+        let r = calculate(&rules, &ctx(vec![two]), None);
+        assert_eq!(price(&r, 1), 300.0);
+        assert_eq!(
+            r.gifts,
+            vec![GiftOffer {
+                rule_id: 1,
+                kind: GiftType::One,
+                product_ids: vec![],
+                section_id: Some(5),
+                gifted: vec![]
+            }]
+        );
+    }
+
+    #[test]
+    fn gift_section_all_reports_gifted() {
+        use crate::discount::context::CtxParent;
+        // «Все» из раздела остаётся; подаренное (с родителем предложения) вычтет вызывающий
         let rules = [rule(1, vec![gift("GifterCondIBSection", "all", json!(5))])];
-        let r = calculate(&rules, &ctx(vec![inside]), None);
+        let mut offer = line(1, 70, 300.0, 1.0);
+        offer.section_ids = vec![5];
+        offer.parent = Some(CtxParent {
+            id: 7,
+            ..CtxParent::default()
+        });
+        let mut paid = line(2, 11, 100.0, 2.0);
+        paid.section_ids = vec![5];
+        let r = calculate(&rules, &ctx(vec![offer, paid]), None);
         assert_eq!(price(&r, 1), 0.0);
+        assert_eq!(price(&r, 2), 100.0);
         assert_eq!(
             r.gifts,
             vec![GiftOffer {
                 rule_id: 1,
                 kind: GiftType::All,
                 product_ids: vec![],
-                section_id: Some(5)
+                section_id: Some(5),
+                gifted: vec![70, 7]
             }]
         );
     }
@@ -2098,7 +2131,8 @@ mod tests {
                 rule_id: 1,
                 kind: GiftType::One,
                 product_ids: vec![99],
-                section_id: None
+                section_id: None,
+                gifted: vec![]
             }]
         );
         assert_eq!(price(&r, 1), 6000.0);

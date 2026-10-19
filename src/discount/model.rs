@@ -174,6 +174,8 @@ impl GiftType {
 }
 
 /// Доступный подарок правила (`Gift\Collection` у `Gift\Manager::getCollectionsByBasket`).
+/// У списка записей подаренное уже вычтено; у раздела «все» вычитает вызывающий: раскрывает
+/// раздел в товары, убирает `gifted` и отбрасывает подарок с пустым списком.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GiftOffer {
     pub rule_id: i64,
@@ -182,6 +184,9 @@ pub struct GiftOffer {
     pub product_ids: Vec<i64>,
     /// Раздел подарков (`GifterCondIBSection`); товары раздела раскрывает вызывающий.
     pub section_id: Option<i64>,
+    /// Товары, подаренные этим правилом: товар каждой подаренной позиции и родитель
+    /// предложения (`ExtendProductIds`); пусто — правило ничего не подарило.
+    pub gifted: Vec<i64>,
 }
 
 /// Подарок узла `GiftCondGroup`: его единственный `Gifter*` (`ProvideGiftProductData` берёт
