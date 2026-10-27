@@ -1,5 +1,8 @@
 //! Валюты и курсы — порт модуля currency Битрикса: пересчёт по `GetConvertFactorEx`.
 
+pub mod auto;
+pub mod bank;
+
 use std::collections::HashMap;
 
 use chrono::{FixedOffset, NaiveDate, Utc};

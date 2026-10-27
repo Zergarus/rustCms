@@ -137,6 +137,7 @@ pub fn test_state(db: PgPool) -> crate::state::AppState {
         mail_smtp_url: None,
         mail_dir: tmp.join("mail"),
         cookie_secure: false,
+        currency_bank_url: None,
     };
     let mut env = minijinja::Environment::new();
     env.set_loader(minijinja::path_loader(config.templates_dir.join("admin")));

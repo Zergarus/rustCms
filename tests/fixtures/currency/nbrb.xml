@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<DailyExRates Date="10/27/2026">
+<Currency Id="145"><NumCode>840</NumCode><CharCode>USD</CharCode><Scale>1</Scale><Name>Доллар США</Name><Rate>3.2512</Rate></Currency>
+<Currency Id="190"><NumCode>643</NumCode><CharCode>RUB</CharCode><Scale>100</Scale><Name>Российских рублей</Name><Rate>3.9871</Rate></Currency>
+</DailyExRates>

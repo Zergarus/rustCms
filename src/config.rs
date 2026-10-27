@@ -19,6 +19,8 @@ pub struct Config {
     pub mail_dir: PathBuf,
     /// Ставить флаг Secure на cookie сессии (включать за HTTPS).
     pub cookie_secure: bool,
+    /// Заменяет схему и хост банков курсов валют (тесты, прокси); нет — настоящие адреса.
+    pub currency_bank_url: Option<String>,
 }
 
 impl Config {
@@ -42,6 +44,9 @@ impl Config {
                 .filter(|s| !s.trim().is_empty()),
             mail_dir: var_or("MAIL_DIR", "mail").into(),
             cookie_secure: var_or("COOKIE_SECURE", "false") == "true",
+            currency_bank_url: env::var("CURRENCY_BANK_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
         })
     }
 }

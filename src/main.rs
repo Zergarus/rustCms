@@ -7,7 +7,7 @@ mod cart;
 mod catalog;
 mod collection;
 mod config;
-#[allow(dead_code)] // админка и загрузка курсов подключают остальное в следующих задачах
+#[allow(dead_code)] // админка подключает set_base_currency, last_result и identity в Task 6
 mod currency;
 #[allow(dead_code)] // движок, корзина и админка подключают модель в следующих задачах
 mod discount;
@@ -57,7 +57,10 @@ const USAGE: &str = "\
                               перенести инфоблоки, HL-блоки, каталог и пользователей из базы
                               Битрикса; --upload — каталог upload сайта (файлы линкуются в
                               UPLOAD_DIR), --replace — удалить уже существующие коллекции,
-                              --api-code — apiCode инфоблока, если API_CODE в базе не заполнен";
+                              --api-code — apiCode инфоблока, если API_CODE в базе не заполнен
+  cms currency-rates [--date ДД.ММ.ГГГГ]
+                              загрузить курсы валют из банка базовой валюты (по умолчанию на
+                              сегодня по Москве); существующие курсы не перезаписываются";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -93,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
             let opts = import_options(&args[1..], &config).context(USAGE)?;
             import::run(&db, opts).await
         }
+        "currency-rates" => currency_rates(&db, &config, &args[1..]).await,
         other => bail!("неизвестная команда `{other}`\n\n{USAGE}"),
     }
 }
@@ -161,6 +165,31 @@ async fn create_admin(db: &PgPool, login: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `cms currency-rates [--date ДД.ММ.ГГГГ]`: загрузка курсов для cron.
+async fn currency_rates(db: &PgPool, config: &Config, args: &[String]) -> anyhow::Result<()> {
+    let mut date = currency::today();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--date" => {
+                let raw = it.next().context("--date без значения")?;
+                date = chrono::NaiveDate::parse_from_str(raw, "%d.%m.%Y")
+                    .context("--date: ожидается ДД.ММ.ГГГГ")?;
+            }
+            other => bail!("неизвестный аргумент `{other}`"),
+        }
+    }
+    let client = reqwest::Client::new();
+    let res = currency::auto::load_for_date(db, &client, config.currency_bank_url.as_deref(), date)
+        .await?;
+    println!("Загружено: {}", res.loaded.join(", "));
+    println!("Пропущено (нет у банка): {}", res.skipped.join(", "));
+    if let Some(error) = res.error {
+        bail!("{error}");
+    }
+    Ok(())
+}
+
 fn cors_layer(config: &Config) -> CorsLayer {
     let layer = CorsLayer::new().allow_methods(Any).allow_headers(Any);
     if config.cors_origins.iter().any(|o| o == "*") {
@@ -205,6 +234,7 @@ async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
         project: bxapi::project::Project::from_env(),
     };
 
+    currency::auto::spawn(state.clone());
     let app = app(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&state.config.bind_addr)

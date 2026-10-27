@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<exchange>
+<currency><r030>840</r030><txt>Долар США</txt><rate>41.5</rate><cc>USD</cc><exchangedate>27.10.2026</exchangedate></currency>
+<currency><r030>978</r030><txt>Євро</txt><rate>48.25</rate><cc>EUR</cc><exchangedate>27.10.2026</exchangedate></currency>
+</exchange>
