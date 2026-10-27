@@ -85,6 +85,11 @@ pub struct Stats {
     pub deactivated: BTreeMap<&'static str, u32>,
     pub deleted: BTreeMap<&'static str, u32>,
     pub skipped: BTreeMap<&'static str, u32>,
+    /// Некритичные замечания импорта (каждое один раз).
+    pub warnings: Vec<String>,
+    /// Коды валют цен, уже проверенные в этом импорте.
+    #[serde(skip)]
+    currencies_seen: HashSet<String>,
 }
 
 fn bump(map: &mut BTreeMap<&'static str, u32>, key: &'static str) {
@@ -1793,6 +1798,42 @@ async fn create_price_type(conn: &mut PgConnection, xml_id: &str) -> Result<i64,
 }
 
 /// Цена типа у записи: строки этого типа заменяются одной; неизменная не пишется.
+/// Валюта цены как в Битриксе (`CIBlockCMLImport::CheckCurrency`): «руб» — RUB, не латиница — RUB
+/// с предупреждением, неизвестный латинский код заводится в `currencies`. Пустая — RUB.
+async fn check_currency(
+    conn: &mut PgConnection,
+    raw: &str,
+    stats: &mut Stats,
+) -> Result<String, ApplyError> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "руб" {
+        return Ok("RUB".into());
+    }
+    if !raw.chars().all(|c| c.is_ascii_alphabetic()) {
+        let msg = "При импорте встретилась валюта цены содержащая не латинские буквы. Цена была импортирована с валютой RUB.";
+        if !stats.warnings.iter().any(|w| w == msg) {
+            tracing::warn!("обмен с 1С: {msg}");
+            stats.warnings.push(msg.to_string());
+        }
+        return Ok("RUB".into());
+    }
+    if !stats.currencies_seen.contains(raw) {
+        let created = sqlx::query(
+            "INSERT INTO currencies (code, amount, amount_cnt, base) VALUES ($1, 1, 1, FALSE)
+             ON CONFLICT (code) DO NOTHING",
+        )
+        .bind(raw)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        if created > 0 {
+            bump(&mut stats.created, "currencies");
+        }
+        stats.currencies_seen.insert(raw.to_string());
+    }
+    Ok(raw.to_string())
+}
+
 async fn write_price(
     conn: &mut PgConnection,
     item_id: i64,
@@ -1800,11 +1841,8 @@ async fn write_price(
     price: &Price,
     stats: &mut Stats,
 ) -> Result<(), ApplyError> {
-    let currency = if price.currency.trim().is_empty() {
-        "RUB"
-    } else {
-        price.currency.trim()
-    };
+    let currency = check_currency(conn, &price.currency, stats).await?;
+    let currency = currency.as_str();
     let (count, same): (i64, bool) = sqlx::query_as(
         "SELECT count(*), COALESCE(bool_and(price = round($3::float8::numeric, 2)
                                             AND currency = $4
@@ -3396,6 +3434,74 @@ mod tests {
 
     fn rests_package() -> Parsed {
         offers_file(include_bytes!("../../tests/fixtures/1c/rests.xml"))
+    }
+
+    /// Пакет цен, где у второго типа цены задана валюта `currency`.
+    fn prices_with_currency(currency: &str) -> Parsed {
+        let xml = include_str!("../../tests/fixtures/1c/prices.xml")
+            .replace("<Валюта>USD</Валюта>", &format!("<Валюта>{currency}</Валюта>"));
+        offers_file(xml.as_bytes())
+    }
+
+    async fn pt2_currency(db: &PgPool) -> String {
+        sqlx::query_scalar(
+            "SELECT p.currency FROM catalog_prices p
+             JOIN catalog_price_types t ON t.id = p.price_type_id
+             JOIN collection_items i ON i.id = p.item_id
+             WHERE i.xml_id = 'good-1' AND t.xml_id = 'pt-2'",
+        )
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    const LATIN_WARNING: &str = "При импорте встретилась валюта цены содержащая не латинские буквы. Цена была импортирована с валютой RUB.";
+
+    #[sqlx::test]
+    async fn price_currency_rub_word_becomes_rub(db: PgPool) {
+        let settings = Settings::default();
+        let dirs = Dirs::new();
+        load_goods(&db, &settings, &dirs, &goods_package()).await;
+        let st = run_in(&db, &settings, &dirs, &prices_with_currency("руб"))
+            .await
+            .unwrap();
+        assert_eq!(pt2_currency(&db).await, "RUB");
+        assert!(st.warnings.is_empty(), "{st:?}");
+    }
+
+    #[sqlx::test]
+    async fn price_currency_non_latin_becomes_rub_with_warning(db: PgPool) {
+        let settings = Settings::default();
+        let dirs = Dirs::new();
+        load_goods(&db, &settings, &dirs, &goods_package()).await;
+        let st = run_in(&db, &settings, &dirs, &prices_with_currency("грн."))
+            .await
+            .unwrap();
+        assert_eq!(pt2_currency(&db).await, "RUB");
+        assert_eq!(st.warnings, [LATIN_WARNING], "{st:?}");
+    }
+
+    #[sqlx::test]
+    async fn price_currency_unknown_latin_is_created(db: PgPool) {
+        let settings = Settings::default();
+        let dirs = Dirs::new();
+        load_goods(&db, &settings, &dirs, &goods_package()).await;
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM currencies WHERE code = 'KZT'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(before, 0);
+        run_in(&db, &settings, &dirs, &prices_with_currency("KZT"))
+            .await
+            .unwrap();
+        assert_eq!(pt2_currency(&db).await, "KZT");
+        let (amount, cnt, base): (String, i32, bool) = sqlx::query_as(
+            "SELECT amount::text, amount_cnt, base FROM currencies WHERE code = 'KZT'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!((amount.as_str(), cnt, base), ("1.0000", 1, false));
     }
 
     #[sqlx::test]
