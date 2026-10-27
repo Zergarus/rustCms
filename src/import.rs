@@ -163,6 +163,71 @@ struct Data {
     /// Признаки свойств `b_iblock_property_feature`: (свойство, `IN_BASKET` | `OFFER_TREE`).
     property_features: Vec<(i64, String)>,
     discounts: Discounts,
+    /// Поставщики `b_catalog_contractor`.
+    contractors: Vec<ContractorRow>,
+    /// Документы складского учёта `b_catalog_store_docs`.
+    store_docs: Vec<StoreDocRow>,
+    /// Строки документов `b_catalog_docs_element`.
+    store_doc_items: Vec<StoreDocItemRow>,
+}
+
+/// Поставщик `b_catalog_contractor`.
+struct ContractorRow {
+    id: i64,
+    /// `PERSON_TYPE`: 1 — физлицо, 2 — юрлицо.
+    person_type: String,
+    /// Фамилия, имя и отчество через пробел.
+    person_name: String,
+    company: String,
+    inn: String,
+    kpp: String,
+    /// Страна, город и адрес через запятую.
+    address: String,
+    phone: String,
+    email: String,
+    post_index: String,
+    created_at: Option<DateTime<Utc>>,
+    updated_at: Option<DateTime<Utc>>,
+}
+
+/// Документ складского учёта `b_catalog_store_docs`; пользователи — id Битрикса.
+struct StoreDocRow {
+    id: i64,
+    doc_type: String,
+    contractor_id: Option<i64>,
+    /// Пусто — валюта сайта.
+    currency: String,
+    /// `STATUS` = `Y` — проведён.
+    status: bool,
+    date_status: Option<DateTime<Utc>>,
+    date_document: Option<DateTime<Utc>>,
+    status_by: Option<i64>,
+    /// Десятичная строка как в базе.
+    total: Option<String>,
+    commentary: String,
+    title: String,
+    responsible_id: Option<i64>,
+    items_order_date: Option<DateTime<Utc>>,
+    items_received_date: Option<DateTime<Utc>>,
+    doc_number: String,
+    was_cancelled: bool,
+    created_by: Option<i64>,
+    modified_by: Option<i64>,
+    date_create: Option<DateTime<Utc>>,
+    date_modify: Option<DateTime<Utc>>,
+}
+
+/// Строка документа `b_catalog_docs_element`; числа — десятичные строки как в базе.
+struct StoreDocItemRow {
+    id: i64,
+    doc_id: i64,
+    store_from: Option<i64>,
+    store_to: Option<i64>,
+    element_id: Option<i64>,
+    amount: String,
+    purchasing_price: Option<String>,
+    base_price: Option<String>,
+    comment: String,
 }
 
 /// Правила работы с корзиной модуля `sale` и их купоны.
@@ -343,6 +408,12 @@ struct ProductRow {
     product_type: i16,
     /// Вес в граммах.
     weight: f64,
+    /// `QUANTITY_RESERVED`: резервы заказов Битрикса не переносятся, количество возвращается
+    /// в доступное.
+    quantity_reserved: f64,
+    /// Десятичная строка как в базе.
+    purchasing_price: Option<String>,
+    purchasing_currency: Option<String>,
 }
 
 /// Склад как в `b_catalog_store`.
@@ -360,6 +431,9 @@ struct StoreRow {
     image_id: Option<i64>,
     /// `b_catalog_store.XML_ID`.
     xml_id: String,
+    is_default: bool,
+    issuing_center: bool,
+    shipping_center: bool,
 }
 
 /// Почтовый шаблон `b_event_message`.
@@ -392,6 +466,17 @@ const OPTIONS: &[(&str, &str)] = &[
     ("catalog", "1C_USE_ZIP"),
     ("catalog", "deactivate_1c_no_price"),
     ("sale", "default_currency"),
+    ("catalog", "default_use_store_control"),
+    ("catalog", "enable_reservation"),
+    ("catalog", "allow_negative_amount"),
+    ("catalog", "store_document_numbers_A"),
+    ("catalog", "store_document_numbers_S"),
+    ("catalog", "store_document_numbers_M"),
+    ("catalog", "store_document_numbers_R"),
+    ("catalog", "store_document_numbers_D"),
+    ("sale", "product_reserve_condition"),
+    ("sale", "product_reserve_clear_period"),
+    ("sale", "allow_deduction_on_delivery"),
 ];
 
 /// Опции обмена с 1С в `catalog` Битрикса → настройки модуля `exchange`
@@ -605,6 +690,7 @@ pub async fn run(db: &PgPool, opts: Options) -> anyhow::Result<()> {
     stage("пользователи", read_users(&my, &mut data)).await?;
     stage("файлы", read_files(&my, &mut data)).await?;
     stage("торговый каталог", read_catalog(&my, &mut data)).await?;
+    stage("складской учёт", read_store_docs(&my, &mut data)).await?;
     stage("местоположения", read_locations(&my, &mut data)).await?;
     stage("почтовые шаблоны и настройки", read_mail(&my, &mut data)).await?;
     stage("настройки заказов", read_sale(&my, &mut data)).await?;
@@ -639,6 +725,9 @@ pub async fn run(db: &PgPool, opts: Options) -> anyhow::Result<()> {
         discounts = data.discounts.rules.len(),
         coupons = data.discounts.coupons.len(),
         store_amounts = data.catalog.amounts.len(),
+        contractors = data.contractors.len(),
+        store_docs = data.store_docs.len(),
+        store_doc_items = data.store_doc_items.len(),
         files_linked = linked,
         files_missing = missing,
         seconds = started.elapsed().as_secs_f32(),
@@ -2238,7 +2327,8 @@ async fn write_mail(tx: &mut sqlx::PgConnection, data: &Data) -> anyhow::Result<
     let mut last_export: Option<i64> = None;
     for (module, name, value) in &data.options {
         if module == "sale" {
-            if name == "default_currency" {
+            // Валюта по умолчанию и настройки резервирования — как есть
+            if OPTIONS.contains(&("sale", name.as_str())) {
                 put_option(tx, "sale", name, value).await?;
                 continue;
             }
@@ -2282,6 +2372,175 @@ async fn write_mail(tx: &mut sqlx::PgConnection, data: &Data) -> anyhow::Result<
         .await?;
     }
     Ok(())
+}
+
+/// Поставщики и документы складского учёта с сохранением id; повторный перенос заменяет их
+/// целиком. Остатки по документам не пересчитываются: 1С меняет их мимо документов.
+/// `users` — пользователь Битрикса → пользователь CMS. Возвращает предупреждения.
+async fn write_store_docs(
+    tx: &mut sqlx::PgConnection,
+    data: &Data,
+    users: &HashMap<i64, i64>,
+) -> anyhow::Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    // Документы раньше поставщиков: ссылка на поставщика — RESTRICT
+    sqlx::query("DELETE FROM store_documents")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM contractors")
+        .execute(&mut *tx)
+        .await?;
+
+    let now = Utc::now();
+    for chunk in data.contractors.chunks(BATCH) {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO contractors (id, person_type, person_name, company, inn, kpp, address,
+                                      phone, email, post_index, created_at, updated_at) ",
+        );
+        qb.push_values(chunk, |mut b, c| {
+            let created = c.created_at.unwrap_or(now);
+            b.push_bind(c.id)
+                // PERSON_TYPE: 1 — физлицо, 2 — юрлицо
+                .push_bind(if c.person_type == "1" { "I" } else { "C" })
+                .push_bind(&c.person_name)
+                .push_bind(&c.company)
+                .push_bind(&c.inn)
+                .push_bind(&c.kpp)
+                .push_bind(&c.address)
+                .push_bind(&c.phone)
+                .push_bind(&c.email)
+                .push_bind(&c.post_index)
+                .push_bind(created)
+                .push_bind(c.updated_at.unwrap_or(created));
+        });
+        qb.build().execute(&mut *tx).await?;
+    }
+
+    let contractors: HashSet<i64> = data.contractors.iter().map(|c| c.id).collect();
+    let user = |id: Option<i64>| id.and_then(|id| users.get(&id).copied());
+    let site_currency = crate::currency::site_currency(&mut *tx).await?;
+    let mut docs = Vec::new();
+    for d in &data.store_docs {
+        if crate::stock::documents::DocType::from_code(&d.doc_type).is_none() {
+            warnings.push(format!(
+                "документ складского учёта #{} ({}) пропущен: тип не переносится",
+                d.id, d.doc_type
+            ));
+            continue;
+        }
+        let contractor = d.contractor_id.filter(|id| contractors.contains(id));
+        if let (Some(id), None) = (d.contractor_id, contractor) {
+            warnings.push(format!(
+                "документ складского учёта #{}: поставщик {id} не найден, ссылка очищена",
+                d.id
+            ));
+        }
+        docs.push((d, contractor));
+    }
+    for chunk in docs.chunks(BATCH) {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO store_documents (id, doc_type, title, doc_number, date_document,
+                 contractor_id, currency, total, items_order_date, items_received_date,
+                 responsible_id, commentary, status, was_cancelled, date_status, status_by,
+                 created_by, modified_by, created_at, updated_at) ",
+        );
+        qb.push_values(chunk, |mut b, (d, contractor)| {
+            let created = d.date_create.or(d.date_document).unwrap_or(now);
+            b.push_bind(d.id)
+                .push_bind(&d.doc_type)
+                .push_bind(&d.title)
+                .push_bind(&d.doc_number)
+                // Дата документа обязательна: без неё — дата создания
+                .push_bind(d.date_document.unwrap_or(created))
+                .push_bind(*contractor)
+                .push_bind(if d.currency.is_empty() {
+                    &site_currency
+                } else {
+                    &d.currency
+                })
+                .push_bind(d.total.as_deref().map(str::trim).unwrap_or("0"))
+                .push_unseparated("::numeric")
+                .push_bind(d.items_order_date)
+                .push_bind(d.items_received_date)
+                .push_bind(user(d.responsible_id))
+                .push_bind(&d.commentary)
+                .push_bind(if d.status { "Y" } else { "N" })
+                .push_bind(d.was_cancelled)
+                .push_bind(d.date_status)
+                .push_bind(user(d.status_by))
+                .push_bind(user(d.created_by))
+                .push_bind(user(d.modified_by))
+                .push_bind(created)
+                .push_bind(d.date_modify.unwrap_or(created));
+        });
+        qb.build().execute(&mut *tx).await?;
+    }
+
+    // Строки: без документа — пропускаются; несуществующий товар — ссылка пустая;
+    // несуществующий склад остаётся как есть (проверяется при проведении)
+    let doc_ids: HashSet<i64> = docs.iter().map(|(d, _)| d.id).collect();
+    let skipped: HashSet<i64> = data
+        .store_docs
+        .iter()
+        .map(|d| d.id)
+        .filter(|id| !doc_ids.contains(id))
+        .collect();
+    let elements: HashSet<i64> = data.elements.iter().map(|e| e.id).collect();
+    let stores: HashSet<i64> = data.catalog.stores.iter().map(|st| st.id).collect();
+    let mut items = Vec::new();
+    let mut orphans = 0;
+    for it in &data.store_doc_items {
+        if !doc_ids.contains(&it.doc_id) {
+            if !skipped.contains(&it.doc_id) {
+                orphans += 1;
+            }
+            continue;
+        }
+        let item_id = it.element_id.filter(|id| elements.contains(id));
+        if let (Some(id), None) = (it.element_id, item_id) {
+            warnings.push(format!(
+                "строка #{} документа складского учёта #{}: товар {id} не найден, ссылка очищена",
+                it.id, it.doc_id
+            ));
+        }
+        for store in [it.store_from, it.store_to].into_iter().flatten() {
+            if !stores.contains(&store) {
+                warnings.push(format!(
+                    "строка #{} документа складского учёта #{}: склад {store} не найден",
+                    it.id, it.doc_id
+                ));
+            }
+        }
+        items.push((it, item_id));
+    }
+    if orphans > 0 {
+        warnings.push(format!(
+            "строк документов складского учёта не перенесено: {orphans} (документа нет, b_catalog_docs_element)"
+        ));
+    }
+    for chunk in items.chunks(BATCH) {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO store_document_items (id, doc_id, store_from, store_to, item_id, amount,
+                                               purchasing_price, base_price, comment) ",
+        );
+        qb.push_values(chunk, |mut b, (it, item_id)| {
+            let amount = it.amount.trim();
+            b.push_bind(it.id)
+                .push_bind(it.doc_id)
+                .push_bind(it.store_from)
+                .push_bind(it.store_to)
+                .push_bind(*item_id)
+                .push_bind(if amount.is_empty() { "0" } else { amount })
+                .push_unseparated("::numeric")
+                .push_bind(it.purchasing_price.as_deref().map(str::trim))
+                .push_unseparated("::numeric")
+                .push_bind(it.base_price.as_deref().map(str::trim))
+                .push_unseparated("::numeric")
+                .push_bind(&it.comment);
+        });
+        qb.build().execute(&mut *tx).await?;
+    }
+    Ok(warnings)
 }
 
 async fn put_option(
@@ -2577,7 +2836,9 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
         "SELECT CAST(ID AS SIGNED), CAST(TITLE AS CHAR), CAST(ACTIVE AS CHAR), CAST(SORT AS SIGNED),
                 CAST(IFNULL(ADDRESS, '') AS CHAR), CAST(IFNULL(PHONE, '') AS CHAR),
                 CAST(IFNULL(EMAIL, '') AS CHAR), CAST(IFNULL(SCHEDULE, '') AS CHAR),
-                CAST(IMAGE_ID AS SIGNED), CAST(IFNULL(XML_ID, '') AS CHAR)
+                CAST(IMAGE_ID AS SIGNED), CAST(IFNULL(XML_ID, '') AS CHAR),
+                CAST(IFNULL(IS_DEFAULT, 'N') AS CHAR), CAST(IFNULL(ISSUING_CENTER, 'N') AS CHAR),
+                CAST(IFNULL(SHIPPING_CENTER, 'N') AS CHAR)
          FROM b_catalog_store ORDER BY ID",
     )
     .fetch_all(my)
@@ -2595,6 +2856,9 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
             extra: Map::new(),
             image_id: id_col(&row, 8),
             xml_id: unique_xml_id((), str_col(&row, 9), &mut store_xml),
+            is_default: str_col(&row, 10) == "Y",
+            issuing_center: str_col(&row, 11) == "Y",
+            shipping_center: str_col(&row, 12) == "Y",
         });
     }
     let store_uf = read_uf(my, "CAT_STORE", "b_uts_cat_store", "b_utm_cat_store").await?;
@@ -2623,7 +2887,8 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
         "SELECT CAST(ID AS SIGNED), CAST(IFNULL(QUANTITY, 0) AS CHAR),
                 CAST(IFNULL(AVAILABLE, 'Y') AS CHAR), CAST(IFNULL(QUANTITY_TRACE, 'D') AS CHAR),
                 CAST(IFNULL(CAN_BUY_ZERO, 'D') AS CHAR), CAST(IFNULL(TYPE, 1) AS SIGNED),
-                CAST(IFNULL(WEIGHT, 0) AS CHAR)
+                CAST(IFNULL(WEIGHT, 0) AS CHAR), CAST(IFNULL(QUANTITY_RESERVED, 0) AS CHAR),
+                CAST(PURCHASING_PRICE AS CHAR), CAST(PURCHASING_CURRENCY AS CHAR)
          FROM b_catalog_product",
     )
     .fetch_all(my)
@@ -2639,6 +2904,9 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
                 can_buy_zero: bitrix_flag(&str_col(&row, 4)),
                 product_type: catalog_type(int_col(&row, 5).unwrap_or(1)),
                 weight: str_col(&row, 6).parse().unwrap_or(0.0),
+                quantity_reserved: str_col(&row, 7).parse().unwrap_or(0.0),
+                purchasing_price: Some(str_col(&row, 8)).filter(|v| !v.trim().is_empty()),
+                purchasing_currency: Some(str_col(&row, 9)).filter(|v| !v.trim().is_empty()),
             });
         }
     }
@@ -2750,6 +3018,116 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
             );
         }
         c.rates = Some(rates);
+    }
+    Ok(())
+}
+
+/// Поставщики и документы складского учёта с их строками. Резервы заказов
+/// (`b_sale_basket_reservation`) и склады отгрузок (`b_sale_store_barcode`) не читаются:
+/// заказы не переносятся.
+async fn read_store_docs(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
+    let date = |row: &sqlx::mysql::MySqlRow, i| bitrix_date(&str_col(row, i));
+    if mysql_table_exists(my, "b_catalog_contractor").await? {
+        for row in sqlx::query(
+            "SELECT CAST(ID AS SIGNED), CAST(PERSON_TYPE AS CHAR),
+                    CAST(IFNULL(PERSON_LASTNAME, '') AS CHAR), CAST(IFNULL(PERSON_NAME, '') AS CHAR),
+                    CAST(IFNULL(PERSON_MIDDLENAME, '') AS CHAR), CAST(IFNULL(COMPANY, '') AS CHAR),
+                    CAST(IFNULL(INN, '') AS CHAR), CAST(IFNULL(KPP, '') AS CHAR),
+                    CAST(IFNULL(COUNTRY, '') AS CHAR), CAST(IFNULL(CITY, '') AS CHAR),
+                    CAST(IFNULL(ADDRESS, '') AS CHAR), CAST(IFNULL(PHONE, '') AS CHAR),
+                    CAST(IFNULL(EMAIL, '') AS CHAR), CAST(IFNULL(POST_INDEX, '') AS CHAR),
+                    CAST(DATE_CREATE AS CHAR), CAST(DATE_MODIFY AS CHAR)
+             FROM b_catalog_contractor ORDER BY ID",
+        )
+        .fetch_all(my)
+        .await?
+        {
+            let join = |cols: &[usize], sep: &str| {
+                cols.iter()
+                    .map(|i| str_col(&row, *i).trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(sep)
+            };
+            data.contractors.push(ContractorRow {
+                id: int_col(&row, 0).context("b_catalog_contractor.ID")?,
+                person_type: str_col(&row, 1).trim().to_string(),
+                person_name: join(&[2, 3, 4], " "),
+                company: str_col(&row, 5),
+                inn: str_col(&row, 6),
+                kpp: str_col(&row, 7),
+                address: join(&[8, 9, 10], ", "),
+                phone: str_col(&row, 11),
+                email: str_col(&row, 12),
+                post_index: str_col(&row, 13),
+                created_at: date(&row, 14),
+                updated_at: date(&row, 15),
+            });
+        }
+    }
+    if !mysql_table_exists(my, "b_catalog_store_docs").await? {
+        return Ok(());
+    }
+    for row in sqlx::query(
+        "SELECT CAST(ID AS SIGNED), CAST(DOC_TYPE AS CHAR), CAST(CONTRACTOR_ID AS SIGNED),
+                CAST(IFNULL(CURRENCY, '') AS CHAR), CAST(STATUS AS CHAR), CAST(DATE_STATUS AS CHAR),
+                CAST(DATE_DOCUMENT AS CHAR), CAST(STATUS_BY AS SIGNED), CAST(TOTAL AS CHAR),
+                CAST(IFNULL(COMMENTARY, '') AS CHAR), CAST(IFNULL(TITLE, '') AS CHAR),
+                CAST(RESPONSIBLE_ID AS SIGNED), CAST(ITEMS_ORDER_DATE AS CHAR),
+                CAST(ITEMS_RECEIVED_DATE AS CHAR), CAST(IFNULL(DOC_NUMBER, '') AS CHAR),
+                CAST(IFNULL(WAS_CANCELLED, 'N') AS CHAR), CAST(CREATED_BY AS SIGNED),
+                CAST(MODIFIED_BY AS SIGNED), CAST(DATE_CREATE AS CHAR), CAST(DATE_MODIFY AS CHAR)
+         FROM b_catalog_store_docs ORDER BY ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        data.store_docs.push(StoreDocRow {
+            id: int_col(&row, 0).context("b_catalog_store_docs.ID")?,
+            doc_type: str_col(&row, 1).trim().to_string(),
+            contractor_id: id_col(&row, 2),
+            currency: str_col(&row, 3).trim().to_string(),
+            status: str_col(&row, 4) == "Y",
+            date_status: date(&row, 5),
+            date_document: date(&row, 6),
+            status_by: id_col(&row, 7),
+            total: Some(str_col(&row, 8)).filter(|v| !v.trim().is_empty()),
+            commentary: str_col(&row, 9),
+            title: str_col(&row, 10),
+            responsible_id: id_col(&row, 11),
+            items_order_date: date(&row, 12),
+            items_received_date: date(&row, 13),
+            doc_number: str_col(&row, 14),
+            was_cancelled: str_col(&row, 15) == "Y",
+            created_by: id_col(&row, 16),
+            modified_by: id_col(&row, 17),
+            date_create: date(&row, 18),
+            date_modify: date(&row, 19),
+        });
+    }
+    let optional =
+        |row: &sqlx::mysql::MySqlRow, i| Some(str_col(row, i)).filter(|v| !v.trim().is_empty());
+    for row in sqlx::query(
+        "SELECT CAST(ID AS SIGNED), CAST(DOC_ID AS SIGNED), CAST(STORE_FROM AS SIGNED),
+                CAST(STORE_TO AS SIGNED), CAST(ELEMENT_ID AS SIGNED), CAST(IFNULL(AMOUNT, 0) AS CHAR),
+                CAST(PURCHASING_PRICE AS CHAR), CAST(BASE_PRICE AS CHAR),
+                CAST(IFNULL(COMMENT, '') AS CHAR)
+         FROM b_catalog_docs_element ORDER BY ID",
+    )
+    .fetch_all(my)
+    .await?
+    {
+        data.store_doc_items.push(StoreDocItemRow {
+            id: int_col(&row, 0).context("b_catalog_docs_element.ID")?,
+            doc_id: int_col(&row, 1).unwrap_or_default(),
+            store_from: id_col(&row, 2),
+            store_to: id_col(&row, 3),
+            element_id: id_col(&row, 4),
+            amount: str_col(&row, 5),
+            purchasing_price: optional(&row, 6),
+            base_price: optional(&row, 7),
+            comment: str_col(&row, 8),
+        });
     }
     Ok(())
 }
@@ -3129,6 +3507,11 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
     write_sku(&mut *tx, data, props).await?;
     write_sale(&mut *tx, &data.sale).await?;
     write_discounts(&mut *tx, data).await?;
+    for w in write_store_docs(&mut *tx, data, &users).await? {
+        tracing::warn!("перенос из Битрикса: {w}");
+    }
+    // Со складским учётом доступное — по остаткам складов за вычетом резерва
+    crate::stock::recalc_all(&mut *tx).await?;
 
     // Последовательности — после максимальных перенесённых id
     for (table, seq) in [
@@ -3152,6 +3535,9 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
         ("pay_systems", "pay_systems_id_seq"),
         ("discounts", "discounts_id_seq"),
         ("discount_coupons", "discount_coupons_id_seq"),
+        ("contractors", "contractors_id_seq"),
+        ("store_documents", "store_documents_id_seq"),
+        ("store_document_items", "store_document_items_id_seq"),
     ] {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT setval('{seq}', GREATEST((SELECT MAX(id) FROM {table}), 1))"
@@ -4067,9 +4453,22 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
         });
         qb.build().execute(&mut *tx).await?;
     }
+    // Склад по умолчанию один: остаётся первый по id
+    let default_store = c.stores.iter().find(|st| st.is_default).map(|st| st.id);
+    for st in c.stores.iter().filter(|st| st.is_default) {
+        if Some(st.id) != default_store {
+            warnings.push(format!(
+                "склад «{}» (#{}): по умолчанию в источнике отмечено несколько складов, по умолчанию — #{}",
+                st.name,
+                st.id,
+                default_store.unwrap_or_default()
+            ));
+        }
+    }
     for chunk in c.stores.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO catalog_stores (id, name, active, sort, address, phone, email, schedule, extra, xml_id) ",
+            "INSERT INTO catalog_stores (id, name, active, sort, address, phone, email, schedule, extra,
+                                         xml_id, is_default, issuing_center, shipping_center) ",
         );
         qb.push_values(chunk, |mut b, st| {
             b.push_bind(st.id)
@@ -4081,7 +4480,10 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
                 .push_bind(&st.email)
                 .push_bind(&st.schedule)
                 .push_bind(sqlx::types::Json(&st.extra))
-                .push_bind(&st.xml_id);
+                .push_bind(&st.xml_id)
+                .push_bind(st.is_default && Some(st.id) == default_store)
+                .push_bind(st.issuing_center)
+                .push_bind(st.shipping_center);
         });
         qb.build().execute(&mut *tx).await?;
     }
@@ -4109,16 +4511,22 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
     for chunk in c.products.chunks(BATCH) {
         let mut qb = QueryBuilder::<Postgres>::new(
             "INSERT INTO catalog_products
-                (item_id, quantity, available, quantity_trace, can_buy_zero, type, weight) ",
+                (item_id, quantity, available, quantity_trace, can_buy_zero, type, weight,
+                 purchasing_price, purchasing_currency) ",
         );
+        // Резервы Битрикса относятся к заказам, которые не переносятся: резерв 0, количество
+        // возвращается в доступное (со складским учётом доступное затем пересчитывается)
         qb.push_values(chunk, |mut b, p| {
             b.push_bind(p.item_id)
-                .push_bind(p.quantity)
+                .push_bind(p.quantity + p.quantity_reserved)
                 .push_bind(p.available)
                 .push_bind(p.quantity_trace)
                 .push_bind(p.can_buy_zero)
                 .push_bind(p.product_type)
-                .push_bind(p.weight);
+                .push_bind(p.weight)
+                .push_bind(p.purchasing_price.as_deref().map(str::trim))
+                .push_unseparated("::numeric")
+                .push_bind(p.purchasing_currency.as_deref().map(str::trim));
         });
         qb.build().execute(&mut *tx).await?;
     }
@@ -4389,6 +4797,9 @@ mod tests {
             can_buy_zero: None,
             product_type,
             weight,
+            quantity_reserved: 0.0,
+            purchasing_price: None,
+            purchasing_currency: None,
         };
         let mut data = Data {
             iblocks: vec![sku_iblock(1, "goods"), sku_iblock(2, "offers")],
@@ -4482,6 +4893,9 @@ mod tests {
             can_buy_zero: None,
             product_type,
             weight: 0.0,
+            quantity_reserved: 0.0,
+            purchasing_price: None,
+            purchasing_currency: None,
         };
         let mut data = Data {
             iblocks: vec![
@@ -4701,6 +5115,9 @@ mod tests {
             extra: Map::new(),
             image_id: None,
             xml_id: "store-xml".into(),
+            is_default: false,
+            issuing_center: false,
+            shipping_center: false,
         });
         data.catalog.price_types.push((
             2,
@@ -5752,6 +6169,537 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(v, "USD");
+    }
+
+    fn store_row(id: i64, flags: [bool; 3]) -> StoreRow {
+        StoreRow {
+            id,
+            name: format!("Склад {id}"),
+            active: true,
+            sort: 100,
+            address: String::new(),
+            phone: String::new(),
+            email: String::new(),
+            schedule: String::new(),
+            extra: Map::new(),
+            image_id: None,
+            xml_id: String::new(),
+            is_default: flags[0],
+            issuing_center: flags[1],
+            shipping_center: flags[2],
+        }
+    }
+
+    fn stock_product(item_id: i64, quantity: f64, reserved: f64) -> ProductRow {
+        ProductRow {
+            item_id,
+            quantity,
+            available: true,
+            quantity_trace: Some(true),
+            can_buy_zero: Some(false),
+            product_type: 1,
+            weight: 0.0,
+            quantity_reserved: reserved,
+            purchasing_price: None,
+            purchasing_currency: None,
+        }
+    }
+
+    /// Повторный перенос, как `run` с `--replace`: контент удаляется и пишется заново.
+    async fn reimport(db: &PgPool, data: &mut Data) {
+        sqlx::query("DELETE FROM collections")
+            .execute(db)
+            .await
+            .unwrap();
+        run_write_all(db, data).await;
+    }
+
+    fn bx_date(raw: &str) -> Option<DateTime<Utc>> {
+        bitrix_date(raw)
+    }
+
+    #[sqlx::test]
+    async fn import_stores_flags(db: PgPool) {
+        let mut data = Data::default();
+        data.catalog.stores = vec![
+            store_row(1, [true, true, true]),
+            store_row(2, [false, false, true]),
+            store_row(3, [false, true, false]),
+            // Второй склад по умолчанию — признак снимается с предупреждением
+            store_row(4, [true, false, false]),
+        ];
+        let mut tx = db.begin().await.unwrap();
+        let warnings = write_catalog(&mut tx, &data.catalog).await.unwrap();
+        tx.commit().await.unwrap();
+        let rows: Vec<(i64, bool, bool, bool)> = sqlx::query_as(
+            "SELECT id, is_default, issuing_center, shipping_center FROM catalog_stores ORDER BY id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (1, true, true, true),
+                (2, false, false, true),
+                (3, false, true, false),
+                (4, false, false, false),
+            ]
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("Склад 4")),
+            "{warnings:?}"
+        );
+    }
+
+    #[sqlx::test]
+    async fn import_purchasing_and_quantity(db: PgPool) {
+        let mut data = Data {
+            iblocks: vec![sku_iblock(1, "goods")],
+            elements: vec![
+                sku_element(100, 1, HashMap::new()),
+                sku_element(101, 1, HashMap::new()),
+            ],
+            ..Data::default()
+        };
+        data.catalog.stores = vec![store_row(1, [true, true, true])];
+        let mut product = stock_product(100, 3.0, 2.0);
+        product.purchasing_price = Some("123.45".into());
+        product.purchasing_currency = Some("USD".into());
+        data.catalog.products = vec![product, stock_product(101, 4.0, 0.0)];
+        data.catalog.amounts = vec![(100, 1, 7.0)];
+        run_write_all(&db, &mut data).await;
+        let row: (String, String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT quantity::text, quantity_reserved::text, purchasing_price::text,
+                    purchasing_currency
+             FROM catalog_products WHERE item_id = 100",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            row,
+            (
+                "5.00".into(),
+                "0.00".into(),
+                Some("123.45".into()),
+                Some("USD".into())
+            )
+        );
+        let empty: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT purchasing_price::text, purchasing_currency FROM catalog_products
+             WHERE item_id = 101",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(empty, (None, None));
+        // Со складским учётом доступное пересчитывается по остаткам складов
+        data.options.push((
+            "catalog".into(),
+            "default_use_store_control".into(),
+            "Y".into(),
+        ));
+        reimport(&db, &mut data).await;
+        let q: String =
+            sqlx::query_scalar("SELECT quantity::text FROM catalog_products WHERE item_id = 100")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(q, "7.00");
+    }
+
+    /// Склады 1 и 2, товар 100, пользователь Битрикса 15, два поставщика, документы A, M и U.
+    fn stock_docs_data() -> Data {
+        let mut data = Data {
+            iblocks: vec![sku_iblock(1, "goods")],
+            elements: vec![sku_element(100, 1, HashMap::new())],
+            ..Data::default()
+        };
+        data.catalog.stores = vec![store_row(1, [true, true, true]), store_row(2, [false; 3])];
+        data.catalog.products = vec![stock_product(100, 4.0, 0.0)];
+        data.catalog.amounts = vec![(100, 1, 4.0)];
+        data.catalog.currencies = vec![currency_row("RUB", "1", true, "Рубль")];
+        data.users = vec![UserRow {
+            bitrix_id: 15,
+            login: "manager".into(),
+            email: String::new(),
+            name: String::new(),
+            last_name: String::new(),
+            password_hash: "x".into(),
+            active: true,
+            second_name: String::new(),
+            phone: String::new(),
+            city: String::new(),
+            work_position: String::new(),
+            photo_id: None,
+            extra: Map::new(),
+            groups: Vec::new(),
+            xml_id: String::new(),
+        }];
+        let contractor = |id: i64, person_type: &str, name: &str, company: &str| ContractorRow {
+            id,
+            person_type: person_type.into(),
+            person_name: name.into(),
+            company: company.into(),
+            inn: if company.is_empty() { "" } else { "7700000000" }.into(),
+            kpp: String::new(),
+            address: "Россия, Москва, ул. Складская, 1".into(),
+            phone: "+7 900 000-00-00".into(),
+            email: "s@example.com".into(),
+            post_index: "101000".into(),
+            created_at: bx_date("2025-01-10 10:00:00"),
+            updated_at: bx_date("2025-01-11 10:00:00"),
+        };
+        data.contractors = vec![
+            contractor(3, "1", "Китай", ""),
+            contractor(4, "2", "", "ООО Ромашка"),
+        ];
+        let doc = |id: i64, doc_type: &str| StoreDocRow {
+            id,
+            doc_type: doc_type.into(),
+            contractor_id: None,
+            currency: String::new(),
+            status: false,
+            date_status: None,
+            date_document: None,
+            status_by: None,
+            total: None,
+            commentary: String::new(),
+            title: String::new(),
+            responsible_id: None,
+            items_order_date: None,
+            items_received_date: None,
+            doc_number: String::new(),
+            was_cancelled: false,
+            created_by: None,
+            modified_by: None,
+            date_create: bx_date("2026-03-01 12:00:00"),
+            date_modify: bx_date("2026-03-02 12:00:00"),
+        };
+        let mut arrival = doc(10, "A");
+        arrival.contractor_id = Some(4);
+        arrival.currency = "RUB".into();
+        arrival.status = true;
+        arrival.date_status = bx_date("2026-03-01 13:00:00");
+        arrival.date_document = bx_date("2026-02-28 09:00:00");
+        arrival.status_by = Some(15);
+        arrival.total = Some("1500".into());
+        arrival.commentary = "Поставка".into();
+        arrival.title = "Приходная накладная #5".into();
+        // Пользователя 99 нет — ссылка пустая
+        arrival.responsible_id = Some(99);
+        arrival.items_order_date = bx_date("2026-02-20 00:00:00");
+        arrival.items_received_date = bx_date("2026-02-27 00:00:00");
+        arrival.doc_number = "П-5".into();
+        arrival.created_by = Some(15);
+        arrival.modified_by = Some(15);
+        let mut moving = doc(11, "M");
+        moving.title = "Перемещение #2".into();
+        moving.was_cancelled = true;
+        // Поставщика 77 нет — ссылка пустая
+        moving.contractor_id = Some(77);
+        data.store_docs = vec![arrival, moving, doc(12, "U")];
+        let item =
+            |id: i64, doc_id: i64, from: Option<i64>, to: Option<i64>, el: i64| StoreDocItemRow {
+                id,
+                doc_id,
+                store_from: from,
+                store_to: to,
+                element_id: Some(el),
+                amount: "10".into(),
+                purchasing_price: Some("150".into()),
+                base_price: Some("200.5".into()),
+                comment: String::new(),
+            };
+        data.store_doc_items = vec![
+            item(20, 10, None, Some(1), 100),
+            // Товара 999 нет
+            item(21, 10, None, Some(1), 999),
+            // Склада 55 нет
+            item(22, 11, Some(1), Some(55), 100),
+            // Строка пропущенного документа
+            item(23, 12, None, Some(1), 100),
+        ];
+        data
+    }
+
+    async fn count(db: &PgPool, table: &str) -> i64 {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn import_contractors_and_documents(db: PgPool) {
+        let mut data = stock_docs_data();
+        run_write_all(&db, &mut data).await;
+        let user: i64 = sqlx::query_scalar("SELECT id FROM users WHERE login = 'manager'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+
+        let contractors: Vec<(i64, String, String, String, String, String, String)> =
+            sqlx::query_as(
+                "SELECT id, person_type, person_name, company, inn, address, post_index
+                 FROM contractors ORDER BY id",
+            )
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        let addr = "Россия, Москва, ул. Складская, 1".to_string();
+        assert_eq!(
+            contractors,
+            vec![
+                (
+                    3,
+                    "I".into(),
+                    "Китай".into(),
+                    "".into(),
+                    "".into(),
+                    addr.clone(),
+                    "101000".into()
+                ),
+                (
+                    4,
+                    "C".into(),
+                    "".into(),
+                    "ООО Ромашка".into(),
+                    "7700000000".into(),
+                    addr,
+                    "101000".into()
+                ),
+            ]
+        );
+
+        type DocRow = (
+            i64,
+            String,
+            String,
+            String,
+            Option<i64>,
+            String,
+            String,
+            String,
+            bool,
+            String,
+        );
+        let docs: Vec<DocRow> = sqlx::query_as(
+            "SELECT id, doc_type, title, doc_number, contractor_id, currency, total::text, status,
+                    was_cancelled, commentary
+             FROM store_documents ORDER BY id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            docs,
+            vec![
+                (
+                    10,
+                    "A".into(),
+                    "Приходная накладная #5".into(),
+                    "П-5".into(),
+                    Some(4),
+                    "RUB".into(),
+                    "1500.00".into(),
+                    "Y".into(),
+                    false,
+                    "Поставка".into()
+                ),
+                (
+                    11,
+                    "M".into(),
+                    "Перемещение #2".into(),
+                    "".into(),
+                    None,
+                    // Валюта не указана — валюта сайта
+                    "RUB".into(),
+                    "0.00".into(),
+                    "N".into(),
+                    true,
+                    "".into()
+                ),
+            ]
+        );
+        // Пользователи — по перенесённым; пользователя 99 нет
+        type People = (Option<i64>, Option<i64>, Option<i64>, Option<i64>);
+        let people: Vec<People> = sqlx::query_as(
+            "SELECT status_by, created_by, modified_by, responsible_id
+             FROM store_documents ORDER BY id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            people,
+            vec![
+                (Some(user), Some(user), Some(user), None),
+                (None, None, None, None)
+            ]
+        );
+        type Dates = (
+            DateTime<Utc>,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+            DateTime<Utc>,
+            DateTime<Utc>,
+        );
+        let dates: Vec<Dates> = sqlx::query_as(
+            "SELECT date_document, date_status, items_order_date, items_received_date, created_at,
+                    updated_at
+             FROM store_documents ORDER BY id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        let d = |raw| bx_date(raw).unwrap();
+        assert_eq!(
+            dates[0],
+            (
+                d("2026-02-28 09:00:00"),
+                Some(d("2026-03-01 13:00:00")),
+                Some(d("2026-02-20 00:00:00")),
+                Some(d("2026-02-27 00:00:00")),
+                d("2026-03-01 12:00:00"),
+                d("2026-03-02 12:00:00"),
+            )
+        );
+        // Без даты документа — дата создания
+        assert_eq!(dates[1].0, d("2026-03-01 12:00:00"));
+
+        type Line = (
+            i64,
+            i64,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            String,
+            String,
+            String,
+        );
+        let items: Vec<Line> = sqlx::query_as(
+            "SELECT id, doc_id, store_from, store_to, item_id, amount::text,
+                        purchasing_price::text, base_price::text
+                 FROM store_document_items ORDER BY id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        let line = |id, doc, from, to, item| {
+            (
+                id,
+                doc,
+                from,
+                to,
+                item,
+                "10.000".to_string(),
+                "150.00".to_string(),
+                "200.50".to_string(),
+            )
+        };
+        assert_eq!(
+            items,
+            vec![
+                line(20, 10, None, Some(1), Some(100)),
+                line(21, 10, None, Some(1), None),
+                line(22, 11, Some(1), Some(55), Some(100)),
+            ]
+        );
+        // Остатки складов документами не пересчитываются
+        let amount: String = sqlx::query_scalar(
+            "SELECT amount::text FROM catalog_store_amounts WHERE item_id = 100 AND store_id = 1",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(amount, "4.00");
+        // Новые записи — после перенесённых id
+        for (seq, next) in [
+            ("store_documents_id_seq", 12),
+            ("store_document_items_id_seq", 23),
+            ("contractors_id_seq", 5),
+        ] {
+            let got: i64 = sqlx::query_scalar("SELECT nextval($1::regclass)")
+                .bind(seq)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            assert_eq!(got, next, "{seq}");
+        }
+
+        // Предупреждения: документ U, товар 999, склад 55, поставщик 77
+        let users = HashMap::from([(15, user)]);
+        let mut tx = db.begin().await.unwrap();
+        let warnings = write_store_docs(&mut tx, &data, &users).await.unwrap();
+        tx.commit().await.unwrap();
+        let joined = warnings.join("\n");
+        for needle in ["#12 (U)", "товар 999", "склад 55", "поставщик 77"] {
+            assert!(joined.contains(needle), "{needle}: {joined}");
+        }
+        assert_eq!(count(&db, "store_documents").await, 2);
+    }
+
+    #[sqlx::test]
+    async fn import_store_options(db: PgPool) {
+        let carried = [
+            ("catalog", "default_use_store_control", "Y"),
+            ("catalog", "enable_reservation", "N"),
+            ("catalog", "allow_negative_amount", "Y"),
+            ("catalog", "store_document_numbers_A", "2175"),
+            ("catalog", "store_document_numbers_D", "3179"),
+            ("sale", "product_reserve_condition", "P"),
+            ("sale", "product_reserve_clear_period", "2"),
+            ("sale", "allow_deduction_on_delivery", "Y"),
+        ];
+        for doc_type in ["A", "S", "M", "R", "D"] {
+            let name = format!("store_document_numbers_{doc_type}");
+            assert!(OPTIONS.contains(&("catalog", name.as_str())), "{name}");
+        }
+        let mut data = Data::default();
+        for (module, name, value) in carried {
+            assert!(OPTIONS.contains(&(module, name)), "{module}.{name}");
+            data.options
+                .push((module.into(), name.into(), value.into()));
+        }
+        run_write_all(&db, &mut data).await;
+        for (module, name, value) in carried {
+            let got: String =
+                sqlx::query_scalar("SELECT value FROM options WHERE module = $1 AND name = $2")
+                    .bind(module)
+                    .bind(name)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap_or_else(|e| panic!("{module}.{name}: {e}"));
+            assert_eq!(got, value, "{module}.{name}");
+        }
+    }
+
+    #[sqlx::test]
+    async fn reimport_replaces_documents(db: PgPool) {
+        let mut data = stock_docs_data();
+        run_write_all(&db, &mut data).await;
+        // Документ и поставщик, заведённые в CMS, при повторном переносе заменяются
+        sqlx::query("INSERT INTO contractors (id, company) VALUES (50, 'Свой')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO store_documents (doc_type, contractor_id) VALUES ('S', 50)")
+            .execute(&db)
+            .await
+            .unwrap();
+        reimport(&db, &mut data).await;
+        assert_eq!(count(&db, "store_documents").await, 2);
+        assert_eq!(count(&db, "store_document_items").await, 3);
+        assert_eq!(count(&db, "contractors").await, 2);
+        let item: Option<i64> =
+            sqlx::query_scalar("SELECT item_id FROM store_document_items WHERE id = 20")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(item, Some(100));
     }
 
     #[sqlx::test]
