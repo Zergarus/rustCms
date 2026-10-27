@@ -167,6 +167,57 @@ pub async fn set_deducted(
     Ok(true)
 }
 
+/// Сохраняет выбранные склады позиций отгрузки `(позиция, склад)`; `None` — выбор снят.
+/// Склады отгруженной отгрузки не меняются; позиции чужого заказа пропускаются.
+pub async fn choose_stores(
+    tx: &mut PgConnection,
+    shipment_id: i64,
+    choices: &[(i64, Option<i64>)],
+) -> sqlx::Result<()> {
+    let Some(order_id): Option<i64> =
+        sqlx::query_scalar("SELECT order_id FROM shipments WHERE id = $1")
+            .bind(shipment_id)
+            .fetch_optional(&mut *tx)
+            .await?
+    else {
+        return Ok(());
+    };
+    sqlx::query("SELECT id FROM orders WHERE id = $1 FOR UPDATE")
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    let deducted: bool =
+        sqlx::query_scalar("SELECT deducted FROM shipments WHERE id = $1 FOR UPDATE")
+            .bind(shipment_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if deducted {
+        return Ok(());
+    }
+    for (line, store) in choices {
+        sqlx::query(
+            "DELETE FROM shipment_item_stores WHERE shipment_id = $1 AND cart_item_id = $2",
+        )
+        .bind(shipment_id)
+        .bind(line)
+        .execute(&mut *tx)
+        .await?;
+        if let Some(store) = store {
+            sqlx::query(
+                "INSERT INTO shipment_item_stores (shipment_id, cart_item_id, store_id, quantity)
+                 SELECT $1, id, $3, quantity FROM cart_items WHERE id = $2 AND order_id = $4",
+            )
+            .bind(shipment_id)
+            .bind(line)
+            .bind(store)
+            .bind(order_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 async fn order_lines(tx: &mut PgConnection, order_id: i64) -> sqlx::Result<Vec<Line>> {
     sqlx::query_as(
         "SELECT id, item_id, store_id, quantity::float8 AS quantity, name FROM cart_items
@@ -381,8 +432,8 @@ async fn unship(
     let lines = order_lines(tx, order_id).await?;
     let traced = lock_traced(tx, &lines).await?;
     let rows: Vec<(i64, i64, f64)> = sqlx::query_as(
-        "DELETE FROM shipment_item_stores WHERE shipment_id = $1
-         RETURNING cart_item_id, store_id, quantity::float8",
+        "SELECT cart_item_id, store_id, quantity::float8 FROM shipment_item_stores
+         WHERE shipment_id = $1",
     )
     .bind(shipment_id)
     .fetch_all(&mut *tx)
@@ -390,7 +441,7 @@ async fn unship(
     let mut items = Vec::new();
     for line in lines.iter().filter(|l| traced.contains(&l.item_id)) {
         items.push(line.item_id);
-        // Товар возвращается на те же склады
+        // Товар возвращается на те же склады; выбор склада остаётся для следующей отгрузки
         for (_, store, quantity) in rows.iter().filter(|r| r.0 == line.id) {
             sqlx::query(
                 "INSERT INTO catalog_store_amounts (item_id, store_id, amount)
@@ -620,12 +671,69 @@ mod tests {
     async fn unship_restores(db: PgPool) {
         let f = setup(&db, true).await;
         let order = place_order_with(&db, &f, None, Some(1), 2.0).await;
-        let (sh, _) = parts(&db, order).await;
+        let (sh, line) = parts(&db, order).await;
         assert!(ship(&db, sh, true, &[]).await.unwrap());
         assert!(ship(&db, sh, false, &[]).await.unwrap());
         assert_eq!(counters(&db, f.product_id).await, (3.0, 2.0, 5.0, 2.0));
         assert_eq!(deducted(&db, sh).await, (false, false));
+        // Выбор склада остаётся
+        assert_eq!(ship_rows(&db, sh).await, [(line, 1, 2.0)]);
+    }
+
+    async fn choose(db: &PgPool, shipment: i64, choices: &[(i64, Option<i64>)]) {
+        let mut tx = db.begin().await.unwrap();
+        choose_stores(&mut tx, shipment, choices).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    #[sqlx::test]
+    async fn chosen_store_persists(db: PgPool) {
+        let f = setup(&db, true).await;
+        add_store(&db, 2, f.product_id, 5.0).await;
+        let order = place_order_with(&db, &f, None, None, 2.0).await;
+        let (sh, line) = parts(&db, order).await;
+
+        // Выбор без отгрузки сохраняется; пустой — снимается
+        choose(&db, sh, &[(line, Some(1))]).await;
+        assert_eq!(ship_rows(&db, sh).await, [(line, 1, 2.0)]);
+        choose(&db, sh, &[(line, None)]).await;
         assert!(ship_rows(&db, sh).await.is_empty());
+        choose(&db, sh, &[(line, Some(2))]).await;
+        assert_eq!(ship_rows(&db, sh).await, [(line, 2, 2.0)]);
+
+        assert!(ship(&db, sh, true, &[]).await.unwrap());
+        assert_eq!(amount(&db, f.product_id, 2).await, 3.0);
+        assert_eq!(amount(&db, f.product_id, 1).await, 5.0);
+        // Отгруженной склады не меняются
+        choose(&db, sh, &[(line, Some(1))]).await;
+        assert_eq!(ship_rows(&db, sh).await, [(line, 2, 2.0)]);
+
+        // Снятие и повторная отгрузка — с того же склада
+        assert!(ship(&db, sh, false, &[]).await.unwrap());
+        assert_eq!(amount(&db, f.product_id, 2).await, 5.0);
+        assert_eq!(ship_rows(&db, sh).await, [(line, 2, 2.0)]);
+        assert!(ship(&db, sh, true, &[]).await.unwrap());
+        assert_eq!(amount(&db, f.product_id, 2).await, 3.0);
+        assert_eq!(amount(&db, f.product_id, 1).await, 5.0);
+        assert_eq!(ship_rows(&db, sh).await, [(line, 2, 2.0)]);
+    }
+
+    #[sqlx::test]
+    async fn allow_delivery_ships_from_chosen_store(db: PgPool) {
+        let f = setup(&db, true).await;
+        set_option(&db, "sale", "allow_deduction_on_delivery", "Y").await;
+        add_store(&db, 2, f.product_id, 5.0).await;
+        let order = place_order_with(&db, &f, None, None, 2.0).await;
+        let (sh, line) = parts(&db, order).await;
+        choose(&db, sh, &[(line, Some(2))]).await;
+        assert!(
+            crate::sale::repo::set_shipment(&db, order, "", true)
+                .await
+                .unwrap()
+        );
+        assert_eq!(deducted(&db, sh).await, (true, true));
+        assert_eq!(amount(&db, f.product_id, 2).await, 3.0);
+        assert_eq!(amount(&db, f.product_id, 1).await, 5.0);
     }
 
     #[sqlx::test]

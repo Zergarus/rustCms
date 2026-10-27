@@ -2358,6 +2358,60 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn exchange_ship_uses_saved_store(db: PgPool) {
+        let f = fixture(&db).await;
+        for sql in [
+            "INSERT INTO options (module, name, value) VALUES ('catalog', 'default_use_store_control', 'Y')",
+            "INSERT INTO catalog_stores (id, name) VALUES (2, 'Склад 2')",
+        ] {
+            sqlx::query(sql).execute(&db).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO catalog_store_amounts (item_id, store_id, amount) VALUES ($1, 2, 5)",
+        )
+        .bind(f.product_id)
+        .execute(&db)
+        .await
+        .unwrap();
+        // Товар на двух складах, у позиции склада нет
+        let id = place_order(&db, &f, None).await;
+        let sh = first_shipment(&db, id).await;
+        let line: i64 = sqlx::query_scalar("SELECT id FROM cart_items WHERE order_id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let d = with(ship_doc(&sh.to_string(), id, "1"), &[("Отгружен", "true")]);
+        let stats = run(&db, &SaleSettings::default(), &file(vec![d])).await;
+        assert_eq!(
+            stats.errors,
+            vec![format!(
+                "Документ ship-guid-{sh}: Не указаны склады для отгрузки товара Товар (#{})",
+                f.product_id
+            )]
+        );
+
+        let mut tx = db.begin().await.unwrap();
+        crate::stock::ship::choose_stores(&mut tx, sh, &[(line, Some(2))])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let d = with(ship_doc(&sh.to_string(), id, "2"), &[("Отгружен", "true")]);
+        let stats = run(&db, &SaleSettings::default(), &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert!(shipment(&db, sh).await.0);
+        let left: f64 = sqlx::query_scalar(
+            "SELECT amount::float8 FROM catalog_store_amounts WHERE item_id = $1 AND store_id = 2",
+        )
+        .bind(f.product_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(left, 4.0);
+        assert_eq!(amounts(&db, f.product_id).await.1, 5.0);
+    }
+
+    #[sqlx::test]
     async fn shipment_price_difference_is_ignored(db: PgPool) {
         let f = fixture(&db).await;
         let id = place_order(&db, &f, None).await;

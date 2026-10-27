@@ -686,14 +686,13 @@ pub async fn save_files(
     Ok(back(id))
 }
 
-/// Склады позиций из формы отгрузки: `store_<позиция>` = склад.
-fn ship_stores(form: &HashMap<String, String>) -> Vec<(i64, i64)> {
-    let mut out: Vec<(i64, i64)> = form
+/// Склады позиций из формы отгрузки: `store_<позиция>` = склад (пусто — выбор снят).
+fn ship_stores(form: &HashMap<String, String>) -> Vec<(i64, Option<i64>)> {
+    let mut out: Vec<(i64, Option<i64>)> = form
         .iter()
         .filter_map(|(k, v)| {
             let line = k.strip_prefix("store_")?.parse().ok()?;
-            let store = v.trim().parse().ok()?;
-            Some((line, store))
+            Some((line, v.trim().parse().ok()))
         })
         .collect();
     out.sort_unstable();
@@ -721,11 +720,13 @@ pub async fn save_shipment(
     // Сначала флажок «Отгружено», затем доставка: при её разрешении отгрузка может
     // поставиться сама (`sale.allow_deduction_on_delivery`)
     let result = async {
+        // Выбор складов хранится независимо от отгрузки (шаг 1 выбора склада)
+        stock::ship::choose_stores(&mut tx, shipment, &ship_stores(&form)).await?;
         stock::ship::set_deducted(
             &mut tx,
             shipment,
             field("deducted").is_some(),
-            &ship_stores(&form),
+            &[],
             Some(user.user.id),
         )
         .await?;
@@ -1034,6 +1035,100 @@ mod tests {
         assert!(status.is_redirection());
         assert!(!shipped().await.0);
         assert_eq!(amount(2).await, 5.0);
+    }
+
+    #[sqlx::test]
+    async fn admin_shipment_store_choice_persists(db: sqlx::PgPool) {
+        use crate::smoke_tests::post_form;
+        let f = order_fixture(&db).await;
+        for sql in [
+            "INSERT INTO options (module, name, value) VALUES ('catalog', 'default_use_store_control', 'Y')",
+            "INSERT INTO catalog_stores (id, name) VALUES (2, 'Склад 2')",
+        ] {
+            sqlx::query(sql).execute(&db).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO catalog_store_amounts (item_id, store_id, amount) VALUES ($1, 2, 5)",
+        )
+        .bind(f.product_id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let state = test_state(db.clone());
+        let app = crate::app(state);
+        let cookie = admin_cookie(&db).await;
+        let amount = |store: i64| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, f64>(
+                    "SELECT amount::float8 FROM catalog_store_amounts WHERE item_id = $1 AND store_id = $2",
+                )
+                .bind(f.product_id)
+                .bind(store)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            }
+        };
+        let parts = |order: i64| {
+            let db = db.clone();
+            async move {
+                sqlx::query_as::<_, (i64, i64)>(
+                    "SELECT (SELECT min(id) FROM shipments WHERE order_id = $1),
+                            (SELECT min(id) FROM cart_items WHERE order_id = $1)",
+                )
+                .bind(order)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            }
+        };
+
+        // Склад выбран без «Отгружено» — выбор сохранён, отгрузка без формы берёт его
+        let id = place_order(&db, &f, None).await;
+        let (sh, line) = parts(id).await;
+        let path = format!("/admin/shop/orders/{id}/shipment");
+        let (status, html) = post_form(&app, &path, &cookie, &format!("store_{line}=2")).await;
+        assert!(status.is_redirection(), "{status} {html}");
+        let rows: Vec<(i64, f64)> = sqlx::query_as(
+            "SELECT store_id, quantity::float8 FROM shipment_item_stores WHERE shipment_id = $1",
+        )
+        .bind(sh)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(rows, [(2, 1.0)]);
+        let (_, html) = get(&app, &format!("/admin/shop/orders/{id}"), &cookie).await;
+        assert!(html.contains(r#"<option value="2" selected>"#), "{html}");
+        let mut tx = db.begin().await.unwrap();
+        assert!(
+            crate::stock::ship::set_deducted(&mut tx, sh, true, &[], None)
+                .await
+                .unwrap()
+        );
+        tx.commit().await.unwrap();
+        assert_eq!((amount(1).await, amount(2).await), (5.0, 4.0));
+
+        // Отгрузка при разрешении доставки: склад из формы, отмечена только доставка
+        sqlx::query(
+            "INSERT INTO options (module, name, value) VALUES ('sale', 'allow_deduction_on_delivery', 'Y')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let other = place_order(&db, &f, None).await;
+        let (osh, oline) = parts(other).await;
+        let path = format!("/admin/shop/orders/{other}/shipment");
+        let body = format!("allow_delivery=Y&store_{oline}=2");
+        let (status, html) = post_form(&app, &path, &cookie, &body).await;
+        assert!(status.is_redirection(), "{status} {html}");
+        let deducted: bool = sqlx::query_scalar("SELECT deducted FROM shipments WHERE id = $1")
+            .bind(osh)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert!(deducted);
+        assert_eq!((amount(1).await, amount(2).await), (5.0, 3.0));
     }
 
     #[sqlx::test]
