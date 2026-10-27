@@ -212,7 +212,7 @@ pub(super) fn order_json(
                 "price": s.price,
                 "currency": o.currency,
                 "allowDelivery": s.allow_delivery,
-                "deducted": o.stock_deducted,
+                "deducted": o.deducted,
                 "trackingNumber": s.tracking_number,
             });
             let stores: Vec<Value> = service
@@ -656,7 +656,7 @@ mod tests {
             currency: "RUB".into(),
             canceled: false,
             paid: false,
-            stock_deducted: true,
+            deducted: true,
             person_type_id: 1,
             user_comment: "позвонить".into(),
             shipments: vec![UserShipment {

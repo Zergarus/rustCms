@@ -470,6 +470,18 @@ pub(super) async fn apply_basket(
     id: i64,
     plan: &BasketPlan,
 ) -> anyhow::Result<()> {
+    // Строки товаров — до любых изменений позиций: удаление позиции снимает её резерв
+    // (триггер меняет счётчики товара и склада)
+    let mut products: Vec<i64> = sqlx::query_scalar(
+        "SELECT item_id FROM cart_items WHERE order_id = $1
+         UNION SELECT r.item_id FROM basket_reservations r
+               JOIN cart_items c ON c.id = r.cart_item_id WHERE c.order_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    products.extend(plan.inserts.iter().map(|(product_id, ..)| *product_id));
+    crate::catalog::load_locked(tx, &products).await?;
     sqlx::query("DELETE FROM cart_items WHERE id = ANY($1)")
         .bind(&plan.removed)
         .execute(&mut *tx)
@@ -1181,9 +1193,20 @@ mod tests {
         assert_eq!(amounts(&db, f.product_id).await, (6.0, 5.0));
         d.version = "2".into();
         d.items = vec![item("tovar-1c", 100.0, 2.0)];
-        run(&db, &SaleSettings::default(), &file(vec![d])).await;
+        run(&db, &SaleSettings::default(), &file(vec![d.clone()])).await;
         assert_eq!(reserved().await, 2.0);
         assert_eq!(amounts(&db, f.product_id).await, (8.0, 5.0));
+
+        // Удаление зарезервированной позиции: резерв снят, доступное вернулось
+        let second = product(&db, "p2-1c").await;
+        d.version = "3".into();
+        d.items = vec![item("p2-1c", 50.0, 1.0)];
+        let stats = run(&db, &SaleSettings::default(), &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(lines(&db, id).await, vec![(second, 1.0, 50.0, true)]);
+        assert_eq!(amounts(&db, f.product_id).await, (10.0, 5.0));
+        assert_eq!(quantity(&db, second).await, 9.0);
+        assert_eq!(reserved().await, 1.0);
     }
 
     #[sqlx::test]

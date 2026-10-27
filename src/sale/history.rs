@@ -43,7 +43,8 @@ pub struct UserOrder {
     pub currency: String,
     pub canceled: bool,
     pub paid: bool,
-    pub stock_deducted: bool,
+    /// Отгружен (`b_sale_order.DEDUCTED`): отгрузки есть и все отгружены.
+    pub deducted: bool,
     pub person_type_id: i64,
     pub user_comment: String,
     #[sqlx(skip)]
@@ -60,7 +61,10 @@ pub struct UserOrder {
 const ORDER_COLS: &str =
     "o.id, COALESCE(NULLIF(o.account_number, ''), o.id::text) AS account_number,
     o.status, COALESCE(s.name, o.status) AS status_name, o.created_at, o.price::float8 AS price,
-    o.currency, o.canceled, o.paid, o.stock_deducted, o.person_type_id, o.user_comment
+    o.currency, o.canceled, o.paid,
+    EXISTS (SELECT 1 FROM shipments WHERE order_id = o.id)
+        AND NOT EXISTS (SELECT 1 FROM shipments WHERE order_id = o.id AND NOT deducted) AS deducted,
+    o.person_type_id, o.user_comment
     FROM orders o LEFT JOIN order_statuses s ON s.code = o.status";
 
 /// Число заказов пользователя.
@@ -231,5 +235,34 @@ mod tests {
         assert!(detail(&db, id, other).await.unwrap().is_none());
         assert!(detail(&db, guest, u).await.unwrap().is_none());
         assert!(detail(&db, id + 1000, u).await.unwrap().is_none());
+    }
+
+    /// «Отгружен» заказа — как `DEDUCTED` Битрикса: все отгрузки отгружены.
+    #[sqlx::test]
+    async fn deducted_follows_shipments(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let u = user(&db, "u").await;
+        let id = place_order(&db, &f, Some(u)).await;
+        assert!(!detail(&db, id, u).await.unwrap().unwrap().deducted);
+        sqlx::query("UPDATE shipments SET deducted = TRUE WHERE order_id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(detail(&db, id, u).await.unwrap().unwrap().deducted);
+        // Вторая, неотгруженная отгрузка — заказ не отгружен
+        sqlx::query("INSERT INTO shipments (order_id, base_price) VALUES ($1, 0)")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(!detail(&db, id, u).await.unwrap().unwrap().deducted);
+        // Без отгрузок — не отгружен
+        sqlx::query("DELETE FROM shipments WHERE order_id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(!detail(&db, id, u).await.unwrap().unwrap().deducted);
     }
 }
