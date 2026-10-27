@@ -379,6 +379,32 @@ pub(super) async fn check_price_currencies(
     )
 }
 
+/// Сохраняет вкладку «Торговый каталог». При складском учёте остатки по складам и доступное
+/// количество форма не меняет — их ведут складские документы и резервы.
+async fn save_catalog_tab(
+    db: &sqlx::PgPool,
+    item_id: i64,
+    input: &catalog::PurchaseInput,
+) -> sqlx::Result<()> {
+    let mut tx = db.begin().await?;
+    if crate::stock::settings(&mut tx).await?.store_control {
+        // Строка товара заблокирована, пока читаем и возвращаем прежнее количество
+        catalog::load_locked(&mut tx, &[item_id]).await?;
+        let quantity: Option<f64> =
+            sqlx::query_scalar("SELECT quantity::float8 FROM catalog_products WHERE item_id = $1")
+                .bind(item_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let mut input = input.clone();
+        input.amounts.clear();
+        input.quantity = quantity;
+        catalog::save_purchase_in(&mut tx, item_id, &input).await?;
+    } else {
+        catalog::save_purchase_in(&mut tx, item_id, input).await?;
+    }
+    tx.commit().await
+}
+
 /// Текущие цены, остатки и флаги товара — в поля формы.
 async fn purchase_to_form(state: &AppState, item_id: i64, form: &mut FormValues) -> AppResult<()> {
     let flag = |v: Option<bool>| match v {
@@ -442,8 +468,34 @@ async fn purchase_to_form(state: &AppState, item_id: i64, form: &mut FormValues)
     .bind(item_id)
     .fetch_all(&state.db)
     .await?;
+    // `allow_negative_amount = N`: при складском учёте отрицательный остаток виден как 0
+    // (поля при учёте только для чтения, поэтому показанное значение не сохраняется)
+    let stock = crate::stock::settings(&mut *state.db.acquire().await?).await?;
+    let hide_negative = stock.store_control && !stock.allow_negative;
     for (store, amount) in amounts {
+        let amount = if hide_negative {
+            amount.max(0.0)
+        } else {
+            amount
+        };
         form.set(&format!("amount_{store}"), amount.to_string());
+    }
+    if stock.store_control {
+        let price: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT purchasing_price::text, purchasing_currency FROM catalog_products
+             WHERE item_id = $1 AND purchasing_price IS NOT NULL",
+        )
+        .bind(item_id)
+        .fetch_optional(&state.db)
+        .await?;
+        if let Some((price, currency)) = price {
+            form.set(
+                "purchasing_price",
+                format!("{price} {}", currency.unwrap_or_default())
+                    .trim()
+                    .to_string(),
+            );
+        }
     }
     Ok(())
 }
@@ -572,6 +624,7 @@ async fn render_form(
     multi.extend(form.0.iter().map(|(k, v)| (k.clone(), v.clone())));
 
     let can_write = user.collection_level(collection.id) >= Level::Write;
+    let store_control = user.store_control;
     // У товара с предложениями цены и остатки задаются у предложений
     let offers_priced = match item_id {
         Some(id) => matches!(
@@ -597,7 +650,7 @@ async fn render_form(
         "item_form.html",
         context! {
             user, collection, properties, item_id, error, can_write, sections, enums, files, linked,
-            multi, catalog, offers_priced, offers, offers_tab, can_write_offers, offer_product, notice,
+            multi, catalog, store_control, offers_priced, offers, offers_tab, can_write_offers, offer_product, notice,
             form => form.first_values(),
         },
     )
@@ -916,7 +969,7 @@ async fn save(
             match saved {
                 Ok(saved_id) => {
                     if let Some(Ok(p)) = &purchase {
-                        catalog::save_purchase(&state.db, saved_id, p).await?;
+                        save_catalog_tab(&state.db, saved_id, p).await?;
                     }
                     let url = match input.product_id {
                         // Предложение: назад в карточку товара, на вкладку предложений
@@ -1274,5 +1327,105 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(price, 11.0);
+    }
+
+    mod store_control_tab {
+        use sqlx::PgPool;
+
+        use crate::{
+            smoke_tests::{get, post_multipart},
+            stock::set_store_control,
+            test_support::{admin_cookie, amounts, order_fixture, test_state},
+        };
+
+        async fn setup(db: &PgPool, control: bool) -> (i64, String, axum::Router) {
+            let f = order_fixture(db).await;
+            sqlx::query(
+                "UPDATE catalog_products SET purchasing_price = 12.5, purchasing_currency = 'RUB'
+                 WHERE item_id = $1",
+            )
+            .bind(f.product_id)
+            .execute(db)
+            .await
+            .unwrap();
+            if control {
+                let mut tx = db.begin().await.unwrap();
+                set_store_control(&mut tx, true).await.unwrap();
+                tx.commit().await.unwrap();
+            }
+            let app = crate::app(test_state(db.clone()));
+            (f.product_id, admin_cookie(db).await, app)
+        }
+
+        async fn save(app: &axum::Router, cookie: &str, id: i64, amount: &str) {
+            let (s, _) = post_multipart(
+                app,
+                &format!("/admin/items/{id}"),
+                cookie,
+                &[
+                    ("name", "Товар"),
+                    ("code", "tovar"),
+                    ("sort", "500"),
+                    ("available", "on"),
+                    ("quantity_trace", "default"),
+                    ("can_buy_zero", "default"),
+                    ("amount_1", amount),
+                ],
+            )
+            .await;
+            assert!(s.is_redirection(), "{s}");
+        }
+
+        #[sqlx::test]
+        async fn item_tab_readonly_with_store_control(db: PgPool) {
+            let (id, cookie, app) = setup(&db, true).await;
+            let (_, html) = get(&app, &format!("/admin/items/{id}"), &cookie).await;
+            assert!(
+                html.contains("Остатки меняются складскими документами"),
+                "{html}"
+            );
+            assert!(html.contains("12.5"), "закупочная цена: {html}");
+            assert!(
+                html.contains("name=\"amount_1\"") && html.contains("disabled"),
+                "{html}"
+            );
+            save(&app, &cookie, id, "99").await;
+            let (quantity, amount) = amounts(&db, id).await;
+            assert_eq!((quantity, amount), (5.0, 5.0));
+        }
+
+        #[sqlx::test]
+        async fn item_tab_editable_without_store_control(db: PgPool) {
+            let (id, cookie, app) = setup(&db, false).await;
+            let (_, html) = get(&app, &format!("/admin/items/{id}"), &cookie).await;
+            assert!(
+                !html.contains("Остатки меняются складскими документами"),
+                "{html}"
+            );
+            save(&app, &cookie, id, "99").await;
+            let (_, amount) = amounts(&db, id).await;
+            assert_eq!(amount, 99.0);
+        }
+
+        #[sqlx::test]
+        async fn negative_amount_display(db: PgPool) {
+            let (id, cookie, app) = setup(&db, true).await;
+            sqlx::query("UPDATE catalog_store_amounts SET amount = -2 WHERE item_id = $1")
+                .bind(id)
+                .execute(&db)
+                .await
+                .unwrap();
+            let (_, html) = get(&app, &format!("/admin/items/{id}"), &cookie).await;
+            assert!(!html.contains("value=\"-2\""), "{html}");
+            sqlx::query(
+                "INSERT INTO options (module, name, value) VALUES ('catalog', 'allow_negative_amount', 'Y')
+                 ON CONFLICT (module, name) DO UPDATE SET value = 'Y'",
+            )
+            .execute(&db)
+            .await
+            .unwrap();
+            let (_, html) = get(&app, &format!("/admin/items/{id}"), &cookie).await;
+            assert!(html.contains("value=\"-2\""), "{html}");
+        }
     }
 }

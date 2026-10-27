@@ -165,10 +165,14 @@
         {% endfor %}
       </div>
       <div class="field">
-        <label>Доступное количество<input name="quantity" inputmode="decimal" value="{{ form.quantity }}" placeholder="сумма остатков по складам"></label>
+        <label>Доступное количество<input name="quantity" inputmode="decimal" value="{{ form.quantity }}" placeholder="сумма остатков по складам" {% if store_control %}disabled{% endif %}></label>
+        {% if store_control %}
+        <small class="muted">Остатки меняются складскими документами</small>
+        <label>Закупочная цена<input value="{{ form.purchasing_price }}" placeholder="нет" readonly></label>
+        {% endif %}
         <span class="field-label">Остатки по складам</span>
         {% for st in catalog.stores %}
-        <label>{{ st[1] }}{% if not st[2] %} <span class="muted">(неактивен)</span>{% endif %}<input name="amount_{{ st[0] }}" inputmode="decimal" value="{{ form['amount_' ~ st[0]] }}" placeholder="нет записи"></label>
+        <label>{{ st[1] }}{% if not st[2] %} <span class="muted">(неактивен)</span>{% endif %}<input name="amount_{{ st[0] }}" inputmode="decimal" value="{{ form['amount_' ~ st[0]] }}" placeholder="нет записи" {% if store_control %}disabled{% endif %}></label>
         {% endfor %}
       </div>
     </div>

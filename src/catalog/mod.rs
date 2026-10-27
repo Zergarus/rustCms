@@ -296,14 +296,8 @@ pub async fn raw_flags(
     .await
 }
 
-/// Сохраняет цены, остатки и флаги товара; общий остаток не задан — сумма по складам.
-pub async fn save_purchase(db: &PgPool, item_id: i64, input: &PurchaseInput) -> sqlx::Result<()> {
-    let mut tx = db.begin().await?;
-    save_purchase_in(&mut tx, item_id, input).await?;
-    tx.commit().await
-}
-
-/// То же в уже открытой транзакции (вызывающий коммитит сам).
+/// Сохраняет цены, остатки и флаги товара в открытой транзакции (вызывающий коммитит сам);
+/// общий остаток не задан — сумма по складам.
 pub async fn save_purchase_in(
     tx: &mut sqlx::PgConnection,
     item_id: i64,

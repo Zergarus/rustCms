@@ -83,6 +83,8 @@ pub fn router(state: AppState) -> Router<AppState> {
             "/shop/stores/{id}",
             get(shop::stores::edit_form).post(shop::stores::update),
         )
+        .route("/shop/rests", get(shop::rests::list))
+        .route("/shop/rests/{item_id}", get(shop::rests::reserves))
         .route("/shop/locations", get(shop::locations))
         .route(
             "/shop/store-docs",

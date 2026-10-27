@@ -9,6 +9,17 @@
   <p class="muted">Значения по умолчанию для товаров, у которых флаг стоит «по умолчанию».</p>
   <label class="check"><input type="checkbox" name="quantity_trace" {% if quantity_trace %}checked{% endif %}> Учитывать количество (нельзя купить больше остатка)</label>
   <label class="check"><input type="checkbox" name="can_buy_zero" {% if can_buy_zero %}checked{% endif %}> Разрешать покупку при нулевом остатке</label>
+  <h2>Складской учёт</h2>
+  <label class="check"><input type="checkbox" name="store_control" {% if store_control %}checked{% endif %}> Включить складской учёт (остатки меняются складскими документами; при включении доступное количество пересчитывается)</label>
+  <label class="check"><input type="checkbox" name="reservation" {% if reservation %}checked{% endif %}> Резервировать товар при заказе</label>
+  <label class="check"><input type="checkbox" name="allow_negative" {% if allow_negative %}checked{% endif %}> Показывать отрицательные остатки (иначе в админке отрицательный остаток виден как 0)</label>
+  <label>Резервировать товар
+    <select name="condition">
+      {% for c in conditions %}<option value="{{ c.code }}" {% if condition == c.code %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Снимать резерв через, дней<input name="clear_period" type="number" min="0" value="{{ clear_period }}"><small>0 — не снимать</small></label>
+  <label class="check"><input type="checkbox" name="deduct_on_delivery" {% if deduct_on_delivery %}checked{% endif %}> Списывать товар при разрешении доставки</label>
   <div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
 </form>
 {% endblock %}

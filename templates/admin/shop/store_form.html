@@ -13,6 +13,11 @@
     <label>Сортировка<input name="sort" type="number" value="{{ form.sort }}"></label>
     <label class="check"><input type="checkbox" name="active" {% if form.active %}checked{% endif %}> Активен</label>
   </div>
+  <div class="grid-3">
+    <label class="check"><input type="checkbox" name="is_default" {% if form.is_default %}checked{% endif %}> По умолчанию</label>
+    <label class="check"><input type="checkbox" name="issuing_center" {% if form.issuing_center %}checked{% endif %}> Пункт выдачи</label>
+    <label class="check"><input type="checkbox" name="shipping_center" {% if form.shipping_center %}checked{% endif %}> Отгрузочный склад</label>
+  </div>
   <div class="grid-2">
     <label>Адрес<input name="address" value="{{ form.address }}"></label>
     <label>Телефон<input name="phone" value="{{ form.phone }}"></label>

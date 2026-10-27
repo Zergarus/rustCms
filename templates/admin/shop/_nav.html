@@ -1,7 +1,7 @@
 {#- Вкладки раздела «Магазин»; tab — код текущей -#}
 <nav class="shop-nav">
-  {% for t in [("orders", "Заказы", "orders.manage"), ("stores", "Склады", "shop.manage"), ("store-docs", "Документы", "shop.manage"), ("contractors", "Поставщики", "shop.manage"), ("carts", "Корзины", "shop.manage"), ("price-types", "Типы цен", "shop.manage"), ("rounding", "Правила округления", "shop.manage"), ("currencies", "Валюты", "shop.manage"), ("currency-rates", "Курсы валют", "shop.manage"), ("settings", "Настройки каталога", "shop.manage"), ("statuses", "Статусы", "shop.manage"), ("person-types", "Типы плательщика", "shop.manage"), ("deliveries", "Доставки", "shop.manage"), ("pay-systems", "Платёжные системы", "shop.manage")] %}
-  {% if t[2] in user.permissions and (t[0] != "store-docs" or user.store_control) %}
+  {% for t in [("orders", "Заказы", "orders.manage"), ("stores", "Склады", "shop.manage"), ("rests", "Остатки", "shop.manage"), ("store-docs", "Документы", "shop.manage"), ("contractors", "Поставщики", "shop.manage"), ("carts", "Корзины", "shop.manage"), ("price-types", "Типы цен", "shop.manage"), ("rounding", "Правила округления", "shop.manage"), ("currencies", "Валюты", "shop.manage"), ("currency-rates", "Курсы валют", "shop.manage"), ("settings", "Настройки каталога", "shop.manage"), ("statuses", "Статусы", "shop.manage"), ("person-types", "Типы плательщика", "shop.manage"), ("deliveries", "Доставки", "shop.manage"), ("pay-systems", "Платёжные системы", "shop.manage")] %}
+  {% if t[2] in user.permissions and (t[0] not in ["store-docs", "rests"] or user.store_control) %}
   <a href="/admin/shop/{{ t[0] }}" class="{% if tab == t[0] %}active{% endif %}">{{ t[1] }}</a>
   {% endif %}
   {% endfor %}

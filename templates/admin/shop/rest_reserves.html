@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "rests" %}
+{% block title %}Резервы товара{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="breadcrumbs"><a href="/admin/shop/rests">Остатки</a> /</div>
+<h1>Резервы: {{ name }}</h1>
+{% if items %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>Заказ</th><th>Позиция</th><th>Склад</th><th>Количество</th><th>Резерв до</th></tr></thead>
+    <tbody>
+      {% for r in items %}
+      <tr>
+        <td><a href="/admin/shop/orders/{{ r.order_id }}">{{ r.order_number }}</a></td>
+        <td>{{ r.position }} <span class="muted">#{{ r.cart_item_id }}</span></td>
+        <td>{{ r.store_name }}</td>
+        <td>{{ r.quantity }}</td>
+        <td>{{ r.reserve_end }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card empty"><p>Резервов нет.</p></div>
+{% endif %}
+{% endblock %}
