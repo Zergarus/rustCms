@@ -3438,8 +3438,10 @@ mod tests {
 
     /// Пакет цен, где у второго типа цены задана валюта `currency`.
     fn prices_with_currency(currency: &str) -> Parsed {
-        let xml = include_str!("../../tests/fixtures/1c/prices.xml")
-            .replace("<Валюта>USD</Валюта>", &format!("<Валюта>{currency}</Валюта>"));
+        let xml = include_str!("../../tests/fixtures/1c/prices.xml").replace(
+            "<Валюта>USD</Валюта>",
+            &format!("<Валюта>{currency}</Валюта>"),
+        );
         offers_file(xml.as_bytes())
     }
 

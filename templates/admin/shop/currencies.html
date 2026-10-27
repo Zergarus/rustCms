@@ -9,6 +9,7 @@
   <a class="btn primary" href="/admin/shop/currencies/new">Добавить валюту</a>
 </div>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+{% if no_base %}<div class="alert">Не задана базовая валюта. Цены в валютах, отличных от валюты сайта, не пересчитываются. Отметьте одну валюту как базовую.</div>{% endif %}
 <form class="card form" method="post" action="/admin/shop/currencies/site">
   <label>Валюта сайта
     <select name="currency">

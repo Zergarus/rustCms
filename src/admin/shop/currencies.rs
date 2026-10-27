@@ -153,6 +153,15 @@ struct CurrencyRow {
     base: bool,
 }
 
+/// Есть ли базовая валюта; без неё цены в других валютах не пересчитываются.
+pub async fn has_base(db: &sqlx::PgPool) -> AppResult<bool> {
+    Ok(
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM currencies WHERE base)")
+            .fetch_one(db)
+            .await?,
+    )
+}
+
 async fn list_page(
     state: &AppState,
     user: Access,
@@ -166,10 +175,11 @@ async fn list_page(
     .fetch_all(&state.db)
     .await?;
     let site = currency::site_currency(&mut *state.db.acquire().await?).await?;
+    let no_base = !has_base(&state.db).await?;
     render(
         state,
         "shop/currencies.html",
-        context! { user, items, site, error },
+        context! { user, items, site, error, no_base },
     )
 }
 
@@ -280,6 +290,8 @@ pub async fn new_form(
 ) -> AppResult<Html<String>> {
     require_shop(&user)?;
     let form = CurrencyForm {
+        // Первая валюта становится базовой, если базовой ещё нет
+        base: (!has_base(&state.db).await?).then(|| "on".into()),
         format_string: "#".into(),
         dec_point: ".".into(),
         thousands_sep: " ".into(),
@@ -634,5 +646,74 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!((cnt, amount), (1, 1.0));
+    }
+
+    #[sqlx::test]
+    async fn new_form_ticks_base_only_without_base(db: sqlx::PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (_, html) = get(&app, "/admin/shop/currencies/new", &cookie).await;
+        assert!(html.contains("name=\"base\" checked"), "{html}");
+        seed_usd(&db, None).await;
+        let (_, html) = get(&app, "/admin/shop/currencies/new", &cookie).await;
+        assert!(!html.contains("name=\"base\" checked"), "{html}");
+    }
+
+    #[sqlx::test]
+    async fn pages_warn_without_base_currency(db: sqlx::PgPool) {
+        const WARN: &str = "Не задана базовая валюта";
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        sqlx::query("INSERT INTO currencies (code) VALUES ('USD')")
+            .execute(&db)
+            .await
+            .unwrap();
+        for url in ["/admin/shop/currencies", "/admin/shop/currency-rates"] {
+            let (_, html) = get(&app, url, &cookie).await;
+            assert!(html.contains(WARN), "{url}: {html}");
+        }
+        sqlx::query("UPDATE currencies SET base = TRUE WHERE code = 'USD'")
+            .execute(&db)
+            .await
+            .unwrap();
+        for url in ["/admin/shop/currencies", "/admin/shop/currency-rates"] {
+            let (_, html) = get(&app, url, &cookie).await;
+            assert!(!html.contains(WARN), "{url}: {html}");
+        }
+    }
+
+    /// Запасное правило миграции 0022: без базовой первая по (sort, code) становится базовой.
+    #[sqlx::test]
+    async fn migration_makes_first_currency_base_when_none(db: sqlx::PgPool) {
+        let sql = include_str!("../../../migrations/0022_currency.sql");
+        let from = sql
+            .find("-- Запасное правило")
+            .expect("в миграции нет запасного правила");
+        let stmt = {
+            let rest = &sql[from..];
+            let start = rest.find("UPDATE").expect("нет UPDATE");
+            &rest[start..rest.find(';').expect("нет ;")]
+        };
+        for (code, sort) in [("EUR", 200), ("USD", 100), ("CNY", 100)] {
+            sqlx::query("INSERT INTO currencies (code, sort) VALUES ($1, $2)")
+                .bind(code)
+                .bind(sort)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        sqlx::query(stmt).execute(&db).await.unwrap();
+        let base: Vec<String> = sqlx::query_scalar("SELECT code FROM currencies WHERE base")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(base, ["CNY"]);
+        // Базовая уже есть — ничего не меняется
+        sqlx::query(stmt).execute(&db).await.unwrap();
+        let base: Vec<String> = sqlx::query_scalar("SELECT code FROM currencies WHERE base")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(base, ["CNY"]);
     }
 }

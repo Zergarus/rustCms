@@ -17,6 +17,11 @@ CREATE UNIQUE INDEX currencies_base_key ON currencies (base) WHERE base;
 UPDATE currencies SET base = TRUE
 WHERE code = 'RUB' AND NOT EXISTS (SELECT 1 FROM currencies WHERE base);
 
+-- Запасное правило: рубля нет, базовой всё ещё нет — первая по (sort, code), иначе курсы не работают
+UPDATE currencies SET base = TRUE
+WHERE code = (SELECT code FROM currencies ORDER BY sort, code LIMIT 1)
+  AND NOT EXISTS (SELECT 1 FROM currencies WHERE base);
+
 CREATE TABLE currency_rates (
     id            BIGSERIAL PRIMARY KEY,
     currency      TEXT NOT NULL REFERENCES currencies (code) ON DELETE CASCADE ON UPDATE CASCADE,

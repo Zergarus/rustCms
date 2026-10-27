@@ -9,6 +9,7 @@
   <a class="btn primary" href="/admin/shop/currency-rates/new">Добавить курс</a>
 </div>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+{% if no_base %}<div class="alert">Не задана базовая валюта. Цены в валютах, отличных от валюты сайта, не пересчитываются. Отметьте одну валюту как базовую.</div>{% endif %}
 <form class="card form" method="post" action="/admin/shop/currency-rates/settings">
   <div class="grid-3">
     <label class="check"><input type="checkbox" name="auto_load" value="Y" {% if auto_load %}checked{% endif %}> Загружать курсы из банка ежедневно</label>

@@ -109,10 +109,11 @@ async fn list_page(
             "error": r.error,
         })
     });
+    let no_base = !super::currencies::has_base(&state.db).await?;
     render(
         state,
         "shop/currency_rates.html",
-        context! { user, items, currencies, filter => (filter.currency, filter.from, filter.to),
+        context! { user, items, currencies, no_base, filter => (filter.currency, filter.from, filter.to),
         auto_load, auto_load_time, last, error },
     )
 }
