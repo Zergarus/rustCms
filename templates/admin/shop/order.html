@@ -121,14 +121,14 @@
         <td>{{ i.quantity }}</td>
         <td>{{ reserves[i.id|string] or 0 }}</td>
         <td>
-          <form method="post" action="/admin/shop/orders/{{ order.id }}/reserve" style="display:inline"><input type="hidden" name="line" value="{{ i.id }}"><button class="btn" type="submit" {% if shipped %}disabled{% endif %}>Зарезервировать</button></form>
+          <form method="post" action="/admin/shop/orders/{{ order.id }}/reserve" style="display:inline"><input type="hidden" name="line" value="{{ i.id }}"><button class="btn" type="submit" {% if shipped or order.canceled %}disabled{% endif %}>Зарезервировать</button></form>
           <form method="post" action="/admin/shop/orders/{{ order.id }}/unreserve" style="display:inline"><input type="hidden" name="line" value="{{ i.id }}"><button class="btn" type="submit" {% if shipped %}disabled{% endif %}>Снять резерв</button></form>
         </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
-  <form method="post" action="/admin/shop/orders/{{ order.id }}/reserve" style="display:inline"><button class="btn" type="submit" {% if shipped %}disabled{% endif %}>Зарезервировать весь заказ</button></form>
+  <form method="post" action="/admin/shop/orders/{{ order.id }}/reserve" style="display:inline"><button class="btn" type="submit" {% if shipped or order.canceled %}disabled{% endif %}>Зарезервировать весь заказ</button></form>
   <form method="post" action="/admin/shop/orders/{{ order.id }}/unreserve" style="display:inline"><button class="btn" type="submit" {% if shipped %}disabled{% endif %}>Снять все резервы</button></form>
 </div>
 

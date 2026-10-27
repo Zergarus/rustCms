@@ -712,27 +712,33 @@ async fn change_reserve(
     require_orders(&user)?;
     let line: Option<i64> = form.get("line").and_then(|v| v.trim().parse().ok());
     let mut tx = state.db.begin().await?;
-    let shipped: Option<bool> = sqlx::query_scalar(
-        "SELECT coalesce((SELECT deducted FROM shipments WHERE order_id = o.id ORDER BY id LIMIT 1), false)
-         FROM orders o WHERE o.id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some(shipped) = shipped else {
+    // Заказ блокируется, как в ship.rs: ручной резерв не гонится с отгрузкой
+    let canceled: Option<bool> =
+        sqlx::query_scalar("SELECT canceled FROM orders WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(canceled) = canceled else {
         return Err(AppError::NotFound);
     };
-    if shipped {
+    let shipped: bool = sqlx::query_scalar(
+        "SELECT coalesce((SELECT deducted FROM shipments WHERE order_id = $1 ORDER BY id LIMIT 1), false)",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let refusal = if shipped {
+        Some("Заказ отгружен — резервы не меняются")
+    } else if canceled && reserve {
+        Some("Заказ отменён — резервы не ставятся")
+    } else {
+        None
+    };
+    if let Some(message) = refusal {
         drop(tx);
-        return Ok(card(
-            &state,
-            user,
-            id,
-            Some("Заказ отгружен — резервы не меняются".into()),
-            None,
-        )
-        .await?
-        .into_response());
+        return Ok(card(&state, user, id, Some(message.into()), None)
+            .await?
+            .into_response());
     }
     let warnings = match (reserve, line) {
         (true, Some(l)) => stock::reserve::reserve_line(&mut tx, id, l, Some(user.user.id)).await?,
@@ -1314,6 +1320,34 @@ mod tests {
             post_form(&app, &format!("{base}/unreserve"), &cookie, "line=999999").await;
         assert!(status.is_redirection());
         assert_eq!(reserved(&db, id).await, vec![(line, 1.0)]);
+    }
+
+    #[sqlx::test]
+    async fn manual_reserve_refused_on_canceled(db: sqlx::PgPool) {
+        use crate::smoke_tests::post_form;
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let base = format!("/admin/shop/orders/{id}");
+        sqlx::query("UPDATE orders SET canceled = TRUE WHERE id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM basket_reservations")
+            .execute(&db)
+            .await
+            .unwrap();
+        let (status, html) = post_form(&app, &format!("{base}/reserve"), &cookie, "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            html.contains("Заказ отменён — резервы не ставятся"),
+            "{html}"
+        );
+        assert!(reserved(&db, id).await.is_empty());
+        let (status, _) = post_form(&app, &format!("{base}/unreserve"), &cookie, "").await;
+        assert!(status.is_redirection());
     }
 
     #[sqlx::test]
