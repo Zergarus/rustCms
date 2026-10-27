@@ -164,6 +164,14 @@ mod tests {
     #[sqlx::test]
     async fn settings_save_all(db: PgPool) {
         let f = order_fixture(&db).await;
+        // неверное доступное и ненулевой резерв: пересчёт должен дать Σ amount − резерв = 5 − 2
+        sqlx::query(
+            "UPDATE catalog_products SET quantity = 99, quantity_reserved = 2 WHERE item_id = $1",
+        )
+        .bind(f.product_id)
+        .execute(&db)
+        .await
+        .unwrap();
         let app = crate::app(test_state(db.clone()));
         let cookie = admin_cookie(&db).await;
         let (_, html) = get(&app, "/admin/shop/settings", &cookie).await;
@@ -194,8 +202,8 @@ mod tests {
                 "{name}"
             );
         }
-        // включение учёта пересчитало доступное: Σ amount (5) − резерв (0)
+        // включение учёта пересчитало доступное: Σ amount (5) − резерв (2)
         let (quantity, _) = crate::test_support::amounts(&db, f.product_id).await;
-        assert_eq!(quantity, 5.0);
+        assert_eq!(quantity, 3.0);
     }
 }

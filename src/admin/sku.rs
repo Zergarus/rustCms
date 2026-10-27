@@ -258,7 +258,7 @@ pub async fn generate(
     form.set("available", "on");
     let price_types: Vec<i64> = ctx.price_types.iter().map(|(id, _)| *id).collect();
     let stores: Vec<i64> = ctx.stores.iter().map(|(id, _)| *id).collect();
-    let purchase = match purchase_input_from_form(&form, &price_types, &stores) {
+    let mut purchase = match purchase_input_from_form(&form, &price_types, &stores) {
         Ok(p) => p,
         Err(e) => return render_form(&state, user, &ctx, &form, Some(e)).await,
     };
@@ -278,6 +278,12 @@ pub async fn generate(
     let active = !form.all("active").is_empty();
 
     let mut tx = state.db.begin().await?;
+    // При складском учёте остатки меняют только документы, отгрузки и 1С — форма их не задаёт
+    let store_control = crate::stock::settings(&mut tx).await?.store_control;
+    if store_control {
+        purchase.amounts.clear();
+        purchase.quantity = None;
+    }
     let (mut created, mut skipped) = (0usize, 0usize);
     for combo in &combos {
         if existing.contains(&sku::combo_key(combo)) {
@@ -316,6 +322,7 @@ pub async fn generate(
         };
         let id = repo::create_item(&mut *tx, ctx.offers.id, &input).await?;
         catalog::save_purchase_in(&mut tx, id, &purchase).await?;
+        crate::stock::recalc_quantity(&mut tx, &[id]).await?;
         created += 1;
     }
     tx.commit().await?;

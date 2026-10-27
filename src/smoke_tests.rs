@@ -1648,6 +1648,51 @@ async fn generator_setup(db: &PgPool, offers: i64) -> (i64, Vec<i64>) {
     (color, options)
 }
 
+/// Генератор предложений: (число записей остатков, число цен) у созданных предложений.
+async fn generate_counts(db: &PgPool, control: bool) -> (i64, i64) {
+    let cookie = admin_cookie(db).await;
+    let app = app(db);
+    let (c, offers) = sku_setup(db, &app, &cookie).await;
+    generator_setup(db, offers).await;
+    sqlx::query(
+        "INSERT INTO options (module, name, value) VALUES ('catalog', 'default_use_store_control', $1)
+         ON CONFLICT (module, name) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind(if control { "Y" } else { "N" })
+    .execute(db)
+    .await
+    .unwrap();
+    let (status, _) = post_form_location(
+        &app,
+        &format!("/admin/items/{}/offers/generate", c.item_id),
+        &cookie,
+        "axis_volume=1+%D0%BB&template=%23PRODUCT_NAME%23+%28%23VOLUME%23%29&active=on&price_1=500&amount_1=3&weight=900",
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    sqlx::query_as(
+        "SELECT (SELECT count(*) FROM catalog_store_amounts a
+                 JOIN collection_items i ON i.id = a.item_id WHERE i.product_id = $1),
+                (SELECT count(*) FROM catalog_prices pr
+                 JOIN collection_items i ON i.id = pr.item_id WHERE i.product_id = $1)",
+    )
+    .bind(c.item_id)
+    .fetch_one(db)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn generator_skips_amounts_with_store_control(db: PgPool) {
+    // остатки из формы не пишутся, цены сохраняются
+    assert_eq!(generate_counts(&db, true).await, (0, 1));
+}
+
+#[sqlx::test]
+async fn generator_writes_amounts_without_store_control(db: PgPool) {
+    assert_eq!(generate_counts(&db, false).await, (1, 1));
+}
+
 #[sqlx::test]
 async fn generator_creates_offers(db: PgPool) {
     let cookie = admin_cookie(&db).await;
