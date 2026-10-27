@@ -3,6 +3,7 @@
 
 pub mod carts;
 pub mod currencies;
+pub mod currency_rates;
 pub mod deliveries;
 pub mod order_edit;
 pub mod order_props;

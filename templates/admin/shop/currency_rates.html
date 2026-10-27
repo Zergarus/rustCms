@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "currency-rates" %}
+{% block title %}Курсы валют{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="page-head">
+  <h1>Курсы валют <span class="muted count">{{ items|length }}</span></h1>
+  <a class="btn primary" href="/admin/shop/currency-rates/new">Добавить курс</a>
+</div>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<form class="card form" method="post" action="/admin/shop/currency-rates/settings">
+  <div class="grid-3">
+    <label class="check"><input type="checkbox" name="auto_load" value="Y" {% if auto_load %}checked{% endif %}> Загружать курсы из банка ежедневно</label>
+    <label>Время загрузки (МСК)<input name="auto_load_time" value="{{ auto_load_time }}" placeholder="08:00" maxlength="5"></label>
+  </div>
+  {% if last %}
+  <p class="muted">Последняя загрузка: {{ last.at }}, курсы на {{ last.date }}.
+    {% if last.error %}Ошибка: {{ last.error }}.{% else %}
+    Загружено: {% if last.loaded %}{{ last.loaded|join(", ") }}{% else %}нет{% endif %}.
+    {% if last.skipped %}Нет в ответе банка: {{ last.skipped|join(", ") }}.{% endif %}{% endif %}
+  </p>
+  {% else %}
+  <p class="muted">Загрузок ещё не было.</p>
+  {% endif %}
+  <div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
+</form>
+<form class="card form" method="get" action="/admin/shop/currency-rates">
+  <div class="grid-3">
+    <label>Валюта
+      <select name="currency">
+        <option value="">Все</option>
+        {% for c in currencies %}<option value="{{ c }}" {% if c == filter[0] %}selected{% endif %}>{{ c }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>С даты<input type="date" name="from" value="{{ filter[1] }}"></label>
+    <label>По дату<input type="date" name="to" value="{{ filter[2] }}"></label>
+  </div>
+  <div class="form-actions"><button class="btn" type="submit">Показать</button></div>
+</form>
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>Дата</th><th>Валюта</th><th>Номинал</th><th>Курс</th><th>Базовая</th><th></th></tr></thead>
+    <tbody>
+      {% for r in items %}
+      <tr>
+        <td><a href="/admin/shop/currency-rates/{{ r.id }}">{{ r.date_rate }}</a></td>
+        <td>{{ r.currency }}</td>
+        <td>{{ r.rate_cnt }}</td>
+        <td>{{ r.rate }}</td>
+        <td>{{ r.base_currency }}</td>
+        <td>
+          <form method="post" action="/admin/shop/currency-rates/{{ r.id }}/delete" onsubmit="return confirm('Удалить курс?')">
+            <button class="btn" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

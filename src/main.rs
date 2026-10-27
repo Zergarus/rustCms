@@ -7,7 +7,6 @@ mod cart;
 mod catalog;
 mod collection;
 mod config;
-#[allow(dead_code)] // identity и last_result пока не используются
 mod currency;
 #[allow(dead_code)] // движок, корзина и админка подключают модель в следующих задачах
 mod discount;

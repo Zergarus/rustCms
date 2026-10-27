@@ -228,6 +228,30 @@ pub fn router(state: AppState) -> Router<AppState> {
             get(shop::currencies::edit_form).post(shop::currencies::update),
         )
         .route(
+            "/shop/currency-rates",
+            get(shop::currency_rates::list).post(shop::currency_rates::create),
+        )
+        .route(
+            "/shop/currency-rates/new",
+            get(shop::currency_rates::new_form),
+        )
+        .route(
+            "/shop/currency-rates/fetch",
+            get(shop::currency_rates::fetch_rate),
+        )
+        .route(
+            "/shop/currency-rates/settings",
+            post(shop::currency_rates::settings),
+        )
+        .route(
+            "/shop/currency-rates/{id}/delete",
+            post(shop::currency_rates::delete),
+        )
+        .route(
+            "/shop/currency-rates/{id}",
+            get(shop::currency_rates::edit_form).post(shop::currency_rates::update),
+        )
+        .route(
             "/shop/settings",
             get(shop::settings::form).post(shop::settings::save),
         )

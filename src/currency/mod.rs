@@ -159,6 +159,7 @@ impl Converter {
     }
 
     /// Без курсов: все суммы должны быть уже в `to`.
+    #[allow(dead_code)] // нужна только тестам, оставлена как часть API конвертера
     pub fn identity(to: &str) -> Converter {
         Converter {
             to: to.to_string(),
