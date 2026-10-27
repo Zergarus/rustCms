@@ -50,7 +50,6 @@
     <p>Тип плательщика: {{ person_type }}</p>
     <p>Доставка: {% if order.shipment %}{{ order.shipment.delivery_name }}, {{ order.shipment.price }} {{ order.currency }}{% if order.shipment.store_id %}, склад: {{ stores[order.shipment.store_id|string] }}{% endif %}{% endif %}</p>
     <p>Оплата: {% if order.payment %}{{ order.payment.name }}, {{ order.payment.sum }} {{ order.currency }}{% endif %}</p>
-    <p>Остатки: {% if order.stock_deducted %}списаны{% else %}не списаны{% endif %}</p>
     {% if order.user_comment %}<p>Комментарий покупателя: {{ order.user_comment }}</p>{% endif %}
   </div>
 </div>
@@ -72,6 +71,7 @@
 <form class="card form table-wrap" method="post" action="/admin/shop/orders/{{ order.id }}/items">
   <h2>Состав заказа</h2>
   <input type="hidden" name="version" value="{{ version }}">
+  <fieldset {% if shipped %}disabled{% endif %} style="border:0;padding:0;margin:0;min-width:0">
   <table>
     <thead><tr><th>Товар</th><th>Склад</th><th>Кол-во</th><th>Цена</th><th>Сумма</th><th>Удалить</th></tr></thead>
     <tbody>
@@ -107,7 +107,8 @@
       <select name="pay_system_id">{% for p in pay_systems %}<option value="{{ p[0] }}" {% if order.payment and order.payment.pay_system_id == p[0] %}selected{% endif %}>{{ p[1] }}</option>{% endfor %}</select>
     </label>
   </div>
-  <div class="form-actions"><button class="btn primary" type="submit">Сохранить состав</button>{% if order.canceled %} <span class="muted">Заказ отменён — остатки не меняются</span>{% endif %}</div>
+  <div class="form-actions"><button class="btn primary" type="submit">Сохранить состав</button>{% if shipped %} <span class="muted">Заказ отгружен — состав не правится</span>{% elif order.canceled %} <span class="muted">Заказ отменён — остатки не меняются</span>{% endif %}</div>
+  </fieldset>
 </form>
 
 <div class="card table-wrap">

@@ -162,6 +162,9 @@ pub fn version(updated_at: &DateTime<Utc>) -> String {
     updated_at.to_rfc3339_opts(SecondsFormat::Micros, true)
 }
 
+/// Отказ правки состава отгруженного заказа.
+pub const SHIPPED: &str = "Заказ отгружен — состав не правится";
+
 /// Сохраняет состав одной транзакцией; `version` — `updated_at` заказа при открытии формы.
 pub async fn save_composition(
     db: &PgPool,
@@ -195,6 +198,16 @@ pub async fn save_composition(
     .await?;
     if self::version(&updated_at) != version {
         return Ok(Err("Заказ изменён, обновите страницу".into()));
+    }
+    // Отгруженный заказ (основная отгрузка) не правится: остатки уже списаны по составу
+    let shipped: bool = sqlx::query_scalar(
+        "SELECT coalesce((SELECT deducted FROM shipments WHERE order_id = $1 ORDER BY id LIMIT 1), false)",
+    )
+    .bind(order_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if shipped {
+        return Ok(Err(SHIPPED.into()));
     }
     let delivery: Option<String> = sqlx::query_scalar("SELECT name FROM deliveries WHERE id = $1")
         .bind(c.delivery_id)

@@ -34,8 +34,8 @@ pub async fn form(
     let condition = stock.condition.code();
     let conditions: Vec<minijinja::Value> = [
         ("O", "При оформлении заказа"),
-        ("R", "При полной оплате заказа"),
-        ("P", "При оплате заказа (в том числе частичной)"),
+        ("R", "При оплате заказа (в том числе частичной)"),
+        ("P", "При полной оплате заказа"),
         ("D", "При разрешении доставки"),
         ("S", "При отгрузке"),
     ]
@@ -205,5 +205,23 @@ mod tests {
         // включение учёта пересчитало доступное: Σ amount (5) − резерв (2)
         let (quantity, _) = crate::test_support::amounts(&db, f.product_id).await;
         assert_eq!(quantity, 3.0);
+    }
+
+    #[sqlx::test]
+    async fn settings_condition_labels(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (_, html) = get(&app, "/admin/shop/settings", &cookie).await;
+        for (code, name) in [
+            ("O", "При оформлении заказа"),
+            ("R", "При оплате заказа (в том числе частичной)"),
+            ("P", "При полной оплате заказа"),
+            ("D", "При разрешении доставки"),
+            ("S", "При отгрузке"),
+        ] {
+            let selected = if code == "O" { "selected" } else { "" };
+            let want = format!("<option value=\"{code}\" {selected}>{name}</option>");
+            assert!(html.contains(&want), "{want}: {html}");
+        }
     }
 }

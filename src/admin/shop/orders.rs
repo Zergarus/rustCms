@@ -1385,6 +1385,77 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn card_shipped_locks_composition(db: sqlx::PgPool) {
+        use crate::smoke_tests::post_form;
+        let f = order_fixture(&db).await;
+        for sql in [
+            "INSERT INTO deliveries (id, name) VALUES (1, 'Самовывоз')",
+            "INSERT INTO pay_systems (id, name) VALUES (1, 'QR')",
+        ] {
+            sqlx::query(sql).execute(&db).await.unwrap();
+        }
+        let id = place_order(&db, &f, None).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let path = format!("/admin/shop/orders/{id}");
+        let items_form = || async {
+            let (_, html) = crate::smoke_tests::get(&app, &path, &cookie).await;
+            assert!(!html.contains("Остатки: "), "{html}");
+            html.split(&format!(r#"action="/admin/shop/orders/{id}/items""#))
+                .nth(1)
+                .unwrap()
+                .split("</form>")
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        assert!(!items_form().await.contains("disabled"));
+        sqlx::query("UPDATE shipments SET deducted = TRUE WHERE order_id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let form = items_form().await;
+        assert!(form.contains("<fieldset disabled"), "{form}");
+        assert!(
+            form.contains("Заказ отгружен — состав не правится"),
+            "{form}"
+        );
+        // Запрос в обход формы отклоняется
+        let (_, html) = crate::smoke_tests::get(&app, &path, &cookie).await;
+        let version = html
+            .split(r#"name="version" value=""#)
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .to_string();
+        let line: i64 = sqlx::query_scalar("SELECT id FROM cart_items WHERE order_id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let body = format!(
+            "version={}&item_{line}_quantity=5&item_{line}_price=100&delivery_id=1&delivery_price=0&pay_system_id=1",
+            version.replace(':', "%3A").replace('+', "%2B")
+        );
+        let (status, html) = post_form(&app, &format!("{path}/items"), &cookie, &body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            html.contains("Заказ отгружен — состав не правится"),
+            "{html}"
+        );
+        let quantity: f64 =
+            sqlx::query_scalar("SELECT quantity::float8 FROM cart_items WHERE id = $1")
+                .bind(line)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(quantity, 1.0);
+    }
+
+    #[sqlx::test]
     async fn recalculate_discounts_admin(db: sqlx::PgPool) {
         use crate::smoke_tests::post_form;
         let f = order_fixture(&db).await;
