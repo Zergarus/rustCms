@@ -84,6 +84,41 @@ pub fn router(state: AppState) -> Router<AppState> {
             get(shop::stores::edit_form).post(shop::stores::update),
         )
         .route("/shop/locations", get(shop::locations))
+        .route(
+            "/shop/store-docs",
+            get(shop::store_docs::list).post(shop::store_docs::create),
+        )
+        .route("/shop/store-docs/new", get(shop::store_docs::new_form))
+        .route("/shop/store-docs/products", get(shop::store_docs::products))
+        .route(
+            "/shop/store-docs/{id}",
+            get(shop::store_docs::view).post(shop::store_docs::update),
+        )
+        .route(
+            "/shop/store-docs/{id}/conduct",
+            post(shop::store_docs::conduct),
+        )
+        .route(
+            "/shop/store-docs/{id}/cancel",
+            post(shop::store_docs::cancel),
+        )
+        .route(
+            "/shop/store-docs/{id}/delete",
+            post(shop::store_docs::delete),
+        )
+        .route(
+            "/shop/contractors",
+            get(shop::contractors::list).post(shop::contractors::create),
+        )
+        .route("/shop/contractors/new", get(shop::contractors::new_form))
+        .route(
+            "/shop/contractors/{id}",
+            get(shop::contractors::edit_form).post(shop::contractors::update),
+        )
+        .route(
+            "/shop/contractors/{id}/delete",
+            post(shop::contractors::delete),
+        )
         .route("/shop/orders", get(shop::orders::list))
         .route("/shop/orders/{id}", get(shop::orders::view))
         .route("/shop/orders/{id}/xml1c", get(shop::orders::xml1c))
@@ -330,7 +365,14 @@ async fn require_access(
         Err(err) => Err(err),
     };
     match access {
-        Ok(access) if access.can_enter_admin() => {
+        Ok(mut access) if access.can_enter_admin() => {
+            // Для вкладки «Документы» в меню «Магазин»
+            access.store_control = match state.db.acquire().await {
+                Ok(mut conn) => crate::stock::settings(&mut conn)
+                    .await
+                    .is_ok_and(|s| s.store_control),
+                Err(_) => false,
+            };
             req.extensions_mut().insert(access);
             next.run(req).await
         }

@@ -2,6 +2,7 @@
 //! валюты, настройки каталога. Право — `shop.manage`.
 
 pub mod carts;
+pub mod contractors;
 pub mod currencies;
 pub mod currency_rates;
 pub mod deliveries;
@@ -14,6 +15,7 @@ pub mod price_types;
 pub mod rounding;
 pub mod settings;
 pub mod statuses;
+pub mod store_docs;
 pub mod stores;
 
 use axum::{

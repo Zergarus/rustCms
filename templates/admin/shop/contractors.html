@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "contractors" %}
+{% block title %}Поставщики{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="page-head">
+  <h1>Поставщики <span class="muted count">{{ items|length }}</span></h1>
+  <a class="btn primary" href="/admin/shop/contractors/new">Добавить поставщика</a>
+</div>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+{% if items %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>ID</th><th>Название</th><th>Тип</th><th>ИНН</th><th>Телефон</th><th>Email</th><th>Документов</th><th></th></tr></thead>
+    <tbody>
+      {% for c in items %}
+      <tr>
+        <td class="muted">{{ c.id }}</td>
+        <td><a href="/admin/shop/contractors/{{ c.id }}">{% if c.person_type == "C" %}{{ c.company }}{% else %}{{ c.person_name }}{% endif %}</a></td>
+        <td>{% if c.person_type == "C" %}Юрлицо{% else %}Физлицо{% endif %}</td>
+        <td>{{ c.inn }}</td>
+        <td>{{ c.phone }}</td>
+        <td>{{ c.email }}</td>
+        <td>{{ c.docs }}</td>
+        <td>
+          <form method="post" action="/admin/shop/contractors/{{ c.id }}/delete" onsubmit="return confirm('Удалить поставщика?')">
+            <button class="btn danger" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card empty"><p>Поставщиков пока нет.</p></div>
+{% endif %}
+{% endblock %}

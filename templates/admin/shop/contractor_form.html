@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "contractors" %}
+{% block title %}{% if id %}Поставщик #{{ id }}{% else %}Новый поставщик{% endif %}{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="breadcrumbs"><a href="/admin/shop/contractors">Поставщики</a> /</div>
+<h1>{% if id %}Поставщик #{{ id }}{% else %}Новый поставщик{% endif %}</h1>
+<form class="card form" method="post" action="{% if id %}/admin/shop/contractors/{{ id }}{% else %}/admin/shop/contractors{% endif %}">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <div class="grid-3">
+    <label>Тип
+      <select name="person_type">
+        <option value="C" {% if form.person_type == "C" %}selected{% endif %}>Юрлицо</option>
+        <option value="I" {% if form.person_type == "I" %}selected{% endif %}>Физлицо</option>
+      </select>
+    </label>
+    <label>Компания (для юрлица)<input name="company" value="{{ form.company }}"></label>
+    <label>Контактное лицо / имя (для физлица)<input name="person_name" value="{{ form.person_name }}"></label>
+  </div>
+  <div class="grid-2">
+    <label>ИНН<input name="inn" value="{{ form.inn }}"></label>
+    <label>КПП<input name="kpp" value="{{ form.kpp }}"></label>
+  </div>
+  <div class="grid-2">
+    <label>Телефон<input name="phone" value="{{ form.phone }}"></label>
+    <label>Email<input name="email" value="{{ form.email }}"></label>
+  </div>
+  <div class="grid-2">
+    <label>Адрес<input name="address" value="{{ form.address }}"></label>
+    <label>Индекс<input name="post_index" value="{{ form.post_index }}"></label>
+  </div>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/shop/contractors">Отмена</a>
+  </div>
+</form>
+{% endblock %}

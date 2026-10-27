@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "store-docs" %}
+{% block title %}Складские документы{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+{% if disabled %}
+<h1>Складские документы</h1>
+<div class="card empty">
+  <p>Складской учёт выключен.</p>
+  <p class="muted">Включите его в <a href="/admin/shop/settings">настройках каталога</a>, чтобы вести приход, списание и перемещение товаров.</p>
+</div>
+{% else %}
+<div class="page-head">
+  <h1>Складские документы <span class="muted count">{{ items|length }}</span></h1>
+  <div>
+    {% for t in types %}<a class="btn" href="/admin/shop/store-docs/new?type={{ t.code }}">{{ t.name }}</a> {% endfor %}
+  </div>
+</div>
+<form class="card form" method="get" action="/admin/shop/store-docs">
+  <div class="grid-3">
+    <label>Тип
+      <select name="type">
+        <option value="">Все</option>
+        {% for t in types %}<option value="{{ t.code }}" {% if filter_type == t.code %}selected{% endif %}>{{ t.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Статус
+      <select name="status">
+        <option value="">Все</option>
+        <option value="N" {% if filter_status == "N" %}selected{% endif %}>Черновик</option>
+        <option value="Y" {% if filter_status == "Y" %}selected{% endif %}>Проведён</option>
+      </select>
+    </label>
+    <div class="form-actions"><button class="btn" type="submit">Показать</button></div>
+  </div>
+</form>
+{% if items %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>Номер</th><th>Тип</th><th>Дата</th><th>Сумма</th><th>Статус</th></tr></thead>
+    <tbody>
+      {% for d in items %}
+      <tr>
+        <td><a href="/admin/shop/store-docs/{{ d.id }}">{{ d.title }}</a>{% if d.doc_number %} <span class="muted">№ {{ d.doc_number }}</span>{% endif %}</td>
+        <td>{% for t in types %}{% if t.code == d.doc_type %}{{ t.name }}{% endif %}{% endfor %}</td>
+        <td>{{ d.date }}</td>
+        <td>{{ "%.2f"|format(d.total) }} {{ d.currency }}</td>
+        <td>{% if d.status == "Y" %}<span class="badge ok">Проведён</span>{% else %}<span class="badge">Черновик</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card empty"><p>Документов нет.</p></div>
+{% endif %}
+{% endif %}
+{% endblock %}

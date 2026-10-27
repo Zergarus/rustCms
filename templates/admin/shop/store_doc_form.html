@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "store-docs" %}
+{% block title %}{{ title }}{% endblock %}
+{% block content %}
+{% include "shop/_nav.html" %}
+<div class="breadcrumbs"><a href="/admin/shop/store-docs">Складские документы</a> /</div>
+<h1>{{ title }} {% if status == "Y" %}<span class="badge ok">Проведён</span>{% elif id %}<span class="badge">Черновик</span>{% endif %}</h1>
+{% for e in errors %}<div class="alert">{{ e }}</div>{% endfor %}
+{% set done = status == "Y" %}
+<form class="card form" method="post" action="{% if id %}/admin/shop/store-docs/{{ id }}{% else %}/admin/shop/store-docs{% endif %}">
+  <fieldset {% if done %}disabled{% endif %} style="border:0;padding:0;margin:0">
+  <input type="hidden" name="doc_type" value="{{ type_code }}">
+  <p class="muted">{{ type_name }}</p>
+  <div class="grid-3">
+    <label>Номер документа<input name="doc_number" value="{{ form.doc_number }}"></label>
+    <label>Дата<input type="date" name="date_document" value="{{ form.date_document }}"></label>
+    <label>Валюта (пусто — валюта сайта)<input name="currency" value="{{ form.currency }}" maxlength="3"></label>
+  </div>
+  {% if uses_contractor %}
+  <div class="grid-3">
+    <label>Поставщик
+      <select name="contractor_id">
+        <option value="">— не указан —</option>
+        {% for c in contractors %}<option value="{{ c.id }}" {% if form.contractor_id == c.id|string %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Дата заказа<input type="date" name="items_order_date" value="{{ form.items_order_date }}"></label>
+    <label>Дата получения<input type="date" name="items_received_date" value="{{ form.items_received_date }}"></label>
+  </div>
+  {% endif %}
+  <label>Комментарий<textarea name="commentary" rows="2">{{ form.commentary }}</textarea></label>
+
+  <h2>Товары</h2>
+  {% if not done %}
+  <div class="grid-2">
+    <label>Найти товар (название, код, артикул)
+      <input type="search" name="q" placeholder="начните вводить" autocomplete="off"
+             hx-get="/admin/shop/store-docs/products" hx-trigger="keyup changed delay:300ms" hx-target="#product-pick" hx-swap="innerHTML">
+    </label>
+    <label>Товар
+      <span><select id="product-pick"><option value="">— выберите товар —</option></select>
+      <button class="btn" type="button" id="add-line">Добавить строку</button></span>
+    </label>
+  </div>
+  {% endif %}
+  <div class="table-wrap">
+    <table id="lines">
+      <thead><tr><th>Товар</th>{% if uses_source %}<th>Со склада</th>{% endif %}{% if uses_destination %}<th>На склад</th>{% endif %}<th>Количество</th><th>Закупочная цена</th><th></th></tr></thead>
+      <tbody>
+        {% for l in lines %}
+        <tr class="line">
+          <td><input type="hidden" name="line_item[]" value="{{ l.item_id or '' }}">{{ l.item_name }} <span class="muted">#{{ l.item_id }}</span></td>
+          {% if uses_source %}<td><select name="line_store_from[]"><option value="">—</option>{% for s in stores %}<option value="{{ s.id }}" {% if l.store_from == s.id %}selected{% endif %}>{{ s.name }}</option>{% endfor %}</select></td>{% else %}<input type="hidden" name="line_store_from[]" value="">{% endif %}
+          {% if uses_destination %}<td><select name="line_store_to[]"><option value="">—</option>{% for s in stores %}<option value="{{ s.id }}" {% if l.store_to == s.id %}selected{% endif %}>{{ s.name }}</option>{% endfor %}</select></td>{% else %}<input type="hidden" name="line_store_to[]" value="">{% endif %}
+          <td><input name="line_amount[]" value="{{ l.amount }}" size="8"></td>
+          <td><input name="line_purchasing_price[]" value="{{ l.purchasing_price if l.purchasing_price is not none else '' }}" size="10"></td>
+          <td>{% if not done %}<button class="btn" type="button" onclick="this.closest('tr').remove()">Убрать</button>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p>Сумма: <strong>{{ "%.2f"|format(total) }}</strong></p>
+  </fieldset>
+  <div class="form-actions">
+    {% if not done %}<button class="btn primary" type="submit">Сохранить</button>{% endif %}
+    <a class="btn" href="/admin/shop/store-docs">К списку</a>
+  </div>
+</form>
+{% if id %}
+<div class="form-actions">
+  {% if done %}
+  <form method="post" action="/admin/shop/store-docs/{{ id }}/cancel" style="display:inline"><button class="btn" type="submit">Отменить проведение</button></form>
+  {% else %}
+  <form method="post" action="/admin/shop/store-docs/{{ id }}/conduct" style="display:inline"><button class="btn primary" type="submit">Провести</button></form>
+  <form method="post" action="/admin/shop/store-docs/{{ id }}/delete" style="display:inline" onsubmit="return confirm('Удалить документ?')"><button class="btn danger" type="submit">Удалить</button></form>
+  {% endif %}
+</div>
+{% endif %}
+{% if not done %}
+<template id="line-template">
+  <tr class="line">
+    <td><input type="hidden" name="line_item[]" value=""><span class="name"></span></td>
+    {% if uses_source %}<td><select name="line_store_from[]"><option value="">—</option>{% for s in stores %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select></td>{% else %}<input type="hidden" name="line_store_from[]" value="">{% endif %}
+    {% if uses_destination %}<td><select name="line_store_to[]"><option value="">—</option>{% for s in stores %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select></td>{% else %}<input type="hidden" name="line_store_to[]" value="">{% endif %}
+    <td><input name="line_amount[]" value="1" size="8"></td>
+    <td><input name="line_purchasing_price[]" value="" size="10"></td>
+    <td><button class="btn" type="button" onclick="this.closest('tr').remove()">Убрать</button></td>
+  </tr>
+</template>
+<script>
+document.getElementById('add-line').addEventListener('click', function () {
+  var pick = document.getElementById('product-pick');
+  if (!pick.value) return;
+  var row = document.getElementById('line-template').content.firstElementChild.cloneNode(true);
+  row.querySelector('input[name="line_item[]"]').value = pick.value;
+  row.querySelector('.name').textContent = pick.options[pick.selectedIndex].text;
+  document.querySelector('#lines tbody').appendChild(row);
+});
+</script>
+{% endif %}
+{% endblock %}
