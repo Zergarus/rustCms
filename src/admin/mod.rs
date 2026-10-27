@@ -136,6 +136,8 @@ pub fn router(state: AppState) -> Router<AppState> {
             post(shop::orders::save_properties),
         )
         .route("/shop/orders/{id}/files", post(shop::orders::save_files))
+        .route("/shop/orders/{id}/reserve", post(shop::orders::reserve))
+        .route("/shop/orders/{id}/unreserve", post(shop::orders::unreserve))
         .route(
             "/shop/orders/{id}/shipment",
             post(shop::orders::save_shipment),

@@ -415,10 +415,24 @@ pub(crate) async fn card(
     .into_iter()
     .map(|(line, store)| (line.to_string(), store))
     .collect();
+    let reserves: HashMap<String, f64> = sqlx::query_as::<_, (i64, f64)>(
+        "SELECT r.cart_item_id, sum(r.quantity)::float8 FROM basket_reservations r
+         JOIN cart_items c ON c.id = r.cart_item_id WHERE c.order_id = $1 GROUP BY r.cart_item_id",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?
+    .into_iter()
+    .map(|(line, qty)| (line.to_string(), qty))
+    .collect();
+    let active_stores: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, name FROM catalog_stores WHERE active ORDER BY sort, id")
+            .fetch_all(&state.db)
+            .await?;
     render(
         state,
         "shop/order.html",
-        context! { user, order, fields, file_fields, extra, stores, statuses, person_type, error, notice,
+        context! { user, order, reserves, active_stores, fields, file_fields, extra, stores, statuses, person_type, error, notice,
         store_list, deliveries, pay_systems, version, onec, onec_payments, onec_shipments, discounts,
         shipment_base, shipped, ship_stores },
     )
@@ -684,6 +698,80 @@ pub async fn save_files(
             .into_response());
     }
     Ok(back(id))
+}
+
+/// Ручной резерв («Зарезервировать») и снятие резерва («Снять резерв»): весь заказ или одна
+/// позиция (поле `line`).
+async fn change_reserve(
+    state: AppState,
+    user: Access,
+    id: i64,
+    form: HashMap<String, String>,
+    reserve: bool,
+) -> AppResult<Response> {
+    require_orders(&user)?;
+    let line: Option<i64> = form.get("line").and_then(|v| v.trim().parse().ok());
+    let mut tx = state.db.begin().await?;
+    let shipped: Option<bool> = sqlx::query_scalar(
+        "SELECT coalesce((SELECT deducted FROM shipments WHERE order_id = o.id ORDER BY id LIMIT 1), false)
+         FROM orders o WHERE o.id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(shipped) = shipped else {
+        return Err(AppError::NotFound);
+    };
+    if shipped {
+        drop(tx);
+        return Ok(card(
+            &state,
+            user,
+            id,
+            Some("Заказ отгружен — резервы не меняются".into()),
+            None,
+        )
+        .await?
+        .into_response());
+    }
+    let warnings = match (reserve, line) {
+        (true, Some(l)) => stock::reserve::reserve_line(&mut tx, id, l, Some(user.user.id)).await?,
+        (true, None) => stock::reserve::reserve_lines(&mut tx, id, Some(user.user.id)).await?,
+        (false, Some(l)) => {
+            stock::reserve::release_line(&mut tx, id, l).await?;
+            Vec::new()
+        }
+        (false, None) => {
+            stock::reserve::release_lines(&mut tx, id).await?;
+            Vec::new()
+        }
+    };
+    tx.commit().await?;
+    if warnings.is_empty() {
+        Ok(back(id))
+    } else {
+        Ok(card(&state, user, id, None, Some(warnings.join("; ")))
+            .await?
+            .into_response())
+    }
+}
+
+pub async fn reserve(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+    Form(form): Form<HashMap<String, String>>,
+) -> AppResult<Response> {
+    change_reserve(state, user, id, form, true).await
+}
+
+pub async fn unreserve(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+    Form(form): Form<HashMap<String, String>>,
+) -> AppResult<Response> {
+    change_reserve(state, user, id, form, false).await
 }
 
 /// Склады позиций из формы отгрузки: `store_<позиция>` = склад (пусто — выбор снят).
@@ -1129,6 +1217,137 @@ mod tests {
             .unwrap();
         assert!(deducted);
         assert_eq!((amount(1).await, amount(2).await), (5.0, 3.0));
+    }
+
+    async fn reserved(db: &sqlx::PgPool, order: i64) -> Vec<(i64, f64)> {
+        sqlx::query_as(
+            "SELECT r.cart_item_id, r.quantity::float8 FROM basket_reservations r
+             JOIN cart_items c ON c.id = r.cart_item_id WHERE c.order_id = $1 ORDER BY 1",
+        )
+        .bind(order)
+        .fetch_all(db)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn card_shows_reserve_and_stores(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        sqlx::query(
+            "INSERT INTO catalog_stores (id, name, active) VALUES (2, 'Склад закрытый', FALSE)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let id = place_order(&db, &f, None).await;
+        let line: i64 = sqlx::query_scalar("SELECT id FROM cart_items WHERE order_id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(reserved(&db, id).await, vec![(line, 1.0)]);
+        sqlx::query("UPDATE cart_items SET store_id = 1 WHERE id = $1")
+            .bind(line)
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (_, html) =
+            crate::smoke_tests::get(&app, &format!("/admin/shop/orders/{id}"), &cookie).await;
+        assert!(html.contains("<th>Резерв</th>"), "{html}");
+        assert!(
+            html.contains("<td>1.0</td>\n        <td>1.0</td>"),
+            "{html}"
+        );
+        // Выбран склад позиции; неактивный склад в выборе отгрузки не предлагается
+        let select = html
+            .split(&format!(r#"name="store_{line}""#))
+            .nth(1)
+            .unwrap();
+        let select = select.split("</select>").next().unwrap();
+        assert!(select.contains(r#"value="1" selected"#), "{select}");
+        assert!(!select.contains("Склад закрытый"), "{select}");
+        assert!(html.contains(r#"name="deducted" value="Y""#), "{html}");
+    }
+
+    #[sqlx::test]
+    async fn manual_unreserve_and_reserve(db: sqlx::PgPool) {
+        use crate::smoke_tests::post_form;
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let line: i64 = sqlx::query_scalar("SELECT id FROM cart_items WHERE order_id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let base = format!("/admin/shop/orders/{id}");
+        let (status, _) = post_form(&app, &format!("{base}/unreserve"), &cookie, "").await;
+        assert!(status.is_redirection());
+        assert!(reserved(&db, id).await.is_empty());
+        let (status, _) = post_form(&app, &format!("{base}/reserve"), &cookie, "").await;
+        assert!(status.is_redirection());
+        assert_eq!(reserved(&db, id).await, vec![(line, 1.0)]);
+        // Одна позиция
+        let (status, _) = post_form(
+            &app,
+            &format!("{base}/unreserve"),
+            &cookie,
+            &format!("line={line}"),
+        )
+        .await;
+        assert!(status.is_redirection());
+        assert!(reserved(&db, id).await.is_empty());
+        let (status, _) = post_form(
+            &app,
+            &format!("{base}/reserve"),
+            &cookie,
+            &format!("line={line}"),
+        )
+        .await;
+        assert!(status.is_redirection());
+        assert_eq!(reserved(&db, id).await, vec![(line, 1.0)]);
+        // Чужая позиция заказ не затрагивает
+        let (status, _) =
+            post_form(&app, &format!("{base}/unreserve"), &cookie, "line=999999").await;
+        assert!(status.is_redirection());
+        assert_eq!(reserved(&db, id).await, vec![(line, 1.0)]);
+    }
+
+    #[sqlx::test]
+    async fn card_shipped_locks_stores(db: sqlx::PgPool) {
+        use crate::smoke_tests::post_form;
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let line: i64 = sqlx::query_scalar("SELECT id FROM cart_items WHERE order_id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let path = format!("/admin/shop/orders/{id}");
+        let page = || async {
+            let (_, html) = crate::smoke_tests::get(&app, &path, &cookie).await;
+            html.split(&format!(r#"name="store_{line}""#))
+                .nth(1)
+                .unwrap()
+                .split('>')
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        assert!(!page().await.contains("disabled"));
+        let body = format!("deducted=on&store_{line}=1");
+        let (status, html) = post_form(&app, &format!("{path}/shipment"), &cookie, &body).await;
+        assert!(status.is_redirection(), "{html}");
+        assert!(page().await.contains("disabled"));
+        // Отгруженный заказ: резервы вручную не меняются
+        let (status, html) = post_form(&app, &format!("{path}/reserve"), &cookie, "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("Заказ отгружен"), "{html}");
     }
 
     #[sqlx::test]

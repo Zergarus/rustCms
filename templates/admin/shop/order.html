@@ -111,6 +111,28 @@
 </form>
 
 <div class="card table-wrap">
+  <h2>Резервы</h2>
+  <table>
+    <thead><tr><th>Товар</th><th>Кол-во</th><th>Резерв</th><th></th></tr></thead>
+    <tbody>
+      {% for i in order.items %}
+      <tr>
+        <td>{{ i.name }}</td>
+        <td>{{ i.quantity }}</td>
+        <td>{{ reserves[i.id|string] or 0 }}</td>
+        <td>
+          <form method="post" action="/admin/shop/orders/{{ order.id }}/reserve" style="display:inline"><input type="hidden" name="line" value="{{ i.id }}"><button class="btn" type="submit" {% if shipped %}disabled{% endif %}>Зарезервировать</button></form>
+          <form method="post" action="/admin/shop/orders/{{ order.id }}/unreserve" style="display:inline"><input type="hidden" name="line" value="{{ i.id }}"><button class="btn" type="submit" {% if shipped %}disabled{% endif %}>Снять резерв</button></form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/admin/shop/orders/{{ order.id }}/reserve" style="display:inline"><button class="btn" type="submit" {% if shipped %}disabled{% endif %}>Зарезервировать весь заказ</button></form>
+  <form method="post" action="/admin/shop/orders/{{ order.id }}/unreserve" style="display:inline"><button class="btn" type="submit" {% if shipped %}disabled{% endif %}>Снять все резервы</button></form>
+</div>
+
+<div class="card table-wrap">
   <h2>Скидки</h2>
   {% if discounts %}
   <table>
@@ -165,7 +187,7 @@
     <label class="check"><input type="checkbox" name="allow_delivery" value="Y" {% if order.shipment.allow_delivery %}checked{% endif %}> Доставка разрешена</label>
     <label class="check"><input type="checkbox" name="deducted" value="Y" {% if shipped %}checked{% endif %}> Отгружено</label>
   </div>
-  {% if store_list %}
+  {% if active_stores %}
   <table>
     <thead><tr><th>Товар</th><th>Количество</th><th>Склад отгрузки</th></tr></thead>
     <tbody>
@@ -174,7 +196,7 @@
       <tr>
         <td>{{ i.name }}</td>
         <td>{{ i.quantity }}</td>
-        <td><select name="store_{{ i.id }}" {% if shipped %}disabled{% endif %}><option value="">—</option>{% for st in store_list %}<option value="{{ st[0] }}" {% if chosen == st[0] %}selected{% endif %}>{{ st[1] }}</option>{% endfor %}</select></td>
+        <td><select name="store_{{ i.id }}" {% if shipped %}disabled{% endif %}><option value="">—</option>{% for st in active_stores %}<option value="{{ st[0] }}" {% if chosen == st[0] %}selected{% endif %}>{{ st[1] }}</option>{% endfor %}</select></td>
       </tr>
     {% endfor %}
     </tbody>

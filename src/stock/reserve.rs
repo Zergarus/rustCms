@@ -108,7 +108,7 @@ pub async fn sync(tx: &mut PgConnection, order_id: i64, event: Event) -> sqlx::R
         release_lines(tx, order_id).await?;
         Vec::new()
     } else if condition_met(s.condition, &state) {
-        adjust(tx, order_id, None, &s, true).await?
+        adjust(tx, order_id, None, None, &s, true).await?
     } else if matches!(
         s.condition,
         Condition::OnPay | Condition::OnFullPay | Condition::OnAllowDelivery
@@ -116,7 +116,7 @@ pub async fn sync(tx: &mut PgConnection, order_id: i64, event: Event) -> sqlx::R
         release_lines(tx, order_id).await?;
         Vec::new()
     } else {
-        adjust(tx, order_id, None, &s, false).await?
+        adjust(tx, order_id, None, None, &s, false).await?
     };
     for w in &warnings {
         sqlx::query(
@@ -142,16 +142,40 @@ pub async fn reserve_lines(
     if !s.reservation {
         return Ok(Vec::new());
     }
-    adjust(tx, order_id, user, &s, true).await
+    adjust(tx, order_id, None, user, &s, true).await
+}
+
+/// То же для одной позиции заказа.
+pub async fn reserve_line(
+    tx: &mut PgConnection,
+    order_id: i64,
+    line: i64,
+    user: Option<i64>,
+) -> sqlx::Result<Vec<String>> {
+    let s = settings(&mut *tx).await?;
+    if !s.reservation {
+        return Ok(Vec::new());
+    }
+    adjust(tx, order_id, Some(line), user, &s, true).await
 }
 
 /// Снимает все резервы позиций заказа.
 pub async fn release_lines(tx: &mut PgConnection, order_id: i64) -> sqlx::Result<()> {
+    release(tx, order_id, None).await
+}
+
+/// Снимает резервы одной позиции заказа.
+pub async fn release_line(tx: &mut PgConnection, order_id: i64, line: i64) -> sqlx::Result<()> {
+    release(tx, order_id, Some(line)).await
+}
+
+async fn release(tx: &mut PgConnection, order_id: i64, line: Option<i64>) -> sqlx::Result<()> {
     let items: Vec<i64> = sqlx::query_scalar(
         "SELECT r.item_id FROM basket_reservations r JOIN cart_items c ON c.id = r.cart_item_id
-         WHERE c.order_id = $1",
+         WHERE c.order_id = $1 AND ($2::bigint IS NULL OR c.id = $2)",
     )
     .bind(order_id)
+    .bind(line)
     .fetch_all(&mut *tx)
     .await?;
     if items.is_empty() {
@@ -160,9 +184,11 @@ pub async fn release_lines(tx: &mut PgConnection, order_id: i64) -> sqlx::Result
     catalog::load_locked(tx, &items).await?;
     sqlx::query(
         "DELETE FROM basket_reservations
-         WHERE cart_item_id IN (SELECT id FROM cart_items WHERE order_id = $1)",
+         WHERE cart_item_id IN (SELECT id FROM cart_items
+                                WHERE order_id = $1 AND ($2::bigint IS NULL OR id = $2))",
     )
     .bind(order_id)
+    .bind(line)
     .execute(&mut *tx)
     .await?;
     Ok(())
@@ -229,15 +255,17 @@ async fn set_quantity(tx: &mut PgConnection, r: &Reservation, quantity: f64) -> 
 async fn adjust(
     tx: &mut PgConnection,
     order_id: i64,
+    only_line: Option<i64>,
     user: Option<i64>,
     s: &Settings,
     top_up: bool,
 ) -> sqlx::Result<Vec<String>> {
     let lines: Vec<Line> = sqlx::query_as(
         "SELECT id, item_id, store_id, quantity::float8 AS quantity, name FROM cart_items
-         WHERE order_id = $1 ORDER BY id",
+         WHERE order_id = $1 AND ($2::bigint IS NULL OR id = $2) ORDER BY id",
     )
     .bind(order_id)
+    .bind(only_line)
     .fetch_all(&mut *tx)
     .await?;
     let ids: Vec<i64> = lines.iter().map(|l| l.id).collect();
