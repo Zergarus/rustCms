@@ -392,6 +392,11 @@ async fn save(
     .bind(r.amount)
     .execute(&state.db)
     .await?;
+    // У базовой валюты номинал и курс всегда 1 (как в Битриксе)
+    sqlx::query("UPDATE currencies SET amount = 1, amount_cnt = 1 WHERE code = $1 AND base")
+        .bind(&c.code)
+        .execute(&state.db)
+        .await?;
     let mut conn = state.db.acquire().await?;
     if form.base.is_some() {
         currency::set_base_currency(&mut conn, &c.code).await?;
@@ -613,5 +618,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[sqlx::test]
+    async fn base_currency_amount_stays_one(db: sqlx::PgPool) {
+        seed_usd(&db, None).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let body = format!("{FMT}&sort=100&amount_cnt=2&amount=5");
+        let (s, _) = post_form(&app, "/admin/shop/currencies/RUB", &cookie, &body).await;
+        assert!(s.is_redirection(), "{s}");
+        let (cnt, amount): (i32, f64) =
+            sqlx::query_as("SELECT amount_cnt, amount::float8 FROM currencies WHERE code = 'RUB'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!((cnt, amount), (1, 1.0));
     }
 }
