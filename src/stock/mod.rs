@@ -3,6 +3,8 @@
 //! Счётчики резервов (`quantity_reserved` товара и склада, `quantity` товара) ведёт триггер
 //! `basket_reservations_counters`; здесь — пересчёт доступного по остаткам складов.
 
+pub mod documents;
+
 use std::collections::HashMap;
 
 use sqlx::PgConnection;
