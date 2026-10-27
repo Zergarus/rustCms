@@ -14,7 +14,14 @@
   </div>
   <div class="grid-3">
     <label>Цена<input name="price" inputmode="decimal" value="{{ form.price }}"></label>
+    {% if currencies %}
+    <label>Валюта<select name="currency">
+      {% if form.currency and form.currency not in currencies %}<option value="{{ form.currency }}" selected>{{ form.currency }}</option>{% endif %}
+      {% for c in currencies %}<option value="{{ c }}" {% if c == form.currency %}selected{% endif %}>{{ c }}</option>{% endfor %}
+    </select></label>
+    {% else %}
     <label>Валюта<input name="currency" value="{{ form.currency }}" maxlength="3"></label>
+    {% endif %}
     <label>Сортировка<input name="sort" type="number" value="{{ form.sort }}"></label>
   </div>
   <div class="grid-2">

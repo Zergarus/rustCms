@@ -131,10 +131,14 @@ async fn form_page(
         sqlx::query_as("SELECT id, name, active FROM catalog_stores ORDER BY sort, id")
             .fetch_all(&state.db)
             .await?;
+    let currencies: Vec<String> =
+        sqlx::query_scalar("SELECT code FROM currencies ORDER BY sort, code")
+            .fetch_all(&state.db)
+            .await?;
     render(
         state,
         "shop/delivery_form.html",
-        context! { user, id, form, error, stores },
+        context! { user, id, form, error, stores, currencies },
     )
 }
 
@@ -146,7 +150,7 @@ pub async fn new_form(
     let form = DeliveryForm {
         sort: "100".into(),
         price: "0".into(),
-        currency: "RUB".into(),
+        currency: crate::currency::site_currency(&mut *state.db.acquire().await?).await?,
         active: Some("on".into()),
         public: Some("on".into()),
         ..Default::default()
@@ -202,7 +206,16 @@ async fn save(
     id: Option<i64>,
     form: DeliveryForm,
 ) -> AppResult<Response> {
-    let input = match form.validate() {
+    let known: Vec<String> = sqlx::query_scalar("SELECT code FROM currencies")
+        .fetch_all(&state.db)
+        .await?;
+    let input = match form.validate().and_then(|i| {
+        if known.is_empty() || known.contains(&i.currency) {
+            Ok(i)
+        } else {
+            Err(format!("Неизвестная валюта {}", i.currency))
+        }
+    }) {
         Ok(i) => i,
         Err(e) => {
             return Ok(form_page(state, user, id, form, Some(e))
@@ -311,5 +324,48 @@ mod tests {
             form("-1").validate().unwrap_err(),
             "Цена — число не меньше нуля"
         );
+    }
+
+    #[sqlx::test]
+    async fn delivery_currency_from_list(db: sqlx::PgPool) {
+        use crate::{
+            smoke_tests::{get, post_form},
+            test_support::{admin_cookie, seed_usd, test_state},
+        };
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        // Справочник пуст — поле ввода, по умолчанию RUB
+        let (_, html) = get(&app, "/admin/shop/deliveries/new", &cookie).await;
+        assert!(
+            html.contains("<input name=\"currency\" value=\"RUB\""),
+            "{html}"
+        );
+        seed_usd(&db, None).await;
+        let (_, html) = get(&app, "/admin/shop/deliveries/new", &cookie).await;
+        assert!(html.contains("<select name=\"currency\""), "{html}");
+        assert!(html.contains("<option value=\"USD\""), "{html}");
+        let (s, _) = post_form(
+            &app,
+            "/admin/shop/deliveries",
+            &cookie,
+            "name=Курьер&price=5&currency=USD&sort=1",
+        )
+        .await;
+        assert!(s.is_redirection(), "{s}");
+        let code: String =
+            sqlx::query_scalar("SELECT currency FROM deliveries WHERE name = 'Курьер'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(code, "USD");
+        let (s, html) = post_form(
+            &app,
+            "/admin/shop/deliveries",
+            &cookie,
+            "name=Почта&price=5&currency=ZZZ&sort=1",
+        )
+        .await;
+        assert_eq!(s, axum::http::StatusCode::OK);
+        assert!(html.contains("Неизвестная валюта ZZZ"), "{html}");
     }
 }

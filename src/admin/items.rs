@@ -280,6 +280,10 @@ struct CollectionContext {
 struct CatalogContext {
     /// (id, название)
     price_types: Vec<(i64, String)>,
+    /// Коды валют справочника (пусто — выбор не показывается)
+    currencies: Vec<String>,
+    /// Валюта сайта — по умолчанию у новой цены
+    site_currency: String,
     /// (id, название, активен)
     stores: Vec<(i64, String, bool)>,
 }
@@ -299,7 +303,12 @@ pub(super) fn purchase_input_from_form(
             .ok()
     };
     let mut prices = Vec::new();
+    let mut currencies = Vec::new();
     for t in price_types {
+        let code = form.get(&format!("currency_{t}")).trim().to_uppercase();
+        if !code.is_empty() {
+            currencies.push((*t, code));
+        }
         let raw = form.get(&format!("price_{t}"));
         if raw.is_empty() {
             prices.push((*t, None));
@@ -338,6 +347,7 @@ pub(super) fn purchase_input_from_form(
     };
     Ok(PurchaseInput {
         prices,
+        currencies,
         amounts,
         quantity,
         available: form.0.contains_key("available"),
@@ -345,6 +355,28 @@ pub(super) fn purchase_input_from_form(
         quantity_trace: flag("quantity_trace"),
         can_buy_zero: flag("can_buy_zero"),
     })
+}
+
+/// Валюты цен из формы должны быть в справочнике (пустой справочник — не проверяется).
+pub(super) async fn check_price_currencies(
+    db: &sqlx::PgPool,
+    input: &PurchaseInput,
+) -> sqlx::Result<Result<(), String>> {
+    if input.currencies.is_empty() {
+        return Ok(Ok(()));
+    }
+    let known: Vec<String> = sqlx::query_scalar("SELECT code FROM currencies")
+        .fetch_all(db)
+        .await?;
+    if known.is_empty() {
+        return Ok(Ok(()));
+    }
+    Ok(
+        match input.currencies.iter().find(|(_, c)| !known.contains(c)) {
+            Some((_, c)) => Err(format!("Неизвестная валюта {c}")),
+            None => Ok(()),
+        },
+    )
 }
 
 /// Текущие цены, остатки и флаги товара — в поля формы.
@@ -391,6 +423,7 @@ async fn purchase_to_form(state: &AppState, item_id: i64, form: &mut FormValues)
             form.set(&key, text);
         } else {
             form.set(&format!("price_{}", p.type_id), p.price.to_string());
+            form.set(&format!("currency_{}", p.type_id), p.currency.clone());
         }
     }
     let stock: Option<(f64, f64)> = sqlx::query_as(
@@ -420,7 +453,12 @@ async fn load_collection(state: &AppState, id: i64) -> AppResult<CollectionConte
         .await?
         .ok_or(AppError::NotFound)?;
     let catalog = if collection.is_catalog {
+        let site_currency = crate::currency::site_currency(&mut *state.db.acquire().await?).await?;
         Some(CatalogContext {
+            currencies: sqlx::query_scalar("SELECT code FROM currencies ORDER BY sort, code")
+                .fetch_all(&state.db)
+                .await?,
+            site_currency,
             price_types: sqlx::query_as(
                 "SELECT id, name FROM catalog_price_types ORDER BY sort, id",
             )
@@ -827,7 +865,13 @@ async fn save(
                 .filter(|t| !tiered.contains(t))
                 .collect();
             let stores: Vec<i64> = c.stores.iter().map(|s| s.0).collect();
-            Some(purchase_input_from_form(&form, &types, &stores))
+            let mut input = purchase_input_from_form(&form, &types, &stores);
+            if let Ok(p) = &input
+                && let Err(e) = check_price_currencies(&state.db, p).await?
+            {
+                input = Err(e);
+            }
+            Some(input)
         }
         None => None,
     };
@@ -1147,5 +1191,88 @@ mod tests {
         assert_eq!(form.all("prop_photos"), ["2", "11"]);
         assert_eq!(form.all("prop_doc"), ["12"]);
         assert!(form.all("prop_unknown").is_empty());
+    }
+
+    #[sqlx::test]
+    async fn item_price_currency_saved(db: sqlx::PgPool) {
+        use crate::{
+            smoke_tests::{get, post_multipart},
+            test_support::{admin_cookie, content_fixture, seed_usd, test_state},
+        };
+        let c = content_fixture(&db).await;
+        sqlx::query("UPDATE collections SET is_catalog = TRUE WHERE id = $1")
+            .bind(c.collection_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO catalog_price_types (id, code, name, is_base, sort) VALUES (1, 'BASE', 'Розница', TRUE, 100)")
+            .execute(&db)
+            .await
+            .unwrap();
+        seed_usd(&db, None).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let path = format!("/admin/items/{}", c.item_id);
+        let currency = || {
+            let db = db.clone();
+            let id = c.item_id;
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT currency FROM catalog_prices WHERE item_id = $1 AND price_type_id = 1",
+                )
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            }
+        };
+        let base = [("name", "Первая новость"), ("sort", "500")];
+        // Валюта из формы
+        let mut fields = base.to_vec();
+        fields.extend([("price_1", "10"), ("currency_1", "USD")]);
+        let (s, _) = post_multipart(&app, &path, &cookie, &fields).await;
+        assert_eq!(s, axum::http::StatusCode::SEE_OTHER);
+        assert_eq!(currency().await, "USD");
+        // Форма показывает select с выбранной валютой
+        let (_, html) = get(&app, &path, &cookie).await;
+        assert!(html.contains("<select name=\"currency_1\""), "{html}");
+        assert!(html.contains("<option value=\"USD\" selected>"), "{html}");
+        // Без поля валюты прежняя сохраняется
+        let mut fields = base.to_vec();
+        fields.push(("price_1", "11"));
+        post_multipart(&app, &path, &cookie, &fields).await;
+        assert_eq!(currency().await, "USD");
+        // Новая цена без валюты — валюта сайта
+        sqlx::query("DELETE FROM catalog_prices WHERE item_id = $1")
+            .bind(c.item_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO currencies (code) VALUES ('EUR')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO options (module, name, value) VALUES ('sale', 'default_currency', 'EUR')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        post_multipart(&app, &path, &cookie, &fields).await;
+        assert_eq!(currency().await, "EUR");
+        // Неизвестная валюта — ошибка формы, цена не меняется
+        let mut fields = base.to_vec();
+        fields.extend([("price_1", "99"), ("currency_1", "ZZZ")]);
+        let (s, html) = post_multipart(&app, &path, &cookie, &fields).await;
+        assert_eq!(s, axum::http::StatusCode::OK);
+        assert!(html.contains("Неизвестная валюта ZZZ"), "{html}");
+        let price: f64 = sqlx::query_scalar(
+            "SELECT price::float8 FROM catalog_prices WHERE item_id = $1 AND price_type_id = 1",
+        )
+        .bind(c.item_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(price, 11.0);
     }
 }

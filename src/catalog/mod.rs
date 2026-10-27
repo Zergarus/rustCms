@@ -271,6 +271,8 @@ pub fn tiered_price_types(prices: &[Price]) -> HashSet<i64> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PurchaseInput {
     pub prices: Vec<(i64, Option<f64>)>,
+    /// Валюта цены по типу цены из формы (`currency_<тип>`); нет — прежняя, затем валюта сайта.
+    pub currencies: Vec<(i64, String)>,
     pub amounts: Vec<(i64, f64)>,
     /// Общий остаток (`QUANTITY`); `None` — сумма остатков по складам.
     pub quantity: Option<f64>,
@@ -307,13 +309,9 @@ pub async fn save_purchase_in(
     item_id: i64,
     input: &PurchaseInput,
 ) -> sqlx::Result<()> {
-    let default_currency: String = sqlx::query_scalar(
-        "SELECT COALESCE((SELECT code FROM currencies ORDER BY code = 'RUB' DESC, code LIMIT 1), 'RUB')",
-    )
-    .fetch_one(&mut *tx)
-    .await?;
+    let default_currency = crate::currency::site_currency(&mut *tx).await?;
     for (type_id, value) in &input.prices {
-        // Валюта прежней цены сохраняется
+        // Валюта: из формы, иначе прежней цены, иначе валюта сайта
         let old: Option<String> = sqlx::query_scalar(
             "DELETE FROM catalog_prices WHERE item_id = $1 AND price_type_id = $2 RETURNING currency",
         )
@@ -323,6 +321,11 @@ pub async fn save_purchase_in(
         .await?
         .into_iter()
         .next();
+        let chosen = input
+            .currencies
+            .iter()
+            .find(|(t, _)| t == type_id)
+            .map(|(_, c)| c.clone());
         if let Some(price) = value {
             sqlx::query(
                 "INSERT INTO catalog_prices (item_id, price_type_id, price, currency) VALUES ($1, $2, $3, $4)",
@@ -330,7 +333,11 @@ pub async fn save_purchase_in(
             .bind(item_id)
             .bind(type_id)
             .bind(price)
-            .bind(old.unwrap_or_else(|| default_currency.clone()))
+            .bind(
+                chosen
+                    .or(old)
+                    .unwrap_or_else(|| default_currency.clone()),
+            )
             .execute(&mut *tx)
             .await?;
         }

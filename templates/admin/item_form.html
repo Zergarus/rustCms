@@ -151,7 +151,16 @@
         {% if form['tiered_' ~ t[0]] %}
         <label>{{ t[1] }}<input value="{{ form['tiered_' ~ t[0]] }}" readonly><small>Цены с диапазонами по количеству здесь не меняются</small></label>
         {% else %}
+        {% if catalog.currencies %}
+        {% set cur = form['currency_' ~ t[0]] or catalog.site_currency %}
+        <label>{{ t[1] }}<span style="display:flex;gap:.5rem"><input name="price_{{ t[0] }}" inputmode="decimal" value="{{ form['price_' ~ t[0]] }}" placeholder="нет цены">
+          <select name="currency_{{ t[0] }}" aria-label="Валюта">
+            {% if cur not in catalog.currencies %}<option value="{{ cur }}" selected>{{ cur }}</option>{% endif %}
+            {% for c in catalog.currencies %}<option value="{{ c }}" {% if c == cur %}selected{% endif %}>{{ c }}</option>{% endfor %}
+          </select></span></label>
+        {% else %}
         <label>{{ t[1] }}<input name="price_{{ t[0] }}" inputmode="decimal" value="{{ form['price_' ~ t[0]] }}" placeholder="нет цены"></label>
+        {% endif %}
         {% endif %}
         {% endfor %}
       </div>
