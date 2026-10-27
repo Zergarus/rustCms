@@ -7,8 +7,16 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use sqlx::{PgConnection, PgPool};
 
-use super::stock::{self, StockChange, StockLine, apply};
-use crate::{catalog, collection::sku::ItemProp, discount::engine::Applied};
+use super::stock::StockLine;
+use crate::{
+    catalog,
+    collection::sku::ItemProp,
+    discount::engine::Applied,
+    stock::{
+        StockError,
+        reserve::{self, Event},
+    },
+};
 
 /// Значение свойства заказа (флаги — из справочника свойств, если он ещё есть).
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -127,8 +135,6 @@ pub struct NewOrder {
     /// (id платёжки, название)
     pub payment: (i64, String),
     pub items: Vec<NewItem>,
-    /// Списание остатков.
-    pub stock: Vec<StockChange>,
     /// Сработавшие правила — в `order_discounts`.
     pub discounts: Vec<Applied>,
     /// Применённые купоны (id) — отмечаются использованными.
@@ -184,13 +190,14 @@ impl From<sqlx::Error> for CreateError {
 
 /// Записывает заказ в транзакции вызывающего; позиции корзины становятся позициями заказа.
 /// Позиция должна быть ещё в корзине этого покупателя и с тем же количеством — иначе
-/// [`CreateError::BasketChanged`] (транзакцию вызывающий откатывает).
+/// [`CreateError::BasketChanged`] (транзакцию вызывающий откатывает). Резервы — по условию
+/// (`reserve::sync`).
 pub async fn create(tx: &mut PgConnection, o: &NewOrder) -> Result<i64, CreateError> {
     let total = round2(o.goods_price + o.delivery_price);
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO orders (user_id, person_type_id, status, goods_price, delivery_price, price,
                              currency, user_comment, stock_deducted)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE) RETURNING id",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE) RETURNING id",
     )
     .bind(o.user_id)
     .bind(o.person_type_id)
@@ -269,7 +276,7 @@ pub async fn create(tx: &mut PgConnection, o: &NewOrder) -> Result<i64, CreateEr
             return Err(CreateError::BasketChanged);
         }
     }
-    apply(tx, &o.stock).await?;
+    reserve::sync(tx, id, Event::Created).await?;
     write_order_discounts(tx, id, &o.discounts).await?;
     crate::discount::repo::consume_coupons(tx, &o.coupons).await?;
     sqlx::query("DELETE FROM buyer_coupons WHERE buyer_id = $1")
@@ -494,14 +501,15 @@ pub async fn set_paid_in(tx: &mut PgConnection, order_id: i64, paid: bool) -> sq
         .bind(paid)
         .execute(&mut *tx)
         .await?;
+        reserve::sync(tx, order_id, Event::PaidChanged).await?;
     }
     Ok(changed)
 }
 
 /// Оплата заказа по его оплатам: оплачен, когда оплаты есть и оплачены все (сами оплаты не
-/// меняются). Возвращает новое значение, если оно изменилось.
+/// меняются). Возвращает новое значение, если оно изменилось (тогда пересчитываются резервы).
 pub async fn sync_paid_in(tx: &mut PgConnection, order_id: i64) -> sqlx::Result<Option<bool>> {
-    sqlx::query_scalar(
+    let changed: Option<bool> = sqlx::query_scalar(
         "WITH p AS (
              SELECT EXISTS (SELECT 1 FROM payments WHERE order_id = $1)
                     AND NOT EXISTS (SELECT 1 FROM payments WHERE order_id = $1 AND NOT paid) AS paid
@@ -513,7 +521,11 @@ pub async fn sync_paid_in(tx: &mut PgConnection, order_id: i64) -> sqlx::Result<
     )
     .bind(order_id)
     .fetch_optional(&mut *tx)
-    .await
+    .await?;
+    if changed.is_some() {
+        reserve::sync(tx, order_id, Event::PaidChanged).await?;
+    }
+    Ok(changed)
 }
 
 /// Пересчитывает суммы заказа по позициям: товары, доставка (`None` — прежняя), итог; цена
@@ -753,14 +765,14 @@ pub async fn traced_locked(
         .collect())
 }
 
-/// Отмена (возврат остатков) или снятие отмены (повторное списание). `false` — уже так;
-/// `stock_deducted` не даёт вернуть или списать дважды.
+/// Отмена (резервы снимаются) или снятие отмены (резервы по условию). `false` — уже так.
+/// Заказ с отгруженной основной отгрузкой не отменяется: «Некоторые товары уже отгружены».
 pub async fn set_canceled(
     db: &PgPool,
     order_id: i64,
     canceled: bool,
     reason: &str,
-) -> sqlx::Result<bool> {
+) -> Result<bool, StockError> {
     let mut tx = db.begin().await?;
     let changed = set_canceled_in(&mut tx, order_id, canceled, reason).await?;
     tx.commit().await?;
@@ -773,40 +785,43 @@ pub async fn set_canceled_in(
     order_id: i64,
     canceled: bool,
     reason: &str,
-) -> sqlx::Result<bool> {
-    let Some((was, deducted)): Option<(bool, bool)> =
-        sqlx::query_as("SELECT canceled, stock_deducted FROM orders WHERE id = $1 FOR UPDATE")
-            .bind(order_id)
-            .fetch_optional(&mut *tx)
-            .await?
+) -> Result<bool, StockError> {
+    let Some((was, shipped)): Option<(bool, bool)> = sqlx::query_as(
+        "SELECT canceled, COALESCE((SELECT deducted FROM shipments
+                                    WHERE id = (SELECT min(id) FROM shipments WHERE order_id = o.id)),
+                                   FALSE)
+         FROM orders o WHERE id = $1 FOR UPDATE",
+    )
+    .bind(order_id)
+    .fetch_optional(&mut *tx)
+    .await?
     else {
         return Ok(false);
     };
     if was == canceled {
         return Ok(false);
     }
-    let lines = stock_lines(tx, order_id).await?;
-    let traced = traced_locked(tx, &lines).await?;
-    let deducted = if canceled && deducted {
-        apply(tx, &stock::plan(&lines, &[], &traced)).await?;
-        false
-    } else if !canceled && !deducted {
-        apply(tx, &stock::plan(&[], &lines, &traced)).await?;
-        true
-    } else {
-        deducted
-    };
+    if canceled && shipped {
+        return Err(StockError::Rejected(vec![
+            "Некоторые товары уже отгружены".into(),
+        ]));
+    }
     sqlx::query(
         "UPDATE orders SET canceled = $2, canceled_at = CASE WHEN $2 THEN now() END,
-             cancel_reason = CASE WHEN $2 THEN $3 ELSE '' END, stock_deducted = $4, updated_at = now()
+             cancel_reason = CASE WHEN $2 THEN $3 ELSE '' END, updated_at = now()
          WHERE id = $1",
     )
     .bind(order_id)
     .bind(canceled)
     .bind(reason)
-    .bind(deducted)
     .execute(&mut *tx)
     .await?;
+    let event = if canceled {
+        Event::Canceled
+    } else {
+        Event::Uncanceled
+    };
+    reserve::sync(tx, order_id, event).await?;
     Ok(true)
 }
 
@@ -947,6 +962,7 @@ pub async fn set_shipment(
             .bind(order_id)
             .execute(&mut *tx)
             .await?;
+        reserve::sync(&mut tx, order_id, Event::AllowDeliveryChanged).await?;
     }
     tx.commit().await?;
     Ok(done)
@@ -994,17 +1010,9 @@ mod tests {
     use sqlx::PgPool;
 
     use super::*;
-    use crate::{
-        sale::stock::{StockLine, plan},
-        test_support::{amounts, order_fixture, place_order},
-    };
+    use crate::test_support::{amounts, order_fixture, place_order};
 
     fn new_order(f: &crate::test_support::Fixture, quantity: f64) -> NewOrder {
-        let lines = [StockLine {
-            product_id: f.product_id,
-            store_id: Some(1),
-            quantity,
-        }];
         NewOrder {
             user_id: None,
             buyer_id: f.buyer_id,
@@ -1019,7 +1027,6 @@ mod tests {
             payment: (1, "QR".into()),
             delivery_base_price: 0.0,
             items: vec![NewItem::plain(f.item_id, quantity, 100.0, "Товар")],
-            stock: plan(&[], &lines, &[f.product_id].into_iter().collect()),
             discounts: Vec::new(),
             coupons: Vec::new(),
         }
@@ -1041,7 +1048,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(orders, 1);
-        assert_eq!(amounts(&db, f.product_id).await, (9.0, 4.0));
+        // Остаток склада не меняется — товар зарезервирован, доступное уменьшено
+        assert_eq!(amounts(&db, f.product_id).await, (9.0, 5.0));
+        let reserved: f64 = sqlx::query_scalar(
+            "SELECT quantity_reserved::float8 FROM catalog_products WHERE item_id = $1",
+        )
+        .bind(f.product_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(reserved, 1.0);
     }
 
     #[sqlx::test]
@@ -1087,7 +1103,8 @@ mod tests {
         assert!(set_canceled_in(&mut tx, id, true, "тест").await.unwrap());
         tx.rollback().await.unwrap();
         assert_eq!(state(db.clone()).await, before);
-        assert_eq!(amounts(&db, f.product_id).await, (10.0, 5.0));
+        // Резерв оформления (1 шт.) остался: отмена откатилась
+        assert_eq!(amounts(&db, f.product_id).await, (9.0, 5.0));
 
         // Пул-варианты работают как прежде
         assert!(set_status(&db, id, "P", None, "").await.unwrap());

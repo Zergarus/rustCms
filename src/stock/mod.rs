@@ -4,6 +4,7 @@
 //! `basket_reservations_counters`; здесь — пересчёт доступного по остаткам складов.
 
 pub mod documents;
+pub mod reserve;
 
 use std::collections::HashMap;
 
@@ -368,13 +369,8 @@ mod tests {
     #[sqlx::test]
     async fn deleting_reserved_order_releases(db: PgPool) {
         let f = order_fixture(&db).await;
+        // Оформление ставит резерв 1 шт.
         let order = place_order(&db, &f, None).await;
-        let cart_item: i64 = sqlx::query_scalar("SELECT id FROM cart_items WHERE order_id = $1")
-            .bind(order)
-            .fetch_one(&db)
-            .await
-            .unwrap();
-        reserve(&db, cart_item, f.product_id, None, 1.0).await;
         assert_eq!(quantity(&db, f.product_id).await, 9.0);
         sqlx::query("DELETE FROM orders WHERE id = $1")
             .bind(order)

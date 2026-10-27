@@ -13,6 +13,7 @@ use super::apply::{
 use super::document::PayOperation;
 use super::parse::{DocumentIn, ItemKind};
 use crate::sale::repo::{recalc_totals_in, sync_paid_in};
+use crate::stock::reserve::{self, Event};
 
 /// Реквизиты документов оплаты и отгрузки (`lang/ru/component.php` компонента обмена).
 const TRAIT_PAID: &str = "Оплачен";
@@ -228,8 +229,13 @@ pub(super) async fn apply_payment(
             stats.payments_created += 1;
         }
     }
-    if sync_paid_in(tx, order_id).await? == Some(true) {
-        stats.notify.push(("SALE_ORDER_PAID".into(), order_id));
+    match sync_paid_in(tx, order_id).await? {
+        Some(true) => stats.notify.push(("SALE_ORDER_PAID".into(), order_id)),
+        Some(false) => {}
+        // Оплата заказа та же, но оплаченные оплаты могли появиться или пропасть (условие «R»)
+        None => {
+            reserve::sync(tx, order_id, Event::PaidChanged).await?;
+        }
     }
     Ok(Some(order_id))
 }
@@ -445,6 +451,9 @@ pub(super) async fn apply_shipment(
     .await?;
     if totals {
         sync_delivery(tx, order_id).await?;
+    }
+    if allow.is_some() {
+        reserve::sync(tx, order_id, Event::AllowDeliveryChanged).await?;
     }
 
     // Заказ отгружен целиком — «Статус при отгрузке» (кроме финального F)

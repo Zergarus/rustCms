@@ -80,15 +80,27 @@ pub async fn amounts(db: &PgPool, product_id: i64) -> (f64, f64) {
 }
 
 /// Заказ из новой позиции (1 шт., без склада — позиция фикстуры на складе 1 остаётся в корзине)
-/// покупателя фикстуры: самовывоз 1, платёжка 1,
-/// без списания остатков.
+/// покупателя фикстуры: самовывоз 1, платёжка 1; резерв — по условию (по умолчанию ставится).
 pub async fn place_order(db: &PgPool, f: &Fixture, user_id: Option<i64>) -> i64 {
+    place_order_with(db, f, user_id, None, 1.0).await
+}
+
+/// [`place_order`] с позицией на складе `store` в количестве `quantity` (наличие не проверяется).
+pub async fn place_order_with(
+    db: &PgPool,
+    f: &Fixture,
+    user_id: Option<i64>,
+    store: Option<i64>,
+    quantity: f64,
+) -> i64 {
     use crate::sale::repo::{NewOrder, create};
     let item_id: i64 = sqlx::query_scalar(
-        "INSERT INTO cart_items (buyer_id, item_id, store_id, quantity, name) VALUES ($1, $2, NULL, 1, 'Товар') RETURNING id",
+        "INSERT INTO cart_items (buyer_id, item_id, store_id, quantity, name) VALUES ($1, $2, $3, $4, 'Товар') RETURNING id",
     )
     .bind(f.buyer_id)
     .bind(f.product_id)
+    .bind(store)
+    .bind(quantity)
     .fetch_one(db)
     .await
     .unwrap();
@@ -98,7 +110,7 @@ pub async fn place_order(db: &PgPool, f: &Fixture, user_id: Option<i64>) -> i64 
         person_type_id: f.person_type_id,
         status: "N".into(),
         currency: "RUB".into(),
-        goods_price: 100.0,
+        goods_price: 100.0 * quantity,
         delivery_price: 0.0,
         user_comment: String::new(),
         properties: Vec::new(),
@@ -107,11 +119,10 @@ pub async fn place_order(db: &PgPool, f: &Fixture, user_id: Option<i64>) -> i64 
         delivery_base_price: 0.0,
         items: vec![crate::sale::repo::NewItem::plain(
             item_id,
-            1.0,
+            quantity,
             100.0,
             "Товар",
         )],
-        stock: Vec::new(),
         discounts: Vec::new(),
         coupons: Vec::new(),
     };

@@ -2466,7 +2466,6 @@ async fn offer_order(db: &PgPool, app: &Router, offer: i64) -> i64 {
             900.0,
             "Масло ATF (4 л)",
         )],
-        stock: Vec::new(),
         discounts: Vec::new(),
         coupons: Vec::new(),
     };

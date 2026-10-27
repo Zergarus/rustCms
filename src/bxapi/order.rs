@@ -412,11 +412,6 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         e.message = message;
         return Err(fail(e));
     }
-    let traced: HashSet<i64> = info
-        .iter()
-        .filter(|(_, i)| i.quantity_trace)
-        .map(|(id, _)| *id)
-        .collect();
     let order_ctx = OrderCtx {
         person_type_id: Some(person_type),
         pay_system_id: Some(payment.id),
@@ -480,7 +475,6 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         payment: (payment.id, payment.name.clone()),
         delivery_base_price: delivery.price,
         items: order_items,
-        stock: stock::plan(&[], &lines, &traced),
         discounts: pricing.applied,
         coupons: pricing.coupons,
     };

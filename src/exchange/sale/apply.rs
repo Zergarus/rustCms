@@ -16,10 +16,8 @@ use super::parse::{AgentIn, DocumentIn, ItemIn, ItemKind, Operation, SaleFile};
 use super::settings::{CONTRAGENT_CODES, MapEntry, MapSource, SaleSettings};
 use super::{apply_docs, mark_exchange};
 use crate::bxapi::project::OrderImportHook;
-use crate::sale::repo::{
-    recalc_totals_in, set_canceled_in, set_status_in, stock_lines, traced_locked,
-};
-use crate::sale::stock::{self, StockLine};
+use crate::sale::repo::{recalc_totals_in, set_canceled_in, set_status_in};
+use crate::stock::reserve::{self, Event};
 
 /// Реквизит документа со статусом заказа (`CC_BSC1_1C_STATUS_ID`).
 const TRAIT_STATUS: &str = "Статуса заказа ИД";
@@ -465,18 +463,13 @@ pub(super) async fn plan_basket(
     Ok(plan)
 }
 
-/// Применяет план; остатки — через `stock::plan`, если заказ их списал. Суммы не пересчитывает.
+/// Применяет план и пересчитывает резервы по новому составу. Суммы не пересчитывает.
 pub(super) async fn apply_basket(
     ctx: &Ctx<'_>,
     tx: &mut PgConnection,
     id: i64,
     plan: &BasketPlan,
 ) -> anyhow::Result<()> {
-    let deducted: bool = sqlx::query_scalar("SELECT stock_deducted FROM orders WHERE id = $1")
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
-    let before = stock_lines(tx, id).await?;
     sqlx::query("DELETE FROM cart_items WHERE id = ANY($1)")
         .bind(&plan.removed)
         .execute(&mut *tx)
@@ -496,12 +489,7 @@ pub(super) async fn apply_basket(
     for (product_id, name, quantity, price) in &plan.inserts {
         insert_line(ctx, tx, id, *product_id, name, *quantity, *price).await?;
     }
-    if deducted {
-        let after = stock_lines(tx, id).await?;
-        let all: Vec<StockLine> = before.iter().chain(&after).cloned().collect();
-        let traced = traced_locked(tx, &all).await?;
-        stock::apply(tx, &stock::plan(&before, &after, &traced)).await?;
-    }
+    reserve::sync(tx, id, Event::Edited).await?;
     Ok(())
 }
 
@@ -667,7 +655,7 @@ async fn create_order(
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO orders (user_id, person_type_id, status, delivery_price, stock_deducted,
                              id_1c, version_1c, external, updated_1c)
-         VALUES ($1, $2, $3, $4, TRUE, $5, $6, TRUE, TRUE) RETURNING id",
+         VALUES ($1, $2, $3, $4, FALSE, $5, $6, TRUE, TRUE) RETURNING id",
     )
     .bind(user_id)
     .bind(person_type)
@@ -690,9 +678,6 @@ async fn create_order(
     for (product_id, name, quantity, price) in &lines {
         insert_line(ctx, tx, id, *product_id, name, *quantity, *price).await?;
     }
-    let after = stock_lines(tx, id).await?;
-    let traced = traced_locked(tx, &after).await?;
-    stock::apply(tx, &stock::plan(&[], &after, &traced)).await?;
 
     write_properties(ctx, tx, id, person_type, agent).await?;
 
@@ -718,6 +703,7 @@ async fn create_order(
         stats.shipments_created += 1;
     }
     recalc_totals_in(tx, id, None).await?;
+    reserve::sync(tx, id, Event::Created).await?;
     Ok(id)
 }
 
@@ -1017,7 +1003,8 @@ mod tests {
         let f = fixture(&db).await;
         let id = place_order(&db, &f, None).await;
         let s = SaleSettings::default();
-        assert_eq!(amounts(&db, f.product_id).await, (10.0, 5.0));
+        // Резерв оформления: доступное уменьшено, остаток склада прежний
+        assert_eq!(amounts(&db, f.product_id).await, (9.0, 5.0));
         let stats = run(
             &db,
             &s,
@@ -1026,7 +1013,7 @@ mod tests {
         .await;
         assert_eq!(stats.errors, Vec::<String>::new());
         assert!(status(&db, id).await.3);
-        assert_eq!(amounts(&db, f.product_id).await, (11.0, 5.0));
+        assert_eq!(amounts(&db, f.product_id).await, (10.0, 5.0));
         // Документ без реквизита «Отменен» отмену не снимает
         run(&db, &s, &file(vec![doc(&id.to_string(), "2", &[])])).await;
         assert!(status(&db, id).await.3);
@@ -1037,7 +1024,7 @@ mod tests {
         )
         .await;
         assert!(!status(&db, id).await.3);
-        assert_eq!(amounts(&db, f.product_id).await, (10.0, 5.0));
+        assert_eq!(amounts(&db, f.product_id).await, (9.0, 5.0));
     }
 
     #[sqlx::test]
@@ -1049,7 +1036,8 @@ mod tests {
         let stats = run(&db, &SaleSettings::default(), &file(vec![d])).await;
         assert_eq!(stats.errors, Vec::<String>::new());
         assert!(status(&db, id).await.3);
-        assert_eq!(amounts(&db, f.product_id).await, (11.0, 5.0));
+        // Отмена сняла резерв оформления
+        assert_eq!(amounts(&db, f.product_id).await, (10.0, 5.0));
     }
 
     #[sqlx::test]
@@ -1116,7 +1104,7 @@ mod tests {
         .unwrap()
     }
 
-    /// Заказ из товара фикстуры (1 × 100) и второго товара (1 × 50, остаток не списывался).
+    /// Заказ из товара фикстуры (1 × 100) и второго товара (1 × 50); оба зарезервированы.
     async fn two_line_order(db: &PgPool, f: &Fixture) -> (i64, i64) {
         let id = place_order(db, f, None).await;
         let second = product(db, "p2-1c").await;
@@ -1128,6 +1116,9 @@ mod tests {
         .execute(db)
         .await
         .unwrap();
+        let mut tx = db.begin().await.unwrap();
+        reserve::sync(&mut tx, id, Event::Edited).await.unwrap();
+        tx.commit().await.unwrap();
         (id, second)
     }
 
@@ -1153,9 +1144,9 @@ mod tests {
             vec![(f.product_id, 3.0, 90.0, true), (third, 2.0, 30.0, true)]
         );
         assert_eq!(totals(&db, id).await, (330.0, 250.0, 580.0, 580.0, 250.0));
-        // Остатки: +2 товара фикстуры, второй вернулся, третий списан
-        assert_eq!(quantity(&db, f.product_id).await, 8.0);
-        assert_eq!(quantity(&db, second).await, 11.0);
+        // Резервы по новому составу: товар фикстуры 3 шт., второй снят, третий 2 шт.
+        assert_eq!(quantity(&db, f.product_id).await, 7.0);
+        assert_eq!(quantity(&db, second).await, 10.0);
         assert_eq!(quantity(&db, third).await, 8.0);
         let name: String = sqlx::query_scalar("SELECT name FROM cart_items WHERE item_id = $1")
             .bind(third)
@@ -1164,6 +1155,35 @@ mod tests {
             .unwrap();
         assert_eq!(name, "Товар p3-1c");
         assert!(status(&db, id).await.2);
+    }
+
+    /// Количество позиции из 1С — резерв по новому количеству.
+    #[sqlx::test]
+    async fn exchange_basket_edit_adjusts_reserve(db: PgPool) {
+        let f = fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let reserved = || async {
+            sqlx::query_scalar::<_, f64>(
+                "SELECT COALESCE(sum(r.quantity), 0)::float8 FROM basket_reservations r
+                 JOIN cart_items c ON c.id = r.cart_item_id WHERE c.order_id = $1",
+            )
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        assert_eq!(reserved().await, 1.0);
+        let mut d = doc(&id.to_string(), "1", &[]);
+        d.items = vec![item("tovar-1c", 100.0, 4.0)];
+        let stats = run(&db, &SaleSettings::default(), &file(vec![d.clone()])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(reserved().await, 4.0);
+        assert_eq!(amounts(&db, f.product_id).await, (6.0, 5.0));
+        d.version = "2".into();
+        d.items = vec![item("tovar-1c", 100.0, 2.0)];
+        run(&db, &SaleSettings::default(), &file(vec![d])).await;
+        assert_eq!(reserved().await, 2.0);
+        assert_eq!(amounts(&db, f.product_id).await, (8.0, 5.0));
     }
 
     #[sqlx::test]
@@ -1691,6 +1711,40 @@ mod tests {
             .unwrap()
     }
 
+    /// Условие «R»: оплата одной из двух оплат из 1С ставит резерв, снятие — снимает.
+    #[sqlx::test]
+    async fn payment_from_1c_reserves_on_pay(db: PgPool) {
+        let f = fixture(&db).await;
+        sqlx::query(
+            "INSERT INTO options (module, name, value) VALUES ('sale', 'product_reserve_condition', 'R')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let id = place_order(&db, &f, None).await;
+        assert_eq!(quantity(&db, f.product_id).await, 10.0);
+        sqlx::query("INSERT INTO payments (order_id, name, sum) VALUES ($1, 'Вторая', 50)")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let p = first_payment(&db, id).await;
+        let paid = with(
+            pay_doc(&p.to_string(), id, "1", PayOperation::Cash),
+            &[("Оплачен", "true")],
+        );
+        let stats = run(&db, &SaleSettings::default(), &file(vec![paid])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(quantity(&db, f.product_id).await, 9.0);
+        let unpaid = with(
+            pay_doc(&p.to_string(), id, "2", PayOperation::Cash),
+            &[("Отменен", "true")],
+        );
+        let stats = run(&db, &SaleSettings::default(), &file(vec![unpaid])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert_eq!(quantity(&db, f.product_id).await, 10.0);
+    }
+
     async fn first_shipment(db: &PgPool, order: i64) -> i64 {
         sqlx::query_scalar("SELECT min(id) FROM shipments WHERE order_id = $1")
             .bind(order)
@@ -2154,8 +2208,8 @@ mod tests {
             stats.notify,
             vec![("SALE_STATUS_CHANGED_S".to_string(), id)]
         );
-        // Отгрузка остатки не списывает
-        assert_eq!(amounts(&db, f.product_id).await, (10.0, 5.0));
+        // Отгрузка остатки не списывает: резерв оформления остаётся, склад прежний
+        assert_eq!(amounts(&db, f.product_id).await, (9.0, 5.0));
 
         // Удаление отгруженной — ошибка
         let del = DocumentIn {
@@ -2206,7 +2260,7 @@ mod tests {
             stats.notify,
             vec![("SALE_STATUS_CHANGED_S".to_string(), id)]
         );
-        assert_eq!(amounts(&db, f.product_id).await, (10.0, 5.0));
+        assert_eq!(amounts(&db, f.product_id).await, (9.0, 5.0));
 
         // Дата реквизита важнее даты документа
         let other = place_order(&db, &f, None).await;
@@ -2291,7 +2345,8 @@ mod tests {
         let stats = run(&db, &SaleSettings::default(), &file(vec![d])).await;
         assert_eq!(stats.errors, Vec::<String>::new());
         assert_eq!(lines(&db, id).await, vec![(f.product_id, 3.0, 100.0, true)]);
-        assert_eq!(quantity(&db, f.product_id).await, 8.0);
+        // Резерв по новому количеству
+        assert_eq!(quantity(&db, f.product_id).await, 7.0);
         assert_eq!(shipment(&db, sh).await.8, 250.0);
         assert_eq!(totals(&db, id).await, (300.0, 250.0, 550.0, 550.0, 250.0));
 
@@ -2499,7 +2554,8 @@ mod tests {
             lines(&db, id).await,
             vec![(f.product_id, 1.0, 100.0, false)]
         );
-        assert_eq!(amounts(&db, f.product_id).await, (10.0, 5.0));
+        // Остаётся только резерв оформления
+        assert_eq!(amounts(&db, f.product_id).await, (9.0, 5.0));
     }
 
     #[sqlx::test]

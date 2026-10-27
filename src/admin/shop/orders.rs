@@ -22,6 +22,7 @@ use crate::{
     files,
     sale::{self, OrderProperty, mail, repo, validate::validate_properties},
     state::AppState,
+    stock::StockError,
 };
 
 const PER_PAGE: i64 = 50;
@@ -542,10 +543,21 @@ pub async fn set_canceled(
 ) -> AppResult<Response> {
     require_orders(&user)?;
     let cancel = form.value == "Y";
-    if repo::set_canceled(&state.db, id, cancel, form.reason.trim()).await? && cancel {
-        send(&state, "SALE_ORDER_CANCEL".into(), id);
+    match repo::set_canceled(&state.db, id, cancel, form.reason.trim()).await {
+        Ok(changed) => {
+            if changed && cancel {
+                send(&state, "SALE_ORDER_CANCEL".into(), id);
+            }
+            Ok(back(id))
+        }
+        // Отгруженный заказ не отменяется — ошибка в карточке
+        Err(StockError::Rejected(messages)) => {
+            Ok(card(&state, user, id, Some(messages.join("; ")), None)
+                .await?
+                .into_response())
+        }
+        Err(StockError::Db(e)) => Err(e.into()),
     }
-    Ok(back(id))
 }
 
 /// «Пересчитать скидки»: текущие правила к позициям заказа (правка состава скидки не

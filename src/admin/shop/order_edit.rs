@@ -1,6 +1,6 @@
-//! Правка состава заказа: позиции, склад, цена, доставка, оплата; остатки — на разницу.
+//! Правка состава заказа: позиции, склад, цена, доставка, оплата; резервы — по новому составу.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use axum::{
     Extension,
@@ -19,9 +19,10 @@ use crate::{
     error::{AppError, AppResult},
     sale::{
         repo::stock_lines,
-        stock::{self, StockChange, StockLine},
+        stock::{self, StockLine},
     },
     state::AppState,
+    stock::reserve::{self, Event},
 };
 
 /// Позиция в форме состава; `item_id` нет — добавленный товар.
@@ -128,20 +129,6 @@ pub fn totals(c: &Composition) -> (f64, f64, f64) {
     (goods, c.delivery_price, round2(goods + c.delivery_price))
 }
 
-/// Изменения остатков при правке; у отменённого заказа (остатки не списаны) — никаких.
-pub fn stock_changes_for_edit(
-    canceled: bool,
-    before: &[StockLine],
-    after: &[StockLine],
-    traced: &HashSet<i64>,
-) -> Vec<StockChange> {
-    if canceled {
-        Vec::new()
-    } else {
-        stock::plan(before, after, traced)
-    }
-}
-
 /// Что проверять по остаткам при правке: только товары на складах, где количество
 /// выросло (нетронутые позиции, в том числе удалённых из каталога товаров, не проверяются).
 pub fn lines_to_check(before: &[StockLine], after: &[StockLine]) -> Vec<StockLine> {
@@ -200,8 +187,8 @@ pub async fn save_composition(
     };
 
     let mut tx = db.begin().await?;
-    let (updated_at, canceled, deducted, currency): (DateTime<Utc>, bool, bool, String) = sqlx::query_as(
-        "SELECT updated_at, canceled, stock_deducted, currency FROM orders WHERE id = $1 FOR UPDATE",
+    let (updated_at, canceled, currency): (DateTime<Utc>, bool, String) = sqlx::query_as(
+        "SELECT updated_at, canceled, currency FROM orders WHERE id = $1 FOR UPDATE",
     )
     .bind(order_id)
     .fetch_one(&mut *tx)
@@ -231,11 +218,6 @@ pub async fn save_composition(
     let mut info = catalog::load_locked(&mut tx, &all).await?;
     // Цены новых позиций — в валюте заказа
     crate::currency::convert_info(&mut tx, &currency, &mut info).await?;
-    let traced: HashSet<i64> = info
-        .iter()
-        .filter(|(_, p)| p.quantity_trace)
-        .map(|(id, _)| *id)
-        .collect();
     // Новые позиции: название и текущая основная цена
     for line in lines.iter_mut().filter(|l| l.item_id.is_none()) {
         let Some(product) = info.get(&line.product_id) else {
@@ -261,14 +243,21 @@ pub async fn save_composition(
             quantity: l.quantity,
         })
         .collect();
-    let keeps_stock = canceled || !deducted;
-    if !keeps_stock {
-        // Проверка против остатка с учётом того, что уже списано по заказу
-        for l in &before {
-            if let Some(p) = info.get_mut(&l.product_id) {
-                p.total += l.quantity;
-                if let Some(store) = l.store_id {
-                    *p.amounts.entry(store).or_insert(0.0) += l.quantity;
+    if !canceled {
+        // Проверка против доступного с учётом резерва этого заказа (товар, склад резерва)
+        let reserved: Vec<(i64, Option<i64>, f64)> = sqlx::query_as(
+            "SELECT r.item_id, r.store_id, sum(r.quantity)::float8 FROM basket_reservations r
+             JOIN cart_items c ON c.id = r.cart_item_id
+             WHERE c.order_id = $1 GROUP BY r.item_id, r.store_id",
+        )
+        .bind(order_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for (product, store, quantity) in reserved {
+            if let Some(p) = info.get_mut(&product) {
+                p.total += quantity;
+                if let Some(store) = store {
+                    *p.amounts.entry(store).or_insert(0.0) += quantity;
                 }
             }
         }
@@ -356,11 +345,7 @@ pub async fn save_composition(
     .bind(total)
     .execute(&mut *tx)
     .await?;
-    stock::apply(
-        &mut tx,
-        &stock_changes_for_edit(keeps_stock, &before, &after, &traced),
-    )
-    .await?;
+    reserve::sync(&mut tx, order_id, Event::Edited).await?;
     tx.commit().await?;
     Ok(Ok(()))
 }
@@ -407,7 +392,6 @@ pub async fn save_items(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sale::stock::plan;
 
     fn edit(id: i64, quantity: f64, price: f64) -> EditLine {
         EditLine {
@@ -529,26 +513,6 @@ mod tests {
             vec![l(1, Some(5), 3.0), l(2, Some(6), 1.0)]
         );
         assert!(lines_to_check(&after, &before).is_empty());
-    }
-
-    #[test]
-    fn edit_canceled_keeps_stock() {
-        let traced = HashSet::from([1]);
-        let before = [StockLine {
-            product_id: 1,
-            store_id: Some(5),
-            quantity: 2.0,
-        }];
-        let after = [StockLine {
-            product_id: 1,
-            store_id: Some(5),
-            quantity: 3.0,
-        }];
-        assert!(stock_changes_for_edit(true, &before, &after, &traced).is_empty());
-        assert_eq!(
-            stock_changes_for_edit(false, &before, &after, &traced),
-            plan(&before, &after, &traced)
-        );
     }
 
     /// Правка в админке скидки не пересчитывает: своя цена — без скидки, только количество —
@@ -689,5 +653,106 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(price, 1000.0);
+    }
+
+    /// Правка позиций пересчитывает резервы: уменьшение, удаление, добавление.
+    #[sqlx::test]
+    async fn edit_lines_adjusts_reserve(db: sqlx::PgPool) {
+        use crate::test_support::{order_fixture, place_order_with};
+        let f = order_fixture(&db).await;
+        let reserves = || async {
+            sqlx::query_as::<_, (Option<i64>, f64)>(
+                "SELECT r.store_id, r.quantity::float8 FROM basket_reservations r
+                 JOIN cart_items c ON c.id = r.cart_item_id ORDER BY r.id",
+            )
+            .fetch_all(&db)
+            .await
+            .unwrap()
+        };
+        let quantity = || async {
+            sqlx::query_scalar::<_, f64>(
+                "SELECT quantity::float8 FROM catalog_products WHERE item_id = $1",
+            )
+            .bind(f.product_id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        for sql in [
+            "INSERT INTO deliveries (id, name) VALUES (1, 'Самовывоз')",
+            "INSERT INTO pay_systems (id, name) VALUES (1, 'QR')",
+        ] {
+            sqlx::query(sql).execute(&db).await.unwrap();
+        }
+        let id = place_order_with(&db, &f, None, None, 2.0).await;
+        // Вторая позиция того же товара
+        let second: i64 = sqlx::query_scalar(
+            "INSERT INTO cart_items (buyer_id, item_id, quantity, name, price, order_id)
+             VALUES ($1, $2, 1, 'Товар', 100, $3) RETURNING id",
+        )
+        .bind(f.buyer_id)
+        .bind(f.product_id)
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let mut tx = db.begin().await.unwrap();
+        reserve::sync(&mut tx, id, Event::Edited).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(reserves().await, [(None, 2.0), (None, 1.0)]);
+        assert_eq!(quantity().await, 7.0);
+        let first: i64 = sqlx::query_scalar("SELECT min(id) FROM cart_items WHERE order_id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let line = |item: Option<i64>, quantity: f64| EditLine {
+            item_id: item,
+            product_id: f.product_id,
+            store_id: None,
+            quantity,
+            price: 100.0,
+            custom_price: false,
+            name: "Товар".into(),
+        };
+        let save = |lines: Vec<EditLine>| {
+            let db = db.clone();
+            async move {
+                let at: chrono::DateTime<chrono::Utc> =
+                    sqlx::query_scalar("SELECT updated_at FROM orders WHERE id = $1")
+                        .bind(id)
+                        .fetch_one(&db)
+                        .await
+                        .unwrap();
+                let c = Composition {
+                    lines,
+                    delivery_id: 1,
+                    delivery_price: 0.0,
+                    pay_system_id: 1,
+                };
+                assert_eq!(
+                    save_composition(&db, id, &c, &version(&at)).await.unwrap(),
+                    Ok(())
+                );
+            }
+        };
+        // 2 → 1
+        save(vec![line(Some(first), 1.0), line(Some(second), 1.0)]).await;
+        assert_eq!(reserves().await, [(None, 1.0), (None, 1.0)]);
+        assert_eq!(quantity().await, 8.0);
+        // Удаление позиции — её резерв снят
+        save(vec![line(Some(first), 1.0)]).await;
+        assert_eq!(reserves().await, [(None, 1.0)]);
+        assert_eq!(quantity().await, 9.0);
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM cart_items WHERE order_id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(left, 1);
+        // Новая позиция — новый резерв
+        save(vec![line(Some(first), 1.0), line(None, 1.0)]).await;
+        assert_eq!(reserves().await, [(None, 1.0), (None, 1.0)]);
+        assert_eq!(quantity().await, 8.0);
     }
 }
