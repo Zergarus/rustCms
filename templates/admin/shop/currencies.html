@@ -8,15 +8,33 @@
   <h1>Валюты <span class="muted count">{{ items|length }}</span></h1>
   <a class="btn primary" href="/admin/shop/currencies/new">Добавить валюту</a>
 </div>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<form class="card form" method="post" action="/admin/shop/currencies/site">
+  <label>Валюта сайта
+    <select name="currency">
+      {% for c in items %}<option value="{{ c.code }}" {% if c.code == site %}selected{% endif %}>{{ c.code }}{% if c.full_name %} — {{ c.full_name }}{% endif %}</option>{% endfor %}
+    </select>
+  </label>
+  <div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
+</form>
 <div class="card table-wrap">
   <table>
-    <thead><tr><th>Код</th><th>Формат</th><th>Знаков</th></tr></thead>
+    <thead><tr><th>Код</th><th>Название</th><th>Сортировка</th><th>Курс по умолчанию</th><th>Текущий курс</th><th>Формат</th><th>Знаков</th><th></th></tr></thead>
     <tbody>
       {% for c in items %}
       <tr>
-        <td><a href="/admin/shop/currencies/{{ c.code }}">{{ c.code }}</a></td>
+        <td><a href="/admin/shop/currencies/{{ c.code }}">{{ c.code }}</a>{% if c.base %} <span class="muted">базовая</span>{% endif %}{% if c.code == site %} <span class="muted">валюта сайта</span>{% endif %}</td>
+        <td>{{ c.full_name }}</td>
+        <td>{{ c.sort }}</td>
+        <td>{{ c.amount_cnt }} = {{ c.amount }}</td>
+        <td>{{ c.current_base_rate }}</td>
         <td><code>{{ c.format_string }}</code></td>
         <td>{{ c.decimals }}</td>
+        <td>
+          <form method="post" action="/admin/shop/currencies/{{ c.code }}/delete" onsubmit="return confirm('Удалить валюту {{ c.code }}?')">
+            <button class="btn" type="submit">Удалить</button>
+          </form>
+        </td>
       </tr>
       {% endfor %}
     </tbody>

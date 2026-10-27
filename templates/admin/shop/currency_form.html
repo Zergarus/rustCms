@@ -9,7 +9,7 @@
 <form class="card form" method="post" action="{% if code %}/admin/shop/currencies/{{ code }}{% else %}/admin/shop/currencies{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}
   <div class="grid-3">
-    <label>Код *<input name="code" value="{{ form.code }}" maxlength="3" required></label>
+    <label>Код *<input name="code" value="{{ form.code }}" maxlength="3" required {% if code %}readonly{% endif %}></label>
     <label>Формат *<input name="format_string" value="{{ form.format_string }}"><small># — место числа, например <code># &amp;#8381;</code></small></label>
     <label>Знаков после запятой<input name="decimals" type="number" min="0" max="4" value="{{ form.decimals }}"></label>
   </div>
@@ -17,6 +17,16 @@
     <label>Десятичный разделитель<input name="dec_point" value="{{ form.dec_point }}"></label>
     <label>Разделитель тысяч<input name="thousands_sep" value="{{ form.thousands_sep }}"><small>Неразрывный пробел — <code>&amp;nbsp;</code></small></label>
     <label class="check"><input type="checkbox" name="hide_zero" {% if form.hide_zero %}checked{% endif %}> Скрывать нулевые копейки</label>
+  </div>
+  <div class="grid-3">
+    <label>Название<input name="full_name" value="{{ form.full_name }}"></label>
+    <label>Цифровой код<input name="numcode" value="{{ form.numcode }}" maxlength="3"></label>
+    <label>Сортировка<input name="sort" type="number" value="{{ form.sort }}"></label>
+  </div>
+  <div class="grid-3">
+    <label>Номинал *<input name="amount_cnt" type="number" min="1" value="{{ form.amount_cnt }}"></label>
+    <label>Курс по умолчанию *<input name="amount" value="{{ form.amount }}"><small>К базовой валюте; для базовой всегда 1</small></label>
+    <label class="check"><input type="checkbox" name="base" {% if form.base %}checked{% endif %}> Базовая валюта</label>
   </div>
   <p class="muted">Пример: {{ sample|safe }}</p>
   <div class="form-actions">

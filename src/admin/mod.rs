@@ -218,6 +218,11 @@ pub fn router(state: AppState) -> Router<AppState> {
             get(shop::currencies::list).post(shop::currencies::create),
         )
         .route("/shop/currencies/new", get(shop::currencies::new_form))
+        .route("/shop/currencies/site", post(shop::currencies::set_site))
+        .route(
+            "/shop/currencies/{code}/delete",
+            post(shop::currencies::delete),
+        )
         .route(
             "/shop/currencies/{code}",
             get(shop::currencies::edit_form).post(shop::currencies::update),
