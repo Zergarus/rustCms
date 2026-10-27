@@ -236,6 +236,7 @@ async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
     };
 
     currency::auto::spawn(state.clone());
+    stock::cleaner::spawn(state.clone());
     let app = app(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&state.config.bind_addr)

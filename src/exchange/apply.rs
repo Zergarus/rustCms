@@ -1913,7 +1913,8 @@ async fn write_amount(
     Ok(())
 }
 
-/// Общее количество записи; строка товарных данных создаётся при необходимости.
+/// Общее количество записи за вычетом резерва (как `CIBlockCMLImport` Битрикса); строка
+/// товарных данных создаётся при необходимости.
 async fn write_quantity(
     conn: &mut PgConnection,
     item_id: i64,
@@ -1922,8 +1923,9 @@ async fn write_quantity(
     sqlx::query(
         "INSERT INTO catalog_products (item_id, quantity)
          VALUES ($1, round($2::float8::numeric, 2))
-         ON CONFLICT (item_id) DO UPDATE SET quantity = EXCLUDED.quantity
-         WHERE catalog_products.quantity <> EXCLUDED.quantity",
+         ON CONFLICT (item_id) DO UPDATE
+         SET quantity = EXCLUDED.quantity - catalog_products.quantity_reserved
+         WHERE catalog_products.quantity <> EXCLUDED.quantity - catalog_products.quantity_reserved",
     )
     .bind(item_id)
     .bind(quantity)
@@ -3645,6 +3647,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[sqlx::test]
+    async fn exchange_quantity_minus_reserve(db: PgPool) {
+        let settings = Settings::default();
+        let dirs = Dirs::new();
+        load_goods(&db, &settings, &dirs, &goods_package()).await;
+        // Резерв товара 2 (счётчик ведёт триггер резервов, здесь задан напрямую)
+        sqlx::query(
+            "INSERT INTO catalog_products (item_id, quantity_reserved)
+             SELECT id, 2 FROM collection_items WHERE xml_id = 'good-1'
+             ON CONFLICT (item_id) DO UPDATE SET quantity_reserved = 2",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let qty = |db: PgPool| async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT c.quantity::text FROM catalog_products c
+                 JOIN collection_items i ON i.id = c.item_id WHERE i.xml_id = 'good-1'",
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+
+        let mut p = rests_package();
+        {
+            let rests = p.offers.as_mut().unwrap().offers[0].rests.as_mut().unwrap();
+            rests[0].1 = 4.0;
+            rests[1].1 = 3.0;
+        }
+        run_in(&db, &settings, &dirs, &p).await.unwrap();
+        let amounts: Vec<String> = sqlx::query_scalar(
+            "SELECT amount::text FROM catalog_store_amounts a
+             JOIN catalog_stores s ON s.id = a.store_id ORDER BY s.xml_id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(amounts, ["4.00", "3.00"]);
+        assert_eq!(qty(db.clone()).await, "5.00");
+
+        // Без складов: общее количество 9
+        {
+            let offer = &mut p.offers.as_mut().unwrap().offers[0];
+            offer.rests = None;
+            offer.quantity = Some(9.0);
+        }
+        run_in(&db, &settings, &dirs, &p).await.unwrap();
+        assert_eq!(qty(db.clone()).await, "7.00");
     }
 
     #[sqlx::test]
