@@ -21,6 +21,8 @@ mod sale;
 #[cfg(test)]
 mod smoke_tests;
 mod state;
+#[allow(dead_code)] // документы, резервы и отгрузка подключают модуль в следующих задачах
+mod stock;
 #[cfg(test)]
 mod test_support;
 mod uploads;

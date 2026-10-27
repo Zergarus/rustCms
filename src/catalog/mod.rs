@@ -222,7 +222,7 @@ pub async fn load_on(
     let mut prices = load_prices_on(&mut *db, item_ids).await?;
     let mut amounts: HashMap<i64, HashMap<i64, f64>> = HashMap::new();
     for (element, store, amount) in sqlx::query_as::<_, (i64, i64, f64)>(
-        "SELECT item_id, store_id, amount::float8 FROM catalog_store_amounts WHERE item_id = ANY($1)",
+        "SELECT item_id, store_id, (amount - quantity_reserved)::float8 FROM catalog_store_amounts WHERE item_id = ANY($1)",
     )
     .bind(item_ids)
     .fetch_all(db)
