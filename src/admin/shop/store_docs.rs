@@ -38,6 +38,14 @@ pub struct ListQuery {
     doc_type: String,
     #[serde(default)]
     status: String,
+    #[serde(default)]
+    store: String,
+    #[serde(default)]
+    contractor: String,
+    #[serde(default)]
+    date_from: String,
+    #[serde(default)]
+    date_to: String,
 }
 
 #[derive(FromRow, Serialize)]
@@ -90,18 +98,42 @@ pub async fn list(
                 total::float8, currency, status::text
          FROM store_documents
          WHERE ($1::text IS NULL OR doc_type = $1) AND ($2::text IS NULL OR status = $2)
+           AND ($3::bigint IS NULL OR EXISTS (
+                SELECT 1 FROM store_document_items i
+                WHERE i.doc_id = store_documents.id AND ($3 IN (i.store_from, i.store_to))))
+           AND ($4::bigint IS NULL OR contractor_id = $4)
+           AND ($5::date IS NULL OR COALESCE(date_document, created_at)::date >= $5)
+           AND ($6::date IS NULL OR COALESCE(date_document, created_at)::date <= $6)
          ORDER BY date_document DESC, id DESC",
     )
     .bind(doc_type)
     .bind(status)
+    .bind(parse_id(&q.store))
+    .bind(parse_id(&q.contractor))
+    .bind(parse_date(&q.date_from, "").ok().flatten())
+    .bind(parse_date(&q.date_to, "").ok().flatten())
     .fetch_all(&state.db)
     .await?;
+    let stores: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, name FROM catalog_stores ORDER BY sort, id")
+            .fetch_all(&state.db)
+            .await?;
+    let stores: Vec<minijinja::Value> = stores
+        .into_iter()
+        .map(|(id, name)| context! { id, name })
+        .collect();
+    let contractors = contractor_options(&state).await?;
+    let (filter_store, filter_contractor) = (q.store.trim(), q.contractor.trim());
+    let (date_from, date_to) = (q.date_from.trim(), q.date_to.trim());
     let types = type_options();
     let (filter_type, filter_status) = (doc_type.unwrap_or(""), status.unwrap_or(""));
     Ok(render(
         &state,
         "shop/store_docs.html",
-        context! { user, items, types, filter_type, filter_status },
+        context! {
+            user, items, types, filter_type, filter_status, stores, contractors,
+            filter_store, filter_contractor, date_from, date_to,
+        },
     )?
     .into_response())
 }
@@ -283,6 +315,20 @@ async fn form_lines(state: &AppState, form: &DocForm) -> sqlx::Result<Vec<LineRo
     Ok(rows)
 }
 
+/// Все поставщики для выпадающих списков.
+async fn contractor_options(state: &AppState) -> sqlx::Result<Vec<minijinja::Value>> {
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, CASE WHEN person_type = 'C' THEN company ELSE person_name END
+         FROM contractors ORDER BY 2, id",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name)| context! { id, name })
+        .collect())
+}
+
 /// Форма документа: `id` — существующий (проведённый показывается только для чтения).
 async fn render_form(
     state: &AppState,
@@ -303,16 +349,7 @@ async fn render_form(
         .into_iter()
         .map(|(id, name)| context! { id, name })
         .collect();
-    let contractors: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT id, CASE WHEN person_type = 'C' THEN company ELSE person_name END
-         FROM contractors ORDER BY 2, id",
-    )
-    .fetch_all(&state.db)
-    .await?;
-    let contractors: Vec<minijinja::Value> = contractors
-        .into_iter()
-        .map(|(id, name)| context! { id, name })
-        .collect();
+    let contractors = contractor_options(state).await?;
     let type_code = doc_type.code();
     let type_name = doc_type.name();
     let uses_source = matches!(doc_type, DocType::Moving | DocType::Deduct);
@@ -697,6 +734,69 @@ mod tests {
         let (_, html) = get(&app, "/admin/shop/store-docs?status=Y", &cookie).await;
         assert!(html.contains("Приходная накладная #1"), "{html}");
         assert!(!html.contains("Списание #1"), "{html}");
+    }
+
+    #[sqlx::test]
+    async fn docs_list_filters_store_contractor_date(db: PgPool) {
+        let f = order_fixture(&db).await;
+        control(&db, true).await;
+        sqlx::query("INSERT INTO catalog_stores (id, name) VALUES (2, 'Второй')")
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let c = contractor(&db).await;
+        let other: i64 =
+            sqlx::query_scalar("INSERT INTO contractors (company) VALUES ('Другой') RETURNING id")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        // Приход на склад 1 от c (10.01), оприходование на склад 2 от other (20.01)
+        let a = arrival_body(f.product_id, Some(c)) + "&date_document=2026-01-10";
+        post_form(&app, "/admin/shop/store-docs", &cookie, &a).await;
+        let b = arrival_body(f.product_id, Some(other))
+            .replace("doc_type=A", "doc_type=S")
+            .replace("line_store_to%5B%5D=1", "line_store_to%5B%5D=2")
+            + "&date_document=2026-01-20";
+        post_form(&app, "/admin/shop/store-docs", &cookie, &b).await;
+        let url = |q: &str| format!("/admin/shop/store-docs?{q}");
+        let (_, h) = get(&app, &url("store=2"), &cookie).await;
+        assert!(
+            h.contains("Оприходование #1") && !h.contains("Приходная накладная #1"),
+            "{h}"
+        );
+        let (_, h) = get(&app, &url(&format!("contractor={c}")), &cookie).await;
+        assert!(
+            h.contains("Приходная накладная #1") && !h.contains("Оприходование #1"),
+            "{h}"
+        );
+        let (_, h) = get(&app, &url("date_from=2026-01-15"), &cookie).await;
+        assert!(
+            h.contains("Оприходование #1") && !h.contains("Приходная накладная #1"),
+            "{h}"
+        );
+        let (_, h) = get(&app, &url("date_to=2026-01-10"), &cookie).await;
+        assert!(
+            h.contains("Приходная накладная #1") && !h.contains("Оприходование #1"),
+            "{h}"
+        );
+        let (_, h) = get(
+            &app,
+            &url("date_from=2026-01-10&date_to=2026-01-20"),
+            &cookie,
+        )
+        .await;
+        assert!(
+            h.contains("Приходная накладная #1") && h.contains("Оприходование #1"),
+            "{h}"
+        );
+        // Значения фильтров сохраняются в форме
+        let (_, h) = get(&app, &url("store=2&date_from=2026-01-15"), &cookie).await;
+        assert!(
+            h.contains("value=\"2026-01-15\"") && h.contains("value=\"2\" selected"),
+            "{h}"
+        );
     }
 
     #[sqlx::test]

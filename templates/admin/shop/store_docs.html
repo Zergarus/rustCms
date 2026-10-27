@@ -32,6 +32,24 @@
         <option value="Y" {% if filter_status == "Y" %}selected{% endif %}>Проведён</option>
       </select>
     </label>
+  </div>
+  <div class="grid-3">
+    <label>Склад
+      <select name="store">
+        <option value="">Все</option>
+        {% for s in stores %}<option value="{{ s.id }}" {% if filter_store == s.id|string %}selected{% endif %}>{{ s.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Поставщик
+      <select name="contractor">
+        <option value="">Все</option>
+        {% for c in contractors %}<option value="{{ c.id }}" {% if filter_contractor == c.id|string %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
+      </select>
+    </label>
+  </div>
+  <div class="grid-3">
+    <label>Дата с<input type="date" name="date_from" value="{{ date_from }}"></label>
+    <label>Дата по<input type="date" name="date_to" value="{{ date_to }}"></label>
     <div class="form-actions"><button class="btn" type="submit">Показать</button></div>
   </div>
 </form>
