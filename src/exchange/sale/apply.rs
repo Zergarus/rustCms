@@ -2303,6 +2303,45 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn exchange_ship_not_main_warns(db: PgPool) {
+        let f = fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let sh = first_shipment(&db, id).await;
+        let second: i64 = sqlx::query_scalar(
+            "INSERT INTO shipments (order_id, delivery_id, delivery_name, price, base_price)
+             SELECT order_id, delivery_id, delivery_name, 0, 0 FROM shipments WHERE id = $1
+             RETURNING id",
+        )
+        .bind(sh)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let before = amounts(&db, f.product_id).await;
+        let d = with(
+            ship_doc(&second.to_string(), id, "1"),
+            &[("Отгружен", "true")],
+        );
+        let stats = run(&db, &SaleSettings::default(), &file(vec![d])).await;
+        // Документ применён, остатки не тронуты — предупреждение в итоге
+        assert_eq!(
+            stats.errors,
+            vec![format!(
+                "Документ ship-guid-{second}: Отгрузка не основная — остатки не списаны"
+            )]
+        );
+        assert!(shipment(&db, second).await.0);
+        assert!(!shipment(&db, sh).await.0);
+        assert_eq!(amounts(&db, f.product_id).await, before);
+        // Повторная отгруженная версия — уже отгружена, предупреждения нет
+        let d = with(
+            ship_doc(&second.to_string(), id, "2"),
+            &[("Отгружен", "true")],
+        );
+        let stats = run(&db, &SaleSettings::default(), &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+    }
+
+    #[sqlx::test]
     async fn exchange_ship_error_rejects_doc(db: PgPool) {
         let f = fixture(&db).await;
         sqlx::query(
@@ -2604,7 +2643,11 @@ mod tests {
         // Отгрузка не единственная — позиции с заказом не сверяются
         d.items = vec![item("tovar-1c", 100.0, 5.0), delivery(300.0)];
         let stats = run(&db, &s, &file(vec![d])).await;
-        assert_eq!(stats.errors, Vec::<String>::new());
+        // Новая отгрузка не основная: отгружена без списания остатков
+        assert_eq!(
+            stats.errors,
+            ["Документ ship-guid-1С-77: Отгрузка не основная — остатки не списаны"]
+        );
         assert_eq!((stats.shipments_created, stats.shipments_updated), (1, 0));
         let row: (Option<i64>, String, f64, bool, String, String) = sqlx::query_as(
             "SELECT delivery_id, delivery_name, price::float8, deducted, tracking_number, id_1c
@@ -2734,7 +2777,10 @@ mod tests {
             ],
         };
         let first = run(&db, &s, &sale).await;
-        assert_eq!(first.errors, Vec::<String>::new());
+        assert_eq!(
+            first.errors,
+            ["Документ ship-guid-1С-Р: Отгрузка не основная — остатки не списаны"]
+        );
         assert_eq!(
             (
                 first.orders_updated,

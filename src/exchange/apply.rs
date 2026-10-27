@@ -746,6 +746,7 @@ async fn apply_stores(
                     .bind(id)
                     .execute(&mut *conn)
                     .await?;
+                recalc_store_items(conn, id).await?;
                 bump(&mut stats.deactivated, "stores");
             }
             (Some(_), true) => {}
@@ -757,6 +758,9 @@ async fn apply_stores(
                         .bind(&store.name)
                         .execute(&mut *conn)
                         .await?;
+                    if !active {
+                        recalc_store_items(conn, id).await?;
+                    }
                     bump(&mut stats.updated, "stores");
                 }
             }
@@ -1622,6 +1626,7 @@ async fn apply_offers(
     let mut carried_prices = false;
     let mut in_package: Vec<i64> = Vec::new();
     let mut priced: Vec<i64> = Vec::new();
+    let mut stock_writes: Vec<(i64, StockWrite)> = Vec::new();
 
     for offer in package.offers.iter().filter(|o| !o.id.is_empty()) {
         if offer.deleted {
@@ -1680,14 +1685,8 @@ async fn apply_offers(
 
         match (&offer.rests, offer.quantity) {
             (Some(rests), _) if !rests.is_empty() => {
-                let mut by_store: Vec<(&str, f64)> = Vec::new();
+                let mut by_store: Vec<(i64, f64)> = Vec::new();
                 for (store_xml, amount) in rests.iter().filter(|(s, _)| !s.is_empty()) {
-                    match by_store.iter_mut().find(|(s, _)| s == store_xml) {
-                        Some(slot) => slot.1 += amount,
-                        None => by_store.push((store_xml, *amount)),
-                    }
-                }
-                for (store_xml, amount) in by_store {
                     let store_id = match stores.get(store_xml) {
                         Some(id) => *id,
                         None => {
@@ -1703,22 +1702,19 @@ async fn apply_offers(
                             id
                         }
                     };
-                    write_amount(conn, item_id, store_id, amount, stats).await?;
+                    match by_store.iter_mut().find(|(s, _)| *s == store_id) {
+                        Some(slot) => slot.1 += amount,
+                        None => by_store.push((store_id, *amount)),
+                    }
                 }
-                let total: f64 = sqlx::query_scalar(
-                    "SELECT COALESCE(sum(amount), 0)::float8 FROM catalog_store_amounts
-                     WHERE item_id = $1",
-                )
-                .bind(item_id)
-                .fetch_one(&mut *conn)
-                .await?;
-                write_quantity(conn, item_id, total).await?;
+                stock_writes.push((item_id, StockWrite::Rests(by_store)));
             }
             // Склады не пришли (или пусты): только общее количество (CommerceML 2.x)
-            (_, Some(quantity)) => write_quantity(conn, item_id, quantity).await?,
+            (_, Some(quantity)) => stock_writes.push((item_id, StockWrite::Quantity(quantity))),
             _ => {}
         }
     }
+    write_stock(conn, &stock_writes, stats).await?;
 
     if carried_prices && ctx.settings.deactivate_without_price {
         deactivate_without_price(conn, &in_package, &priced, stats).await?;
@@ -1910,6 +1906,75 @@ async fn write_amount(
         Some(false) => bump(&mut stats.updated, "rests"),
         None => {}
     }
+    Ok(())
+}
+
+/// Остатки предложения: по складам или только общее количество.
+enum StockWrite {
+    Rests(Vec<(i64, f64)>),
+    Quantity(f64),
+}
+
+/// Пишет остатки пакета после разбора предложений: товары блокируются разом в порядке id
+/// (`catalog::load_locked`), как при оформлении заказа. Со складским учётом доступное
+/// пересчитывается по инварианту (активные склады − резерв), без него — Σ остатков − резерв.
+async fn write_stock(
+    conn: &mut PgConnection,
+    writes: &[(i64, StockWrite)],
+    stats: &mut Stats,
+) -> Result<(), ApplyError> {
+    if writes.is_empty() {
+        return Ok(());
+    }
+    let mut ids: Vec<i64> = writes.iter().map(|(id, _)| *id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    crate::catalog::load_locked(conn, &ids).await?;
+    let store_control = crate::stock::settings(&mut *conn).await?.store_control;
+    let mut rested: Vec<i64> = Vec::new();
+    for (item_id, write) in writes {
+        match write {
+            StockWrite::Rests(by_store) => {
+                for (store_id, amount) in by_store {
+                    write_amount(conn, *item_id, *store_id, *amount, stats).await?;
+                }
+                if store_control {
+                    rested.push(*item_id);
+                } else {
+                    let total: f64 = sqlx::query_scalar(
+                        "SELECT COALESCE(sum(amount), 0)::float8 FROM catalog_store_amounts
+                         WHERE item_id = $1",
+                    )
+                    .bind(item_id)
+                    .fetch_one(&mut *conn)
+                    .await?;
+                    write_quantity(conn, *item_id, total).await?;
+                }
+            }
+            StockWrite::Quantity(quantity) => write_quantity(conn, *item_id, *quantity).await?,
+        }
+    }
+    crate::stock::recalc_quantity(conn, &rested).await?;
+    Ok(())
+}
+
+/// Склад сменил активность: со складским учётом доступное его товаров пересчитывается
+/// (товары блокируются в порядке id).
+async fn recalc_store_items(conn: &mut PgConnection, store_id: i64) -> Result<(), ApplyError> {
+    if !crate::stock::settings(&mut *conn).await?.store_control {
+        return Ok(());
+    }
+    let items: Vec<i64> = sqlx::query_scalar(
+        "SELECT item_id FROM catalog_store_amounts WHERE store_id = $1 ORDER BY item_id",
+    )
+    .bind(store_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if items.is_empty() {
+        return Ok(());
+    }
+    crate::catalog::load_locked(conn, &items).await?;
+    crate::stock::recalc_quantity(conn, &items).await?;
     Ok(())
 }
 
@@ -3698,6 +3763,52 @@ mod tests {
         }
         run_in(&db, &settings, &dirs, &p).await.unwrap();
         assert_eq!(qty(db.clone()).await, "7.00");
+    }
+
+    #[sqlx::test]
+    async fn store_control_rests_follow_active_stores(db: PgPool) {
+        let settings = Settings::default();
+        let dirs = Dirs::new();
+        load_goods(&db, &settings, &dirs, &goods_package()).await;
+        sqlx::query(
+            "INSERT INTO options (module, name, value) VALUES ('catalog', 'default_use_store_control', 'Y')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        // s-2 — неактивный склад с остатком
+        sqlx::query(
+            "INSERT INTO catalog_stores (name, active, xml_id) VALUES ('Второй', FALSE, 's-2')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let qty = |db: PgPool| async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT c.quantity::text FROM catalog_products c
+                 JOIN collection_items i ON i.id = c.item_id WHERE i.xml_id = 'good-1'",
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        run_in(&db, &settings, &dirs, &rests_package())
+            .await
+            .unwrap();
+        // Только активный s-1 (6), без неактивного s-2 (2.5)
+        assert_eq!(qty(db.clone()).await, "6.00");
+
+        // s-1 удалён в 1С — доступное его товаров пересчитано
+        let stores = package().remove(2);
+        let mut gone = stores.clone();
+        for s in &mut gone.classifier.as_mut().unwrap().stores {
+            s.deleted = true;
+        }
+        run(&db, &settings, &gone).await;
+        assert_eq!(qty(db.clone()).await, "0.00");
+        // Вернулся — снова в доступном
+        run(&db, &settings, &stores).await;
+        assert_eq!(qty(db.clone()).await, "6.00");
     }
 
     #[sqlx::test]

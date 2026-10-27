@@ -310,6 +310,9 @@ async fn create_payment(
     Ok(())
 }
 
+/// Предупреждение: отгружена не основная отгрузка, остатки не списаны.
+const NOT_MAIN_SHIPMENT: &str = "Отгрузка не основная — остатки не списаны";
+
 #[derive(sqlx::FromRow)]
 struct ShipmentState {
     id: i64,
@@ -461,7 +464,21 @@ pub(super) async fn apply_shipment(
     }
     // «Отгружено» — по правилам списания; отказ — документ не применяется
     match ship::set_deducted(tx, current.id, deducted, &[], None).await {
-        Ok(_) => {}
+        Ok(changed) => {
+            // Остатки движутся только с основной отгрузкой: документ применяется с предупреждением
+            if changed && deducted {
+                let main: bool = sqlx::query_scalar(
+                    "SELECT $1 = (SELECT min(id) FROM shipments WHERE order_id = $2)",
+                )
+                .bind(current.id)
+                .bind(order_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if !main {
+                    stats.errors.push(doc_error(doc, &NOT_MAIN_SHIPMENT));
+                }
+            }
+        }
         Err(StockError::Rejected(m)) => bail!("{}", m.join("; ")),
         Err(StockError::Db(e)) => return Err(e.into()),
     }
