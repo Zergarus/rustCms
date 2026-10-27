@@ -90,13 +90,12 @@ async fn order_state(tx: &mut PgConnection, order_id: i64) -> sqlx::Result<Optio
     ))
 }
 
-/// Пересчитывает резервы заказа после события; возвращает предупреждения о частичном резерве
-/// (они же пишутся в историю заказа с его текущим статусом).
+/// Пересчитывает резервы заказа после события; возвращает предупреждения о частичном резерве.
+/// Снятие резервов (отмена, условие больше не выполнено) работает и при выключенном
+/// резервировании — выключается только дорезервирование. Предупреждения пишутся в историю
+/// заказа (с его текущим статусом) только при оформлении и изменении заказа.
 pub async fn sync(tx: &mut PgConnection, order_id: i64, event: Event) -> sqlx::Result<Vec<String>> {
     let s = settings(&mut *tx).await?;
-    if !s.reservation {
-        return Ok(Vec::new());
-    }
     let Some(state) = order_state(tx, order_id).await? else {
         return Ok(Vec::new());
     };
@@ -108,7 +107,7 @@ pub async fn sync(tx: &mut PgConnection, order_id: i64, event: Event) -> sqlx::R
         release_lines(tx, order_id).await?;
         Vec::new()
     } else if condition_met(s.condition, &state) {
-        adjust(tx, order_id, None, None, &s, true).await?
+        adjust(tx, order_id, None, None, &s, s.reservation).await?
     } else if matches!(
         s.condition,
         Condition::OnPay | Condition::OnFullPay | Condition::OnAllowDelivery
@@ -118,7 +117,19 @@ pub async fn sync(tx: &mut PgConnection, order_id: i64, event: Event) -> sqlx::R
     } else {
         adjust(tx, order_id, None, None, &s, false).await?
     };
-    for w in &warnings {
+    if matches!(event, Event::Created | Event::Edited) {
+        write_warnings(tx, order_id, &warnings).await?;
+    }
+    Ok(warnings)
+}
+
+/// Пишет предупреждения о частичном резерве в историю заказа с его текущим статусом.
+async fn write_warnings(
+    tx: &mut PgConnection,
+    order_id: i64,
+    warnings: &[String],
+) -> sqlx::Result<()> {
+    for w in warnings {
         sqlx::query(
             "INSERT INTO order_status_history (order_id, status, comment)
              SELECT id, status, $2 FROM orders WHERE id = $1",
@@ -128,7 +139,7 @@ pub async fn sync(tx: &mut PgConnection, order_id: i64, event: Event) -> sqlx::R
         .execute(&mut *tx)
         .await?;
     }
-    Ok(warnings)
+    Ok(())
 }
 
 /// Резервирует позиции заказа до их количества (лишнее урезается); возвращает предупреждения
@@ -142,7 +153,9 @@ pub async fn reserve_lines(
     if !s.reservation {
         return Ok(Vec::new());
     }
-    adjust(tx, order_id, None, user, &s, true).await
+    let warnings = adjust(tx, order_id, None, user, &s, true).await?;
+    write_warnings(tx, order_id, &warnings).await?;
+    Ok(warnings)
 }
 
 /// То же для одной позиции заказа.
@@ -156,7 +169,9 @@ pub async fn reserve_line(
     if !s.reservation {
         return Ok(Vec::new());
     }
-    adjust(tx, order_id, Some(line), user, &s, true).await
+    let warnings = adjust(tx, order_id, Some(line), user, &s, true).await?;
+    write_warnings(tx, order_id, &warnings).await?;
+    Ok(warnings)
 }
 
 /// Снимает все резервы позиций заказа.
@@ -222,10 +237,11 @@ fn shown(v: f64) -> String {
     }
 }
 
+/// История резерва; резерв, которого уже нет (снят параллельно), пропускается.
 async fn write_history(tx: &mut PgConnection, reservation: i64, quantity: f64) -> sqlx::Result<()> {
     sqlx::query(
         "INSERT INTO basket_reservation_history (reservation_id, date_reserve, quantity)
-         VALUES ($1, now(), $2::float8::numeric)",
+         SELECT id, now(), $2::float8::numeric FROM basket_reservations WHERE id = $1",
     )
     .bind(reservation)
     .bind(quantity)
@@ -268,16 +284,21 @@ async fn adjust(
     .bind(only_line)
     .fetch_all(&mut *tx)
     .await?;
-    let ids: Vec<i64> = lines.iter().map(|l| l.id).collect();
-    let reservations: Vec<Reservation> = sqlx::query_as(
-        "SELECT id, cart_item_id, store_id, quantity::float8 AS quantity FROM basket_reservations
-         WHERE cart_item_id = ANY($1) ORDER BY id",
-    )
-    .bind(&ids)
-    .fetch_all(&mut *tx)
-    .await?;
-    if lines.is_empty() || (!top_up && reservations.is_empty()) {
+    if lines.is_empty() {
         return Ok(Vec::new());
+    }
+    let ids: Vec<i64> = lines.iter().map(|l| l.id).collect();
+    if !top_up {
+        // Без дорезервирования товары не блокируются, если урезать нечего
+        let any: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM basket_reservations WHERE cart_item_id = ANY($1))",
+        )
+        .bind(&ids)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !any {
+            return Ok(Vec::new());
+        }
     }
     let stock_lines: Vec<StockLine> = lines
         .iter()
@@ -288,6 +309,17 @@ async fn adjust(
         })
         .collect();
     let traced = traced_locked(tx, &stock_lines).await?;
+    // Резервы читаются под блокировкой товаров: параллельное снятие (агент) уже завершилось
+    let reservations: Vec<Reservation> = sqlx::query_as(
+        "SELECT id, cart_item_id, store_id, quantity::float8 AS quantity FROM basket_reservations
+         WHERE cart_item_id = ANY($1) ORDER BY id",
+    )
+    .bind(&ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    if !top_up && reservations.is_empty() {
+        return Ok(Vec::new());
+    }
     let default_store: Option<i64> = if s.store_control {
         sqlx::query_scalar("SELECT id FROM catalog_stores WHERE is_default AND active LIMIT 1")
             .fetch_optional(&mut *tx)
@@ -738,6 +770,101 @@ mod tests {
         .unwrap();
         let id = place_order(&db, &f, None).await;
         assert_eq!(reserves(&db, id).await, [(Some(2), 1.0)]);
+    }
+
+    #[sqlx::test]
+    async fn reservation_disabled_cancel_releases(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        assert_eq!(reserves(&db, id).await, [(None, 1.0)]);
+        set_option(&db, "catalog", "enable_reservation", "N").await;
+        assert!(repo::set_canceled(&db, id, true, "тест").await.unwrap());
+        assert!(reserves(&db, id).await.is_empty());
+        assert_eq!(quantity(&db, f.product_id).await, 10.0);
+        // Снятие отмены при выключенном резервировании ничего не резервирует
+        assert!(repo::set_canceled(&db, id, false, "").await.unwrap());
+        assert!(reserves(&db, id).await.is_empty());
+    }
+
+    #[sqlx::test]
+    async fn reservation_disabled_condition_lost_releases(db: PgPool) {
+        let f = order_fixture(&db).await;
+        condition(&db, "P").await;
+        let id = place_order(&db, &f, None).await;
+        assert!(repo::set_paid(&db, id, true).await.unwrap());
+        assert_eq!(reserves(&db, id).await, [(None, 1.0)]);
+        set_option(&db, "catalog", "enable_reservation", "N").await;
+        assert!(repo::set_paid(&db, id, false).await.unwrap());
+        assert!(reserves(&db, id).await.is_empty());
+        assert_eq!(quantity(&db, f.product_id).await, 10.0);
+    }
+
+    #[sqlx::test]
+    async fn partial_reserve_warning_not_repeated(db: PgPool) {
+        let f = order_fixture(&db).await;
+        sqlx::query("UPDATE catalog_products SET quantity = 5 WHERE item_id = $1")
+            .bind(f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let id = order_with(&db, &f, None, 7.0).await;
+        for event in [
+            Event::PaidChanged,
+            Event::AllowDeliveryChanged,
+            Event::Uncanceled,
+        ] {
+            sync_now(&db, id, event).await;
+        }
+        let count = |db: PgPool| async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM order_status_history WHERE order_id = $1 AND comment <> ''",
+            )
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        assert_eq!(count(db.clone()).await, 1);
+        sync_now(&db, id, Event::Edited).await;
+        assert_eq!(count(db.clone()).await, 2);
+    }
+
+    #[sqlx::test]
+    async fn history_skipped_for_missing_reservation(db: PgPool) {
+        let mut tx = db.begin().await.unwrap();
+        write_history(&mut tx, 999_999, 1.0).await.unwrap();
+        tx.commit().await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM basket_reservation_history")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[sqlx::test]
+    async fn tracking_change_keeps_manual_reserve(db: PgPool) {
+        let f = order_fixture(&db).await;
+        condition(&db, "D").await;
+        let id = place_order(&db, &f, None).await;
+        let mut tx = db.begin().await.unwrap();
+        reserve_lines(&mut tx, id, None).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(reserves(&db, id).await, [(None, 1.0)]);
+        let history = |db: PgPool| async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM basket_reservation_history")
+                .fetch_one(&db)
+                .await
+                .unwrap()
+        };
+        let before = history(db.clone()).await;
+        // Смена трек-номера без смены разрешения доставки резервы не трогает
+        assert!(repo::set_shipment(&db, id, "TRACK-1", false).await.unwrap());
+        assert_eq!(reserves(&db, id).await, [(None, 1.0)]);
+        assert_eq!(history(db.clone()).await, before);
+        // Разрешение доставки меняется — резервы пересчитываются
+        assert!(repo::set_shipment(&db, id, "TRACK-1", true).await.unwrap());
+        assert!(repo::set_shipment(&db, id, "TRACK-1", false).await.unwrap());
+        assert!(reserves(&db, id).await.is_empty());
     }
 
     #[sqlx::test]

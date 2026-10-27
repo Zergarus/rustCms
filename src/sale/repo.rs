@@ -986,7 +986,10 @@ pub async fn set_shipment_in(
         .bind(order_id)
         .execute(&mut *tx)
         .await?;
-    reserve::sync(tx, order_id, Event::AllowDeliveryChanged).await?;
+    // Резервы пересчитываются только при смене разрешения доставки: трек-номер их не касается
+    if allow != was_allowed {
+        reserve::sync(tx, order_id, Event::AllowDeliveryChanged).await?;
+    }
     if allow && !was_allowed && crate::stock::settings(&mut *tx).await?.deduct_on_delivery {
         crate::stock::ship::set_deducted(tx, shipment_id, true, &[], None).await?;
     }
