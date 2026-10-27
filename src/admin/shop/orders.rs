@@ -22,7 +22,7 @@ use crate::{
     files,
     sale::{self, OrderProperty, mail, repo, validate::validate_properties},
     state::AppState,
-    stock::StockError,
+    stock::{self, StockError},
 };
 
 const PER_PAGE: i64 = 50;
@@ -402,12 +402,25 @@ pub(crate) async fn card(
     .bind(id)
     .fetch_optional(&state.db)
     .await?;
+    // Основная отгрузка: «Отгружено» и склады списания позиций
+    let shipped = onec_shipments.first().is_some_and(|s| s.deducted);
+    let ship_stores: HashMap<String, i64> = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT cart_item_id, min(store_id) FROM shipment_item_stores
+         WHERE shipment_id = (SELECT min(id) FROM shipments WHERE order_id = $1)
+         GROUP BY cart_item_id",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?
+    .into_iter()
+    .map(|(line, store)| (line.to_string(), store))
+    .collect();
     render(
         state,
         "shop/order.html",
         context! { user, order, fields, file_fields, extra, stores, statuses, person_type, error, notice,
         store_list, deliveries, pay_systems, version, onec, onec_payments, onec_shipments, discounts,
-        shipment_base },
+        shipment_base, shipped, ship_stores },
     )
 }
 
@@ -673,32 +686,71 @@ pub async fn save_files(
     Ok(back(id))
 }
 
-#[derive(Deserialize)]
-pub struct ShipmentForm {
-    #[serde(default)]
-    tracking_number: String,
-    allow_delivery: Option<String>,
+/// Склады позиций из формы отгрузки: `store_<позиция>` = склад.
+fn ship_stores(form: &HashMap<String, String>) -> Vec<(i64, i64)> {
+    let mut out: Vec<(i64, i64)> = form
+        .iter()
+        .filter_map(|(k, v)| {
+            let line = k.strip_prefix("store_")?.parse().ok()?;
+            let store = v.trim().parse().ok()?;
+            Some((line, store))
+        })
+        .collect();
+    out.sort_unstable();
+    out
 }
 
-/// Трек-номер и разрешение доставки.
+/// Трек-номер, разрешение доставки и «Отгружено» с выбором складов позиций.
 pub async fn save_shipment(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
-    Form(form): Form<ShipmentForm>,
+    Form(form): Form<HashMap<String, String>>,
 ) -> AppResult<Response> {
     require_orders(&user)?;
-    if !repo::set_shipment(
-        &state.db,
-        id,
-        &form.tracking_number,
-        form.allow_delivery.is_some(),
-    )
-    .await?
-    {
+    let field = |name: &str| form.get(name).map(String::as_str);
+    let mut tx = state.db.begin().await?;
+    let shipment: Option<i64> =
+        sqlx::query_scalar("SELECT min(id) FROM shipments WHERE order_id = $1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let Some(shipment) = shipment else {
         return Err(AppError::NotFound);
+    };
+    // Сначала флажок «Отгружено», затем доставка: при её разрешении отгрузка может
+    // поставиться сама (`sale.allow_deduction_on_delivery`)
+    let result = async {
+        stock::ship::set_deducted(
+            &mut tx,
+            shipment,
+            field("deducted").is_some(),
+            &ship_stores(&form),
+            Some(user.user.id),
+        )
+        .await?;
+        repo::set_shipment_in(
+            &mut tx,
+            id,
+            field("tracking_number").unwrap_or_default(),
+            field("allow_delivery").is_some(),
+        )
+        .await
     }
-    Ok(back(id))
+    .await;
+    match result {
+        Ok(_) => {
+            tx.commit().await?;
+            Ok(back(id))
+        }
+        Err(StockError::Rejected(m)) => {
+            drop(tx);
+            Ok(card(&state, user, id, Some(m.join("; ")), None)
+                .await?
+                .into_response())
+        }
+        Err(StockError::Db(e)) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]
@@ -872,6 +924,116 @@ mod tests {
         let (status, _, _) =
             get_raw(&app, &format!("/admin/shop/orders/{id}/xml1c"), &manager).await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    #[sqlx::test]
+    async fn admin_shipment_form(db: sqlx::PgPool) {
+        use crate::smoke_tests::post_form;
+        let f = order_fixture(&db).await;
+        sqlx::query(
+            "INSERT INTO options (module, name, value) VALUES ('catalog', 'default_use_store_control', 'Y')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO catalog_stores (id, name) VALUES (2, 'Склад 2')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO catalog_store_amounts (item_id, store_id, amount) VALUES ($1, 2, 5)",
+        )
+        .bind(f.product_id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let id = place_order(&db, &f, None).await;
+        let line: i64 = sqlx::query_scalar("SELECT id FROM cart_items WHERE order_id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let state = test_state(db.clone());
+        let app = crate::app(state);
+        let cookie = admin_cookie(&db).await;
+        let path = format!("/admin/shop/orders/{id}/shipment");
+        let amount = |store: i64| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, f64>(
+                    "SELECT amount::float8 FROM catalog_store_amounts WHERE item_id = $1 AND store_id = $2",
+                )
+                .bind(f.product_id)
+                .bind(store)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            }
+        };
+        let shipped = || async {
+            sqlx::query_as::<_, (bool, String)>(
+                "SELECT deducted, tracking_number FROM shipments WHERE order_id = $1",
+            )
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+
+        // Склад не выбран, товар на двух складах — ошибка в карточке, ничего не сохранено
+        let (status, html) =
+            post_form(&app, &path, &cookie, "tracking_number=T-1&deducted=Y").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            html.contains(&format!(
+                "Не указаны склады для отгрузки товара Товар (#{})",
+                f.product_id
+            )),
+            "{html}"
+        );
+        assert_eq!(shipped().await, (false, String::new()));
+
+        // Нехватка на выбранном складе
+        sqlx::query(
+            "UPDATE catalog_store_amounts SET amount = 0 WHERE item_id = $1 AND store_id = 2",
+        )
+        .bind(f.product_id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let body = format!("deducted=on&store_{line}=2");
+        let (status, html) = post_form(&app, &path, &cookie, &body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("на складе"), "{html}");
+        assert!(html.contains("для отгрузки."), "{html}");
+        assert!(!shipped().await.0);
+
+        sqlx::query(
+            "UPDATE catalog_store_amounts SET amount = 5 WHERE item_id = $1 AND store_id = 2",
+        )
+        .bind(f.product_id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let body = format!("tracking_number=T-2&deducted=on&store_{line}=2");
+        let (status, html) = post_form(&app, &path, &cookie, &body).await;
+        assert!(status.is_redirection(), "{status} {html}");
+        assert_eq!(shipped().await, (true, "T-2".to_string()));
+        assert_eq!((amount(1).await, amount(2).await), (5.0, 4.0));
+
+        // Карточка: флажок стоит, склад позиции выбран
+        let (_, html) = get(&app, &format!("/admin/shop/orders/{id}"), &cookie).await;
+        assert!(
+            html.contains(r#"name="deducted" value="Y" checked"#),
+            "{html}"
+        );
+        assert!(html.contains(&format!(r#"name="store_{line}""#)), "{html}");
+
+        // Снятие флажка возвращает товар на склад
+        let (status, _) = post_form(&app, &path, &cookie, "tracking_number=T-2").await;
+        assert!(status.is_redirection());
+        assert!(!shipped().await.0);
+        assert_eq!(amount(2).await, 5.0);
     }
 
     #[sqlx::test]

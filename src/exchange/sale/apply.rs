@@ -2303,6 +2303,61 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn exchange_ship_error_rejects_doc(db: PgPool) {
+        let f = fixture(&db).await;
+        sqlx::query(
+            "INSERT INTO options (module, name, value) VALUES ('catalog', 'default_use_store_control', 'Y')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE catalog_store_amounts SET amount = 1 WHERE item_id = $1")
+            .bind(f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        // Позиция фикстуры на складе 1 занимает место в корзине
+        sqlx::query("DELETE FROM cart_items WHERE id = $1")
+            .bind(f.item_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let id = crate::test_support::place_order_with(&db, &f, None, Some(1), 2.0).await;
+        let sh = first_shipment(&db, id).await;
+        let d = with(
+            ship_doc(&sh.to_string(), id, "1"),
+            &[
+                ("Отгружен", "true"),
+                ("Идентификатор отправления", "TRACK-9"),
+            ],
+        );
+        let stats = run(&db, &SaleSettings::default(), &file(vec![d])).await;
+        assert_eq!(
+            stats.errors,
+            vec![format!(
+                "Документ ship-guid-{sh}: Недостаточное количество товара \"Товар\" (#{}) на складе \"Склад\" (#1) для отгрузки.",
+                f.product_id
+            )]
+        );
+        // Документ не применён: ни флажка, ни трек-номера, ни версии
+        let row = shipment(&db, sh).await;
+        assert_eq!((row.0, row.4.as_str(), row.6.as_str()), (false, "", ""));
+        assert_eq!(amounts(&db, f.product_id).await.1, 1.0);
+
+        // Остатка хватает — списано со склада
+        sqlx::query("UPDATE catalog_store_amounts SET amount = 5 WHERE item_id = $1")
+            .bind(f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let d = with(ship_doc(&sh.to_string(), id, "2"), &[("Отгружен", "true")]);
+        let stats = run(&db, &SaleSettings::default(), &file(vec![d])).await;
+        assert_eq!(stats.errors, Vec::<String>::new());
+        assert!(shipment(&db, sh).await.0);
+        assert_eq!(amounts(&db, f.product_id).await, (3.0, 3.0));
+    }
+
+    #[sqlx::test]
     async fn shipment_price_difference_is_ignored(db: PgPool) {
         let f = fixture(&db).await;
         let id = place_order(&db, &f, None).await;

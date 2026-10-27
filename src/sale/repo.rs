@@ -939,33 +939,58 @@ pub async fn remove_property_file(
 }
 
 /// Трек-номер и разрешение доставки первой отгрузки; `false` — у заказа нет отгрузки.
+/// При `sale.allow_deduction_on_delivery` разрешение доставки отгружает её
+/// (`needShipOnAllowDelivery`); отказ списания отменяет всё изменение.
+#[cfg(test)]
 pub async fn set_shipment(
     db: &PgPool,
     order_id: i64,
     tracking: &str,
     allow: bool,
-) -> sqlx::Result<bool> {
+) -> Result<bool, StockError> {
     let mut tx = db.begin().await?;
-    let done = sqlx::query(
-        "UPDATE shipments SET tracking_number = $2, allow_delivery = $3
-         WHERE id = (SELECT min(id) FROM shipments WHERE order_id = $1)",
-    )
-    .bind(order_id)
-    .bind(tracking.trim())
-    .bind(allow)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected()
-        == 1;
-    if done {
-        sqlx::query("UPDATE orders SET updated_at = now() WHERE id = $1")
-            .bind(order_id)
-            .execute(&mut *tx)
-            .await?;
-        reserve::sync(&mut tx, order_id, Event::AllowDeliveryChanged).await?;
-    }
+    let done = set_shipment_in(&mut tx, order_id, tracking, allow).await?;
     tx.commit().await?;
     Ok(done)
+}
+
+/// [`set_shipment`] в транзакции вызывающего.
+pub async fn set_shipment_in(
+    tx: &mut PgConnection,
+    order_id: i64,
+    tracking: &str,
+    allow: bool,
+) -> Result<bool, StockError> {
+    // Заказ — раньше отгрузки, как в остальных изменениях заказа
+    sqlx::query("SELECT id FROM orders WHERE id = $1 FOR UPDATE")
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    let Some((shipment_id, was_allowed)): Option<(i64, bool)> = sqlx::query_as(
+        "SELECT id, allow_delivery FROM shipments
+         WHERE id = (SELECT min(id) FROM shipments WHERE order_id = $1) FOR UPDATE",
+    )
+    .bind(order_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Ok(false);
+    };
+    sqlx::query("UPDATE shipments SET tracking_number = $2, allow_delivery = $3 WHERE id = $1")
+        .bind(shipment_id)
+        .bind(tracking.trim())
+        .bind(allow)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE orders SET updated_at = now() WHERE id = $1")
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    reserve::sync(tx, order_id, Event::AllowDeliveryChanged).await?;
+    if allow && !was_allowed && crate::stock::settings(&mut *tx).await?.deduct_on_delivery {
+        crate::stock::ship::set_deducted(tx, shipment_id, true, &[], None).await?;
+    }
+    Ok(true)
 }
 
 pub async fn update_properties(

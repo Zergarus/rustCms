@@ -5,6 +5,7 @@
 
 pub mod documents;
 pub mod reserve;
+pub mod ship;
 
 use std::collections::HashMap;
 

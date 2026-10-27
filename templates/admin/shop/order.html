@@ -163,7 +163,23 @@
   <div class="grid-2">
     <label>Трек-номер<input name="tracking_number" value="{{ order.shipment.tracking_number }}"></label>
     <label class="check"><input type="checkbox" name="allow_delivery" value="Y" {% if order.shipment.allow_delivery %}checked{% endif %}> Доставка разрешена</label>
+    <label class="check"><input type="checkbox" name="deducted" value="Y" {% if shipped %}checked{% endif %}> Отгружено</label>
   </div>
+  {% if store_list %}
+  <table>
+    <thead><tr><th>Товар</th><th>Количество</th><th>Склад отгрузки</th></tr></thead>
+    <tbody>
+    {% for i in order.items %}
+      {% set chosen = ship_stores[i.id|string] if (i.id|string) in ship_stores else i.store_id %}
+      <tr>
+        <td>{{ i.name }}</td>
+        <td>{{ i.quantity }}</td>
+        <td><select name="store_{{ i.id }}" {% if shipped %}disabled{% endif %}><option value="">—</option>{% for st in store_list %}<option value="{{ st[0] }}" {% if chosen == st[0] %}selected{% endif %}>{{ st[1] }}</option>{% endfor %}</select></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
   <div class="form-actions"><button class="btn primary" type="submit">Сохранить отгрузку</button></div>
 </form>
 {% endif %}

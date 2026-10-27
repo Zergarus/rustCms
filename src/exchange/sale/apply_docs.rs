@@ -14,6 +14,7 @@ use super::document::PayOperation;
 use super::parse::{DocumentIn, ItemKind};
 use crate::sale::repo::{recalc_totals_in, sync_paid_in};
 use crate::stock::reserve::{self, Event};
+use crate::stock::{self, StockError, ship};
 
 /// Реквизиты документов оплаты и отгрузки (`lang/ru/component.php` компонента обмена).
 const TRAIT_PAID: &str = "Оплачен";
@@ -313,6 +314,7 @@ async fn create_payment(
 struct ShipmentState {
     id: i64,
     deducted: bool,
+    allow_delivery: bool,
     version_1c: String,
     price: f64,
 }
@@ -333,7 +335,7 @@ pub(super) async fn apply_shipment(
     let current = match found {
         Some(id) => {
             let sh: ShipmentState = sqlx::query_as(
-                "SELECT id, deducted, version_1c, price::float8 AS price FROM shipments
+                "SELECT id, deducted, allow_delivery, version_1c, price::float8 AS price FROM shipments
                  WHERE id = $1 FOR UPDATE",
             )
             .bind(id)
@@ -413,32 +415,34 @@ pub(super) async fn apply_shipment(
     let ship_date = trait_of(doc, TRAIT_DELIVERY_DATE);
     let ship = trait_of(doc, TRAIT_DEDUCTED) == "true" || !ship_date.is_empty();
     let doc_date = parse_date(ship_date).or_else(|| parse_date(&doc.date));
-    let deducted = trait_of(doc, TRAIT_CANCEL) != "true" && (current.deducted || ship);
     let allow = match trait_of(doc, TRAIT_ALLOW_DELIVERY) {
         _ if ship => Some(true),
         "true" => Some(true),
         "false" => Some(false),
         _ => None,
     };
+    // Разрешение доставки отгружает при `sale.allow_deduction_on_delivery`
+    let ship_on_allow = allow == Some(true)
+        && !current.allow_delivery
+        && stock::settings(&mut *tx).await?.deduct_on_delivery;
+    let deducted =
+        trait_of(doc, TRAIT_CANCEL) != "true" && (current.deducted || ship || ship_on_allow);
     sqlx::query(
         "UPDATE shipments SET
              price = COALESCE($2, price),
              base_price = COALESCE($2, base_price),
-             deducted_at = CASE WHEN $3 THEN CASE WHEN deducted THEN deducted_at ELSE now() END END,
-             deducted = $3,
-             allow_delivery_at = CASE WHEN COALESCE($4, allow_delivery)
+             allow_delivery_at = CASE WHEN COALESCE($3, allow_delivery)
                  THEN CASE WHEN allow_delivery THEN allow_delivery_at ELSE now() END END,
-             allow_delivery = COALESCE($4, allow_delivery),
-             delivery_doc_date = CASE WHEN $5 THEN COALESCE($6, delivery_doc_date) ELSE delivery_doc_date END,
-             delivery_doc_num = CASE WHEN $7 <> '' THEN $7 ELSE delivery_doc_num END,
-             tracking_number = CASE WHEN $8 <> '' THEN $8 ELSE tracking_number END,
-             id_1c = $9, version_1c = CASE WHEN $11 THEN version_1c ELSE $10 END,
+             allow_delivery = COALESCE($3, allow_delivery),
+             delivery_doc_date = CASE WHEN $4 THEN COALESCE($5, delivery_doc_date) ELSE delivery_doc_date END,
+             delivery_doc_num = CASE WHEN $6 <> '' THEN $6 ELSE delivery_doc_num END,
+             tracking_number = CASE WHEN $7 <> '' THEN $7 ELSE tracking_number END,
+             id_1c = $8, version_1c = CASE WHEN $10 THEN version_1c ELSE $9 END,
              updated_1c = TRUE
          WHERE id = $1",
     )
     .bind(current.id)
     .bind(price)
-    .bind(deducted)
     .bind(allow)
     .bind(ship)
     .bind(doc_date)
@@ -454,6 +458,12 @@ pub(super) async fn apply_shipment(
     }
     if allow.is_some() {
         reserve::sync(tx, order_id, Event::AllowDeliveryChanged).await?;
+    }
+    // «Отгружено» — по правилам списания; отказ — документ не применяется
+    match ship::set_deducted(tx, current.id, deducted, &[], None).await {
+        Ok(_) => {}
+        Err(StockError::Rejected(m)) => bail!("{}", m.join("; ")),
+        Err(StockError::Db(e)) => return Err(e.into()),
     }
 
     // Заказ отгружен целиком — «Статус при отгрузке» (кроме финального F)
@@ -501,6 +511,7 @@ async fn create_shipment(
     Ok(ShipmentState {
         id,
         deducted: false,
+        allow_delivery: false,
         version_1c: String::new(),
         price: 0.0,
     })
