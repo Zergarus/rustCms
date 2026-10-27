@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 use sqlx::PgConnection;
 
 use super::model::{Node, Rule, as_num};
+use crate::currency;
 
 /// Период накопленной суммы; границы — unix-секунды.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -136,10 +137,10 @@ impl CumulativePeriod {
     }
 }
 
-/// Накопленные суммы покупателя по периодам одним запросом: `orders.price` (с доставкой)
-/// оплаченных и не отменённых заказов с `created_at` в границах периода. Курсов валют нет:
-/// считаются только заказы в валюте первого (по id) заказа периода, остальные пропускаются
-/// (`CumulativeCalculator` Битрикса пересчитывает по курсу). Нет заказов — 0.
+/// Накопленные суммы покупателя по периодам: `orders.price` (с доставкой) оплаченных и не
+/// отменённых заказов с `created_at` в границах периода. Заказы в других валютах пересчитываются
+/// в валюту первого (по id) заказа периода по курсам на сегодня (`CumulativeCalculator`
+/// Битрикса), без округления; заказ без курса не учитывается. Нет заказов — 0.
 pub async fn sums(
     db: &mut PgConnection,
     user_id: i64,
@@ -150,33 +151,48 @@ pub async fn sums(
         return Ok(HashMap::new());
     }
     let (starts, ends): (Vec<_>, Vec<_>) = periods.iter().map(|p| p.start(now)).unzip();
-    let rows: Vec<(i64, f64)> = sqlx::query_as(
-        "SELECT p.i, COALESCE(s.total, 0)::float8
+    // (период, валюта заказов, их сумма, валюта первого заказа периода)
+    let rows: Vec<(i64, String, f64, String)> = sqlx::query_as(
+        "SELECT p.i, x.currency, SUM(x.price)::float8, x.first_currency
          FROM unnest($2::timestamptz[], $3::timestamptz[]) WITH ORDINALITY AS p(s, e, i)
          CROSS JOIN LATERAL (
-             SELECT SUM(x.price) FILTER (WHERE x.currency = x.first_currency) AS total
-             FROM (
-                 SELECT o.price, o.currency,
-                        first_value(o.currency) OVER (ORDER BY o.id) AS first_currency
-                 FROM orders o
-                 WHERE o.user_id = $1 AND o.paid AND NOT o.canceled
-                   AND (p.s IS NULL OR o.created_at >= p.s)
-                   AND (p.e IS NULL OR o.created_at < p.e)
-             ) x
-         ) s",
+             SELECT o.price, o.currency,
+                    first_value(o.currency) OVER (ORDER BY o.id) AS first_currency
+             FROM orders o
+             WHERE o.user_id = $1 AND o.paid AND NOT o.canceled
+               AND (p.s IS NULL OR o.created_at >= p.s)
+               AND (p.e IS NULL OR o.created_at < p.e)
+         ) x
+         GROUP BY p.i, x.currency, x.first_currency",
     )
     .bind(user_id)
     .bind(&starts)
     .bind(&ends)
     .fetch_all(&mut *db)
     .await?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|(i, sum)| {
-            let period = periods.get(usize::try_from(i).ok()?.checked_sub(1)?)?;
-            Some((period.clone(), sum))
-        })
-        .collect())
+    // Курсы нужны, только если есть заказы не в валюте первого
+    let rates = if rows.iter().any(|(_, cur, _, first)| cur != first) {
+        Some(currency::load_rates(db).await?)
+    } else {
+        None
+    };
+    let today = currency::today();
+    let mut out: HashMap<CumulativePeriod, f64> =
+        periods.iter().map(|p| (p.clone(), 0.0)).collect();
+    for (i, cur, sum, first) in rows {
+        let Some(period) = usize::try_from(i)
+            .ok()
+            .and_then(|i| periods.get(i.checked_sub(1)?))
+        else {
+            continue;
+        };
+        let factor = match &rates {
+            Some(r) if cur != first => r.factor(&cur, &first, today),
+            _ => 1.0,
+        };
+        *out.entry(period.clone()).or_default() += sum * factor;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -434,12 +450,13 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn cumulative_sums_first_currency_only(db: sqlx::PgPool) {
+    async fn cumulative_sums_convert_other_currencies(db: sqlx::PgPool) {
+        crate::test_support::seed_usd(&db, Some(80.0)).await;
         let f = crate::test_support::order_fixture(&db).await;
         let u = user(&db, "a").await;
         let (a, b) = (order(&db, &f, u).await, order(&db, &f, u).await);
         set_order(&db, a, 1000.0, 2, true).await;
-        set_order(&db, b, 50.0, 1, true).await;
+        set_order(&db, b, 10.0, 1, true).await;
         sqlx::query("UPDATE orders SET currency = 'USD' WHERE id = $1")
             .bind(b)
             .execute(&db)
@@ -449,7 +466,27 @@ mod tests {
         let got = sums(&mut conn, u, &[CumulativePeriod::AllTime], Utc::now())
             .await
             .unwrap();
-        assert_eq!(got[&CumulativePeriod::AllTime], 1000.0);
+        assert_eq!(got[&CumulativePeriod::AllTime], 1800.0);
+        // Первый заказ в USD: сумма в USD
+        sqlx::query("UPDATE orders SET currency = 'USD' WHERE id = $1")
+            .bind(a)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE orders SET currency = 'RUB', price = 1000 WHERE id = $1")
+            .bind(b)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE orders SET price = 10 WHERE id = $1")
+            .bind(a)
+            .execute(&db)
+            .await
+            .unwrap();
+        let got = sums(&mut conn, u, &[CumulativePeriod::AllTime], Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(got[&CumulativePeriod::AllTime], 22.5);
     }
 
     #[sqlx::test]

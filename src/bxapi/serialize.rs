@@ -487,21 +487,28 @@ impl Loaded {
             return Ok(());
         };
         let rules = rules.with_rounding(self.rounding.clone());
-        let sources: Vec<(i64, i64, f64, i64)> = self
+        let sources: Vec<(i64, i64, f64, i64, String)> = self
             .prices
             .iter()
             .filter_map(|(id, prices)| {
                 let source = self.from_offers.get(id).copied().unwrap_or(*id);
                 let main = catalog::main_price(prices)?;
-                Some((*id, source, main.price, main.type_id))
+                Some((*id, source, main.price, main.type_id, main.currency.clone()))
             })
             .collect();
-        let mut products: Vec<(i64, f64, Option<i64>)> = sources
+        let mut products: Vec<crate::discount::catalog::CatalogProduct> = sources
             .iter()
-            .map(|(_, src, p, t)| (*src, *p, Some(*t)))
+            .map(
+                |(_, src, p, t, c)| crate::discount::catalog::CatalogProduct {
+                    id: *src,
+                    price: *p,
+                    price_type_id: Some(*t),
+                    currency: c.clone(),
+                },
+            )
             .collect();
-        products.sort_by_key(|(id, ..)| *id);
-        products.dedup_by_key(|(id, ..)| *id);
+        products.sort_by_key(|p| p.id);
+        products.dedup_by_key(|p| p.id);
         let discounted = rules
             .prices(
                 &env.state.db,

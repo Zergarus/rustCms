@@ -96,11 +96,16 @@ async fn fill_price_discount(
     };
     let ids: Vec<i64> = items.iter().map(|i| i.id).collect();
     let prices = crate::catalog::load_prices(&state.db, &ids).await?;
-    let base: Vec<(i64, f64, Option<i64>)> = ids
+    let base: Vec<crate::discount::catalog::CatalogProduct> = ids
         .iter()
         .filter_map(|id| {
             let main = crate::catalog::main_price(prices.get(id)?)?;
-            Some((*id, main.price, Some(main.type_id)))
+            Some(crate::discount::catalog::CatalogProduct {
+                id: *id,
+                price: main.price,
+                price_type_id: Some(main.type_id),
+                currency: main.currency.clone(),
+            })
         })
         .collect();
     let discounted = rules
