@@ -391,6 +391,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("catalog", "1C_FILE_SIZE_LIMIT"),
     ("catalog", "1C_USE_ZIP"),
     ("catalog", "deactivate_1c_no_price"),
+    ("sale", "default_currency"),
 ];
 
 /// Опции обмена с 1С в `catalog` Битрикса → настройки модуля `exchange`
@@ -540,8 +541,36 @@ struct Catalog {
     /// (элемент, склад, количество)
     amounts: Vec<(i64, i64, f64)>,
     products: Vec<ProductRow>,
-    /// (валюта, формат, десятичный разделитель, разделитель тысяч, знаков, скрывать нули)
-    currencies: Vec<(String, String, String, String, i32, bool)>,
+    currencies: Vec<CurrencyRow>,
+    /// `b_catalog_currency_rate`; `None` — таблицы в источнике нет, курсы из админки остаются.
+    rates: Option<Vec<RateRow>>,
+}
+
+/// Валюта: `b_catalog_currency` и формат вывода из `b_catalog_currency_lang` (ru);
+/// `amount` и `current_base_rate` — десятичные строки как в базе.
+struct CurrencyRow {
+    code: String,
+    format_string: String,
+    dec_point: String,
+    thousands_sep: String,
+    decimals: i32,
+    hide_zero: bool,
+    amount_cnt: i32,
+    amount: String,
+    sort: i32,
+    base: bool,
+    numcode: String,
+    full_name: String,
+    current_base_rate: String,
+}
+
+/// Строка `b_catalog_currency_rate`; `rate` — десятичная строка как в базе.
+struct RateRow {
+    currency: String,
+    base_currency: String,
+    date_rate: chrono::NaiveDate,
+    rate_cnt: i32,
+    rate: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -2209,6 +2238,10 @@ async fn write_mail(tx: &mut sqlx::PgConnection, data: &Data) -> anyhow::Result<
     let mut last_export: Option<i64> = None;
     for (module, name, value) in &data.options {
         if module == "sale" {
+            if name == "default_currency" {
+                put_option(tx, "sale", name, value).await?;
+                continue;
+            }
             if name.starts_with(SALE_LAST_EXPORT_PREFIX) {
                 if let Ok(t) = value.trim().parse::<i64>() {
                     last_export = last_export.max(Some(t));
@@ -2648,11 +2681,16 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
     }
 
     for row in sqlx::query(
-        "SELECT CAST(CURRENCY AS CHAR), CAST(IFNULL(FORMAT_STRING, '#') AS CHAR),
-                CAST(IFNULL(DEC_POINT, '.') AS CHAR), CAST(IFNULL(THOUSANDS_SEP, '') AS CHAR),
-                CAST(IFNULL(THOUSANDS_VARIANT, '') AS CHAR), CAST(IFNULL(DECIMALS, 2) AS SIGNED),
-                CAST(IFNULL(HIDE_ZERO, 'Y') AS CHAR)
-         FROM b_catalog_currency_lang WHERE LID = 'ru'",
+        "SELECT CAST(c.CURRENCY AS CHAR), CAST(IFNULL(l.FORMAT_STRING, '#') AS CHAR),
+                CAST(IFNULL(l.DEC_POINT, '.') AS CHAR), CAST(IFNULL(l.THOUSANDS_SEP, '') AS CHAR),
+                CAST(IFNULL(l.THOUSANDS_VARIANT, '') AS CHAR), CAST(IFNULL(l.DECIMALS, 2) AS SIGNED),
+                CAST(IFNULL(l.HIDE_ZERO, 'Y') AS CHAR),
+                CAST(IFNULL(c.AMOUNT_CNT, 1) AS SIGNED), CAST(IFNULL(c.AMOUNT, 1) AS CHAR),
+                CAST(IFNULL(c.SORT, 100) AS SIGNED), CAST(IFNULL(c.BASE, 'N') AS CHAR),
+                CAST(IFNULL(c.NUMCODE, '') AS CHAR), CAST(IFNULL(l.FULL_NAME, '') AS CHAR),
+                CAST(IFNULL(c.CURRENT_BASE_RATE, 1) AS CHAR)
+         FROM b_catalog_currency c
+         LEFT JOIN b_catalog_currency_lang l ON l.CURRENCY = c.CURRENCY AND l.LID = 'ru'",
     )
     .fetch_all(my)
     .await?
@@ -2666,14 +2704,45 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
             "B" => "&nbsp;".into(),
             _ => str_col(&row, 3),
         };
-        c.currencies.push((
-            str_col(&row, 0),
-            str_col(&row, 1),
-            str_col(&row, 2),
-            thousands,
-            int_col(&row, 5).unwrap_or(2) as i32,
-            str_col(&row, 6) == "Y",
-        ));
+        c.currencies.push(CurrencyRow {
+            code: str_col(&row, 0),
+            format_string: str_col(&row, 1),
+            dec_point: str_col(&row, 2),
+            thousands_sep: thousands,
+            decimals: int_col(&row, 5).unwrap_or(2) as i32,
+            hide_zero: str_col(&row, 6) == "Y",
+            amount_cnt: int_col(&row, 7).unwrap_or(1) as i32,
+            amount: str_col(&row, 8),
+            sort: int_col(&row, 9).unwrap_or(100) as i32,
+            base: str_col(&row, 10) == "Y",
+            numcode: str_col(&row, 11),
+            full_name: str_col(&row, 12),
+            current_base_rate: str_col(&row, 13),
+        });
+    }
+    if mysql_table_exists(my, "b_catalog_currency_rate").await? {
+        let mut rates = Vec::new();
+        for row in sqlx::query(
+            "SELECT CAST(CURRENCY AS CHAR), CAST(BASE_CURRENCY AS CHAR), CAST(DATE_RATE AS CHAR),
+                    CAST(IFNULL(RATE_CNT, 1) AS SIGNED), CAST(RATE AS CHAR)
+             FROM b_catalog_currency_rate",
+        )
+        .fetch_all(my)
+        .await?
+        {
+            let Ok(date_rate) = chrono::NaiveDate::parse_from_str(&str_col(&row, 2), "%Y-%m-%d")
+            else {
+                continue;
+            };
+            rates.push(RateRow {
+                currency: str_col(&row, 0),
+                base_currency: str_col(&row, 1),
+                date_rate,
+                rate_cnt: int_col(&row, 3).unwrap_or(1) as i32,
+                rate: str_col(&row, 4),
+            });
+        }
+        c.rates = Some(rates);
     }
     Ok(())
 }
@@ -3010,7 +3079,32 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
         .execute(&mut *tx)
         .await?;
     }
+    // Так же курсы валют: без `b_catalog_currency_rate` курсы из админки остаются
+    let keep_rates = data.catalog.rates.is_none();
+    if keep_rates {
+        sqlx::query(
+            "CREATE TEMP TABLE import_kept_rates ON COMMIT DROP AS
+             SELECT * FROM currency_rates",
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
     write_catalog(&mut *tx, &data.catalog).await?;
+    if keep_rates {
+        sqlx::query(
+            "INSERT INTO currency_rates SELECT k.* FROM import_kept_rates k
+             WHERE k.currency IN (SELECT code FROM currencies)
+               AND k.base_currency IN (SELECT code FROM currencies)
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DROP TABLE import_kept_rates")
+            .execute(&mut *tx)
+            .await?;
+    }
+    // Пересчёт курса к базовой валюте по перенесённым курсам, как агент Битрикса
+    crate::currency::update_base_rates(&mut *tx).await?;
     if keep_rounding {
         sqlx::query(
             "INSERT INTO catalog_rounding SELECT k.* FROM import_kept_rounding k
@@ -4018,19 +4112,54 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
         });
         qb.build().execute(&mut *tx).await?;
     }
-    for chunk in c.currencies.chunks(BATCH) {
-        let mut qb = QueryBuilder::<Postgres>::new(
-            "INSERT INTO currencies (code, format_string, dec_point, thousands_sep, decimals, hide_zero) ",
-        );
-        qb.push_values(chunk, |mut b, (code, fmt, dec, th, decimals, hide)| {
-            b.push_bind(code)
-                .push_bind(fmt)
-                .push_bind(dec)
-                .push_bind(th)
-                .push_bind(decimals)
-                .push_bind(hide);
-        });
-        qb.build().execute(&mut *tx).await?;
+    for cur in &c.currencies {
+        sqlx::query(
+            "INSERT INTO currencies (code, format_string, dec_point, thousands_sep, decimals,
+                                     hide_zero, amount_cnt, amount, sort, base, numcode,
+                                     full_name, current_base_rate)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9, $10, $11, $12, $13::numeric)",
+        )
+        .bind(&cur.code)
+        .bind(&cur.format_string)
+        .bind(&cur.dec_point)
+        .bind(&cur.thousands_sep)
+        .bind(cur.decimals)
+        .bind(cur.hide_zero)
+        .bind(cur.amount_cnt)
+        .bind(&cur.amount)
+        .bind(cur.sort)
+        .bind(cur.base)
+        .bind(&cur.numcode)
+        .bind(&cur.full_name)
+        .bind(&cur.current_base_rate)
+        .execute(&mut *tx)
+        .await?;
+    }
+    // Курсы валют, которых нет в переносе, и нулевые номиналы отбрасываются
+    let codes: HashSet<&str> = c.currencies.iter().map(|x| x.code.as_str()).collect();
+    let rates: Vec<&RateRow> = c
+        .rates
+        .iter()
+        .flatten()
+        .filter(|r| {
+            codes.contains(r.currency.as_str())
+                && codes.contains(r.base_currency.as_str())
+                && r.rate_cnt > 0
+        })
+        .collect();
+    for chunk in rates.chunks(BATCH) {
+        sqlx::query(
+            "INSERT INTO currency_rates (currency, base_currency, date_rate, rate_cnt, rate)
+             SELECT * FROM UNNEST($1::text[], $2::text[], $3::date[], $4::int[], $5::text[]::numeric[])
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(chunk.iter().map(|r| r.currency.clone()).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.base_currency.clone()).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.date_rate).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.rate_cnt).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.rate.clone()).collect::<Vec<_>>())
+        .execute(&mut *tx)
+        .await?;
     }
     Ok(())
 }
@@ -5322,6 +5451,176 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    fn currency_row(code: &str, amount: &str, base: bool, full_name: &str) -> CurrencyRow {
+        CurrencyRow {
+            code: code.into(),
+            format_string: "# $".into(),
+            dec_point: ".".into(),
+            thousands_sep: " ".into(),
+            decimals: 2,
+            hide_zero: true,
+            amount_cnt: 1,
+            amount: amount.into(),
+            sort: if base { 100 } else { 200 },
+            base,
+            numcode: if base { "643" } else { "840" }.into(),
+            full_name: full_name.into(),
+            current_base_rate: amount.into(),
+        }
+    }
+
+    fn rate_row(currency: &str, day: u32, rate_cnt: i32, rate: &str) -> RateRow {
+        RateRow {
+            currency: currency.into(),
+            base_currency: "RUB".into(),
+            date_rate: chrono::NaiveDate::from_ymd_opt(2026, 10, day).unwrap(),
+            rate_cnt,
+            rate: rate.into(),
+        }
+    }
+
+    async fn run_write_all(db: &PgPool, data: &mut Data) {
+        let props = resolve_properties(data);
+        let mut tx = db.begin().await.unwrap();
+        write_all(&mut tx, data, &props).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    #[sqlx::test]
+    async fn import_currency_fields(db: PgPool) {
+        let mut data = Data::default();
+        data.catalog.currencies = vec![
+            currency_row("USD", "68.79", false, "Доллар США"),
+            currency_row("RUB", "1", true, "Рубль"),
+        ];
+        run_write_all(&db, &mut data).await;
+        let row: (i32, String, i32, bool, String, String, String) = sqlx::query_as(
+            "SELECT amount_cnt, amount::text, sort, base, numcode, full_name,
+                    current_base_rate::text
+             FROM currencies WHERE code = 'USD'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            row,
+            (
+                1,
+                "68.7900".into(),
+                200,
+                false,
+                "840".into(),
+                "Доллар США".into(),
+                "68.790000000000".into()
+            )
+        );
+        let base: String = sqlx::query_scalar("SELECT code FROM currencies WHERE base")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(base, "RUB");
+    }
+
+    #[sqlx::test]
+    async fn import_rates_replaced(db: PgPool) {
+        let mut data = Data::default();
+        data.catalog.currencies = vec![
+            currency_row("USD", "68.79", false, "Доллар США"),
+            currency_row("RUB", "1", true, "Рубль"),
+        ];
+        data.catalog.rates = Some(vec![
+            rate_row("USD", 1, 1, "70.1234"),
+            rate_row("USD", 2, 1, "71.5"),
+            // курс валюты, которой нет в переносе, отбрасывается
+            rate_row("EUR", 2, 1, "80"),
+        ]);
+        run_write_all(&db, &mut data).await;
+        let rates: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT currency, date_rate::text, rate::text FROM currency_rates ORDER BY date_rate",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            rates,
+            vec![
+                ("USD".into(), "2026-10-01".into(), "70.1234".into()),
+                ("USD".into(), "2026-10-02".into(), "71.5000".into()),
+            ]
+        );
+        // Пересчёт по перенесённому курсу: последний курс
+        let cur: String =
+            sqlx::query_scalar("SELECT current_base_rate::text FROM currencies WHERE code = 'USD'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(cur.starts_with("71.5"), "{cur}");
+        // Повторный перенос с другим набором заменяет курсы целиком
+        data.catalog.rates = Some(vec![rate_row("USD", 5, 10, "700")]);
+        run_write_all(&db, &mut data).await;
+        let rates: Vec<(String, i32)> =
+            sqlx::query_as("SELECT date_rate::text, rate_cnt FROM currency_rates")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(rates, vec![("2026-10-05".to_string(), 10)]);
+    }
+
+    #[sqlx::test]
+    async fn import_keeps_rates_without_table(db: PgPool) {
+        let mut data = Data::default();
+        data.catalog.currencies = vec![
+            currency_row("USD", "68.79", false, "Доллар США"),
+            currency_row("EUR", "80", false, "Евро"),
+            currency_row("RUB", "1", true, "Рубль"),
+        ];
+        run_write_all(&db, &mut data).await;
+        for (cur, rate) in [("USD", 70), ("EUR", 80)] {
+            sqlx::query(
+                "INSERT INTO currency_rates (currency, base_currency, date_rate, rate_cnt, rate)
+                 VALUES ($1, 'RUB', '2026-10-01', 1, $2)",
+            )
+            .bind(cur)
+            .bind(rate)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        // Таблицы курсов в источнике нет, EUR в источнике пропал — его курс отбрасывается
+        data.catalog.currencies.remove(1);
+        run_write_all(&db, &mut data).await;
+        let rates: Vec<(String, String)> =
+            sqlx::query_as("SELECT currency, rate::text FROM currency_rates")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(rates, vec![("USD".to_string(), "70.0000".to_string())]);
+        // Пустая таблица в источнике заменяет курсы целиком
+        data.catalog.rates = Some(vec![]);
+        run_write_all(&db, &mut data).await;
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM currency_rates")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[sqlx::test]
+    async fn import_default_currency_option(db: PgPool) {
+        assert!(OPTIONS.contains(&("sale", "default_currency")));
+        let mut data = Data::default();
+        data.options
+            .push(("sale".into(), "default_currency".into(), "USD".into()));
+        run_write_all(&db, &mut data).await;
+        let v: String = sqlx::query_scalar(
+            "SELECT value FROM options WHERE module = 'sale' AND name = 'default_currency'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(v, "USD");
     }
 
     #[sqlx::test]
