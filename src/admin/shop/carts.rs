@@ -52,12 +52,24 @@ struct CartRow {
     updated_at: String,
 }
 
-fn snapshot_config() -> SnapshotConfig {
+fn snapshot_config(currency: &str) -> SnapshotConfig {
     SnapshotConfig {
         items_count_positions: false,
         required_store: false,
-        currency: "RUB".into(),
+        currency: currency.into(),
     }
+}
+
+/// Данные покупки с ценами в валюте сайта и сама валюта.
+async fn site_info(
+    state: &AppState,
+    product_ids: &[i64],
+) -> sqlx::Result<(HashMap<i64, catalog::PurchaseInfo>, String)> {
+    let mut info = catalog::load(&state.db, product_ids).await?;
+    let mut conn = state.db.acquire().await?;
+    let currency = crate::currency::site_currency(&mut conn).await?;
+    crate::currency::convert_info(&mut conn, &currency, &mut info).await?;
+    Ok((info, currency))
 }
 
 async fn stores(state: &AppState) -> sqlx::Result<Vec<StoreInfo>> {
@@ -144,9 +156,9 @@ pub async fn list(
         product_ids.extend(items.iter().map(|i| i.product_id));
         items_by_buyer.insert(b.id, items);
     }
-    let info = catalog::load(&state.db, &product_ids).await?;
+    let (info, currency) = site_info(&state, &product_ids).await?;
     let stores = stores(&state).await?;
-    let config = snapshot_config();
+    let config = snapshot_config(&currency);
     let rules = discount_repo::active_rules(&state.db, Utc::now()).await?;
     let mut rows = Vec::with_capacity(buyers.len());
     for b in &buyers {
@@ -186,7 +198,7 @@ pub async fn view(
     .ok_or(AppError::NotFound)?;
     let items = repo::items(&state.db, id).await?;
     let product_ids: Vec<i64> = items.iter().map(|i| i.product_id).collect();
-    let info = catalog::load(&state.db, &product_ids).await?;
+    let (info, currency) = site_info(&state, &product_ids).await?;
     let stores = stores(&state).await?;
     let rules = discount_repo::active_rules(&state.db, Utc::now()).await?;
     let prices = discounted(&state, &rules, &buyer, &items, &info).await?;
@@ -196,7 +208,7 @@ pub async fn view(
         &HashMap::new(),
         &stores,
         &prices,
-        &snapshot_config(),
+        &snapshot_config(&currency),
     );
     let label = buyer_label(buyer.login.as_deref(), buyer.name.as_deref());
     render(

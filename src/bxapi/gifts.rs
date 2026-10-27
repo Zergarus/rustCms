@@ -103,9 +103,18 @@ pub async fn catalog_gifts(
     if !purchase.available || catalog::main_price(&purchase.prices).is_none() {
         return Ok(success(json!([])));
     }
-    let purchase = purchase.clone();
+    let mut purchase = purchase.clone();
 
     let base = cart_base(&state, &jar).await?;
+    // Цены подарочного расчёта — в валюте сайта, как у корзины
+    let mut one = HashMap::from([(product_id, purchase)]);
+    let mut conn = state.db.acquire().await?;
+    crate::currency::convert_info(&mut conn, &base.currency, &mut one).await?;
+    drop(conn);
+    purchase = one.remove(&product_id).expect("товар только что вставлен");
+    if catalog::main_price(&purchase.prices).is_none() {
+        return Ok(success(json!([])));
+    }
     let without = gift_offers(&state, &base, None, &rules).await?;
     let item = CartItem {
         id: TEMP_KEY,

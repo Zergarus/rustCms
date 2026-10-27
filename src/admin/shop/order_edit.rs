@@ -229,6 +229,8 @@ pub async fn save_composition(
         .chain(lines.iter().map(|l| l.product_id))
         .collect();
     let mut info = catalog::load_locked(&mut tx, &all).await?;
+    // Цены новых позиций — в валюте заказа
+    crate::currency::convert_info(&mut tx, &currency, &mut info).await?;
     let traced: HashSet<i64> = info
         .iter()
         .filter(|(_, p)| p.quantity_trace)
@@ -644,5 +646,48 @@ mod tests {
             (80.0, 0.0, 80.0, 350.0, 350.0),
             "другая доставка"
         );
+    }
+
+    /// Новая позиция в заказе в рублях: цена товара в USD пересчитывается в валюту заказа.
+    #[sqlx::test]
+    async fn order_edit_converts_to_order_currency(db: sqlx::PgPool) {
+        use crate::test_support::{cart_fixture, place_order, seed_usd};
+        let fx = cart_fixture(&db).await;
+        seed_usd(&db, Some(80.0)).await;
+        sqlx::query("UPDATE catalog_prices SET price = 12.5, currency = 'USD' WHERE item_id = $1")
+            .bind(fx.f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let id = place_order(&db, &fx.f, None).await;
+        let at: DateTime<Utc> = sqlx::query_scalar("SELECT updated_at FROM orders WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let c = Composition {
+            lines: vec![EditLine {
+                item_id: None,
+                product_id: fx.f.product_id,
+                store_id: None,
+                quantity: 1.0,
+                price: 0.0,
+                custom_price: false,
+                name: String::new(),
+            }],
+            delivery_id: 1,
+            delivery_price: 0.0,
+            pay_system_id: 1,
+        };
+        let result = save_composition(&db, id, &c, &version(&at)).await.unwrap();
+        assert_eq!(result, Ok(()));
+        let price: f64 = sqlx::query_scalar(
+            "SELECT price::float8 FROM cart_items WHERE order_id = $1 AND price <> 100",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(price, 1000.0);
     }
 }

@@ -317,7 +317,10 @@ pub(super) struct CartBase {
     pub buyer: Option<i64>,
     user_id: Option<i64>,
     pub items: Vec<CartItem>,
+    /// Данные покупки, цены — в валюте сайта.
     pub info: HashMap<i64, PurchaseInfo>,
+    /// Валюта сайта, в которую пересчитаны цены.
+    pub currency: String,
     pub stores: Vec<StoreInfo>,
     views: HashMap<i64, ProductView>,
     coupons: Vec<Coupon>,
@@ -373,7 +376,11 @@ async fn load_base(state: &AppState, buyer: Option<i64>) -> Result<CartBase, BxE
         None => (Vec::new(), None, Vec::new()),
     };
     let ids: Vec<i64> = items.iter().map(|i| i.product_id).collect();
-    let info = catalog::load(&state.db, &ids).await?;
+    let mut info = catalog::load(&state.db, &ids).await?;
+    let mut conn = state.db.acquire().await?;
+    let currency = crate::currency::site_currency(&mut conn).await?;
+    crate::currency::convert_info(&mut conn, &currency, &mut info).await?;
+    drop(conn);
     let views = product_views(state, &ids).await?;
     let stores = load_stores(state).await?;
     Ok(CartBase {
@@ -381,6 +388,7 @@ async fn load_base(state: &AppState, buyer: Option<i64>) -> Result<CartBase, BxE
         user_id,
         items,
         info,
+        currency,
         stores,
         views,
         coupons,
@@ -482,7 +490,7 @@ pub(super) async fn priced(
     let snapshot_config = SnapshotConfig {
         items_count_positions: config.items_count_positions,
         required_store: config.required_props.contains(&"store"),
-        currency: "RUB".into(),
+        currency: base.currency.clone(),
     };
     let mut snapshot = build_snapshot(
         &base.items,
@@ -1634,5 +1642,106 @@ mod tests {
             json!([{"ruleId": rule, "type": "all", "productIds": [other]}]),
             "{cart}"
         );
+    }
+
+    use crate::test_support::{add_usd_rate, seed_usd};
+
+    async fn set_price(db: &sqlx::PgPool, item: i64, price: f64, currency: &str) {
+        sqlx::query("UPDATE catalog_prices SET price = $2::float8::numeric, currency = $3 WHERE item_id = $1")
+            .bind(item)
+            .bind(price)
+            .bind(currency)
+            .execute(db)
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test]
+    async fn usd_price_in_cart_converted(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        seed_usd(&db, Some(80.0)).await;
+        set_price(&db, fx.f.product_id, 12.5, "USD").await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let (status, body) = send(&app, "GET", "/api/v1/cart", &fx.cookie, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let cart = data(&body);
+        assert_eq!(cart["items"][0]["price"], json!(1000));
+        assert_eq!(cart["items"][0]["currency"], json!("RUB"));
+        assert_eq!(cart["totalPrice"], json!(2500));
+        let base: f64 =
+            sqlx::query_scalar("SELECT base_price::float8 FROM cart_items WHERE id = $1")
+                .bind(fx.f.item_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(base, 1000.0);
+    }
+
+    #[sqlx::test]
+    async fn mixed_currency_cart_in_site_currency(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        seed_usd(&db, Some(80.0)).await;
+        set_price(&db, fx.offer_id, 10.0, "USD").await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let (_, body) = send(&app, "GET", "/api/v1/cart", &fx.cookie, None).await;
+        let cart = data(&body);
+        assert_eq!(cart["items"][0]["currency"], json!("RUB"));
+        assert_eq!(cart["items"][1]["currency"], json!("RUB"));
+        assert_eq!(cart["items"][1]["price"], json!(800));
+        assert_eq!(cart["totalPrice"], json!(2800));
+        assert_eq!(cart["currency"], json!("RUB"));
+    }
+
+    #[sqlx::test]
+    async fn future_rate_not_used_in_cart(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        seed_usd(&db, Some(80.0)).await;
+        add_usd_rate(&db, crate::currency::today() + chrono::Days::new(1), 90.0).await;
+        set_price(&db, fx.f.product_id, 12.5, "USD").await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let (_, body) = send(&app, "GET", "/api/v1/cart", &fx.cookie, None).await;
+        assert_eq!(data(&body)["items"][0]["price"], json!(1000));
+    }
+
+    #[sqlx::test]
+    async fn price_without_rate_is_unavailable(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        seed_usd(&db, None).await;
+        set_price(&db, fx.f.product_id, 5.0, "ZZZ").await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let (_, body) = send(&app, "GET", "/api/v1/cart", &fx.cookie, None).await;
+        let cart = data(&body);
+        assert_eq!(cart["items"][0]["isAvailable"], json!(false), "{cart}");
+        assert_eq!(cart["canCheckout"], json!(false), "{cart}");
+    }
+
+    #[sqlx::test]
+    async fn empty_cart_has_site_currency(db: sqlx::PgPool) {
+        seed_usd(&db, None).await;
+        sqlx::query(
+            "INSERT INTO options (module, name, value) VALUES ('sale', 'default_currency', 'USD')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let (status, body) = send(&app, "GET", "/api/v1/cart", "", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(data(&body)["currency"], json!("USD"));
+    }
+
+    #[sqlx::test]
+    async fn custom_price_not_converted(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        seed_usd(&db, Some(80.0)).await;
+        set_price(&db, fx.f.product_id, 12.5, "USD").await;
+        sqlx::query("UPDATE cart_items SET custom_price = TRUE, price = 777 WHERE id = $1")
+            .bind(fx.f.item_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let (_, body) = send(&app, "GET", "/api/v1/cart", &fx.cookie, None).await;
+        assert_eq!(data(&body)["items"][0]["price"], json!(777));
     }
 }

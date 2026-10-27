@@ -416,3 +416,30 @@ pub async fn cart_fixture(db: &PgPool) -> CartFixture {
         section_id,
     }
 }
+
+/// Валюты `RUB` (базовая) и `USD`; курс USD → RUB на сегодня — `rate` (нет — без курса).
+pub async fn seed_usd(db: &PgPool, rate: Option<f64>) {
+    sqlx::query(
+        "INSERT INTO currencies (code, base) VALUES ('RUB', TRUE), ('USD', FALSE)
+         ON CONFLICT (code) DO NOTHING",
+    )
+    .execute(db)
+    .await
+    .unwrap();
+    if let Some(rate) = rate {
+        add_usd_rate(db, crate::currency::today(), rate).await;
+    }
+}
+
+/// Курс USD → RUB на дату.
+pub async fn add_usd_rate(db: &PgPool, date: chrono::NaiveDate, rate: f64) {
+    sqlx::query(
+        "INSERT INTO currency_rates (currency, base_currency, date_rate, rate_cnt, rate)
+         VALUES ('USD', 'RUB', $1, 1, $2::float8::numeric)",
+    )
+    .bind(date)
+    .bind(rate)
+    .execute(db)
+    .await
+    .unwrap();
+}

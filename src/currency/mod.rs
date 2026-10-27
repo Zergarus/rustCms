@@ -197,6 +197,30 @@ pub fn convert_prices(info: &mut HashMap<i64, PurchaseInfo>, conv: &Converter) {
     }
 }
 
+/// Переводит цены загруженных товаров в валюту `to`: курсы читаются, только если есть цена в другой.
+pub async fn convert_info(
+    db: &mut PgConnection,
+    to: &str,
+    info: &mut HashMap<i64, PurchaseInfo>,
+) -> sqlx::Result<()> {
+    // Курсы читаются, только если есть цена в другой валюте (список собран заранее — для Send)
+    let foreign = info
+        .values()
+        .flat_map(|i| &i.prices)
+        .any(|p| !p.currency.is_empty() && p.currency != to);
+    let conv = if foreign {
+        Converter {
+            to: to.to_string(),
+            rates: load_rates(db).await?,
+            date: today(),
+        }
+    } else {
+        Converter::identity(to)
+    };
+    convert_prices(info, &conv);
+    Ok(())
+}
+
 /// Пересчитывает `current_base_rate` всех валют к базовой; без базовой — ничего.
 pub async fn update_base_rates(db: &mut PgConnection) -> sqlx::Result<()> {
     let rates = load_rates(db).await?;

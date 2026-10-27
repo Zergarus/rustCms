@@ -375,7 +375,10 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         Some(selected_sum(&seen.snapshot, &ids))
     };
     let mut tx = state.db.begin().await?;
-    let info = catalog::load_locked(&mut tx, &product_ids).await?;
+    let mut info = catalog::load_locked(&mut tx, &product_ids).await?;
+    // Цены позиций заказа — в валюте сайта, как в корзине
+    let site_currency = crate::currency::site_currency(&mut tx).await?;
+    crate::currency::convert_info(&mut tx, &site_currency, &mut info).await?;
     let checked = match lines
         .iter()
         .find(|l| !info.get(&l.product_id).is_some_and(catalog::sellable))
@@ -1320,5 +1323,32 @@ mod tests {
             assert_eq!(status, StatusCode::OK, "{body}");
             assert_eq!(body["data"]["total"], json!(750.0), "{body}");
         }
+    }
+
+    #[sqlx::test]
+    async fn submit_converts_to_site_currency(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        let (_, cookie) = login(&db, fx.f.buyer_id, "ivan").await;
+        crate::test_support::seed_usd(&db, Some(80.0)).await;
+        sqlx::query("UPDATE catalog_prices SET price = 12.5, currency = 'USD' WHERE item_id = $1")
+            .bind(fx.f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let data = checkout(&app, &cookie, fx.f.person_type_id).await;
+        let order_id = data["orderId"].as_i64().unwrap();
+        let (order_currency, payment_currency): (String, String) = sqlx::query_as(
+            "SELECT o.currency, p.currency FROM orders o JOIN payments p ON p.order_id = o.id WHERE o.id = $1",
+        )
+        .bind(order_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            (order_currency.as_str(), payment_currency.as_str()),
+            ("RUB", "RUB")
+        );
+        assert_eq!(line(&db, fx.f.item_id).await, (1000.0, 0.0, 1000.0));
     }
 }
