@@ -132,6 +132,23 @@ fn selected_sum(basket: &Value, ids: &[i64]) -> f64 {
     (sum * 100.0).round() / 100.0
 }
 
+/// Цены доставок настроек — в валюту заказа; курсы читаются, только если валюта службы другая.
+async fn convert_settings(
+    state: &AppState,
+    settings: &mut sale::SaleSettings,
+    to: &str,
+) -> Result<(), BxError> {
+    let from: Vec<&str> = settings
+        .deliveries
+        .iter()
+        .map(|d| d.currency.as_str())
+        .collect();
+    let mut conn = state.db.acquire().await?;
+    let conv = crate::currency::Converter::new(&mut conn, to, &from).await?;
+    sale::convert_deliveries(&mut settings.deliveries, &conv);
+    Ok(())
+}
+
 fn currency(basket: &Value) -> String {
     basket
         .get("currency")
@@ -146,9 +163,10 @@ pub async fn form(
     jar: CookieJar,
     Query(query): Query<HashMap<String, String>>,
 ) -> BxResult {
-    let settings = sale::load_settings(&state.db).await?;
+    let mut settings = sale::load_settings(&state.db).await?;
     let cfg = &state.project.order;
     let base = cart_base(&state, &jar).await?;
+    convert_settings(&state, &mut settings, &base.currency).await?;
     let user_id = current_user_id(&state, &jar).await?;
     let types = form::person_types(&settings, cfg);
     let Some(person_type) =
@@ -193,9 +211,10 @@ pub async fn form(
 
 pub async fn summary(State(state): State<AppState>, jar: CookieJar, body: Bytes) -> BxResult {
     let body = parse_body(&body)?;
-    let settings = sale::load_settings(&state.db).await?;
+    let mut settings = sale::load_settings(&state.db).await?;
     let cfg = &state.project.order;
     let base = cart_base(&state, &jar).await?;
+    convert_settings(&state, &mut settings, &base.currency).await?;
     let allowed = allowed_deliveries(&state, &settings, &base.items, &base.info);
     let delivery = number(body.get("deliveryId"))
         .and_then(|id| form::find_delivery(&settings, cfg, allowed.as_ref(), id));
@@ -229,10 +248,11 @@ fn shipment_store(delivery: &Delivery, items: &[&CartItem]) -> Option<i64> {
 
 pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) -> BxResult {
     let body = Value::Object(parse_body(&body)?);
-    let settings = sale::load_settings(&state.db).await?;
+    let mut settings = sale::load_settings(&state.db).await?;
     let cfg = &state.project.order;
     let cart = cart_state(&state, &jar).await?;
     let basket = cart.snapshot.clone();
+    convert_settings(&state, &mut settings, &currency(&basket)).await?;
     let fail = |e: SubmitError| to_bx(e, Some(basket.clone()));
     let user_id = current_user_id(&state, &jar).await?;
 
@@ -819,6 +839,70 @@ mod tests {
             );
             assert!(!text.contains("-0.0"), "{path}: {text}");
         }
+    }
+
+    /// Доставка 1 — 5 USD при курсе 80: в валюте сайта 400.
+    async fn usd_delivery(db: &sqlx::PgPool) {
+        crate::test_support::seed_usd(db, Some(80.0)).await;
+        sqlx::query("UPDATE deliveries SET price = 5, currency = 'USD' WHERE id = 1")
+            .execute(db)
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test]
+    async fn delivery_price_converted_in_form(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        usd_delivery(&db).await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let (status, body) = send(&app, "GET", "/api/v1/order/form", &fx.cookie, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let delivery = &body["data"]["deliveries"][0];
+        assert_eq!(delivery["price"], json!(400.0), "{body}");
+        assert_eq!(delivery["currency"], json!("RUB"), "{body}");
+    }
+
+    #[sqlx::test]
+    async fn delivery_price_converted_in_summary_and_order(db: sqlx::PgPool) {
+        let fx = crate::test_support::cart_fixture(&db).await;
+        usd_delivery(&db).await;
+        let (_, cookie) = login(&db, fx.f.buyer_id, "ivan").await;
+        let app = crate::app(crate::test_support::test_state(db.clone()));
+        let (_, cart) = send(&app, "GET", "/api/v1/cart", &cookie, None).await;
+        let goods = cart["data"]["totalPrice"].as_f64().unwrap();
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/api/v1/order/summary",
+            &cookie,
+            Some(json!({"personTypeId": fx.f.person_type_id, "deliveryId": 1, "paymentId": 1})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows = body["data"]["summary"].as_array().unwrap();
+        let value = |label: &str| {
+            rows.iter()
+                .find(|r| r["label"] == label)
+                .and_then(|r| r["value"].as_f64())
+        };
+        assert_eq!(value("Доставка"), Some(400.0), "{body}");
+        assert_eq!(value("Итого"), Some(goods + 400.0), "{body}");
+
+        let data = checkout(&app, &cookie, fx.f.person_type_id).await;
+        let order_id = data["orderId"].as_i64().unwrap();
+        let (order, shipment): (f64, f64) = (
+            sqlx::query_scalar("SELECT delivery_price::float8 FROM orders WHERE id = $1")
+                .bind(order_id)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            sqlx::query_scalar("SELECT base_price::float8 FROM shipments WHERE order_id = $1")
+                .bind(order_id)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+        );
+        assert_eq!((order, shipment), (400.0, 400.0));
     }
 
     #[sqlx::test]

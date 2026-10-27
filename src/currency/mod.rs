@@ -141,12 +141,8 @@ pub struct Converter {
 
 impl Converter {
     /// Курсы читаются, только если среди непустых `from` есть отличная от `to`.
-    pub async fn new<'a>(
-        db: &mut PgConnection,
-        to: &str,
-        from: impl IntoIterator<Item = &'a str>,
-    ) -> sqlx::Result<Converter> {
-        let need = from.into_iter().any(|c| !c.is_empty() && c != to);
+    pub async fn new(db: &mut PgConnection, to: &str, from: &[&str]) -> sqlx::Result<Converter> {
+        let need = from.iter().any(|c| !c.is_empty() && *c != to);
         let rates = if need {
             load_rates(db).await?
         } else {
@@ -203,20 +199,13 @@ pub async fn convert_info(
     to: &str,
     info: &mut HashMap<i64, PurchaseInfo>,
 ) -> sqlx::Result<()> {
-    // Курсы читаются, только если есть цена в другой валюте (список собран заранее — для Send)
-    let foreign = info
+    // Список валют собран заранее — для Send в обработчиках
+    let from: Vec<&str> = info
         .values()
         .flat_map(|i| &i.prices)
-        .any(|p| !p.currency.is_empty() && p.currency != to);
-    let conv = if foreign {
-        Converter {
-            to: to.to_string(),
-            rates: load_rates(db).await?,
-            date: today(),
-        }
-    } else {
-        Converter::identity(to)
-    };
+        .map(|p| p.currency.as_str())
+        .collect();
+    let conv = Converter::new(db, to, &from).await?;
     convert_prices(info, &conv);
     Ok(())
 }
@@ -388,10 +377,12 @@ mod tests {
         seed(&db, &[("RUB", true, 1.0), ("USD", false, 68.79)]).await;
         add_rate(&db, "USD", "RUB", today(), 82.0).await;
         let mut conn = db.acquire().await.unwrap();
-        let c = Converter::new(&mut conn, "RUB", ["RUB", ""]).await.unwrap();
+        let c = Converter::new(&mut conn, "RUB", &["RUB", ""])
+            .await
+            .unwrap();
         assert_eq!(c.convert(100.0, "USD"), None);
         assert!(c.rates.rates.is_empty());
-        let c = Converter::new(&mut conn, "RUB", ["USD"]).await.unwrap();
+        let c = Converter::new(&mut conn, "RUB", &["USD"]).await.unwrap();
         assert_eq!(c.convert(100.0, "USD"), Some(8200.0));
     }
 

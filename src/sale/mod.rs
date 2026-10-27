@@ -88,6 +88,14 @@ pub struct Delivery {
     pub store_ids: Vec<i64>,
 }
 
+/// Переводит цены служб доставки в валюту `conv.to`; множитель 0 — цена 0 (`ConvertCurrency`).
+pub fn convert_deliveries(deliveries: &mut [Delivery], conv: &crate::currency::Converter) {
+    for d in deliveries {
+        d.price = conv.convert(d.price, &d.currency).unwrap_or(0.0);
+        d.currency = conv.to.clone();
+    }
+}
+
 /// Платёжная система.
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct PaySystem {
