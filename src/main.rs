@@ -7,6 +7,8 @@ mod cart;
 mod catalog;
 mod collection;
 mod config;
+#[allow(dead_code)] // корзина, доставка и админка подключают валюты в следующих задачах
+mod currency;
 #[allow(dead_code)] // движок, корзина и админка подключают модель в следующих задачах
 mod discount;
 mod error;
