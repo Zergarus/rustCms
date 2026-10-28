@@ -80,7 +80,20 @@ fn url_ok(url: &str) -> bool {
         && !url.chars().any(char::is_control)
 }
 
+/// Браузер присылает `document.title`, а страница уже отрисована с экранированием
+/// MiniJinja (`& < > " ' /`); храним простой текст, шаблон экранирует его заново.
+fn unescape_html(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&#x2f;", "/")
+        .replace("&amp;", "&")
+}
+
 fn clean_title(title: &str, key: &str) -> String {
+    let title = unescape_html(title);
     let title = title.trim();
     let title = title.strip_suffix(TITLE_SUFFIX).unwrap_or(title).trim();
     if title.is_empty() {
@@ -405,6 +418,12 @@ mod tests {
         assert_eq!(count(&db).await, 0);
     }
 
+    /// JSON из атрибута `hx-vals` вкладки на странице.
+    fn tab_vals(body: &str) -> serde_json::Value {
+        let tail = body.split("hx-vals='").nth(1).expect("hx-vals");
+        serde_json::from_str(tail.split('\'').next().unwrap()).unwrap()
+    }
+
     #[sqlx::test]
     async fn page_renders_trigger_with_own_url_and_title(db: PgPool) {
         let app = crate::app(test_state(db.clone()));
@@ -413,10 +432,36 @@ mod tests {
         let body = String::from_utf8_lossy(&body);
         assert_eq!(status, 200, "{body}");
         assert!(body.contains(r#"hx-post="/admin/tabs""#));
-        assert!(body.contains("hx-vals="));
-        assert!(body.contains("/admin/shop/stores?a=1"), "{body}");
-        assert!(body.contains("Склады"));
-        assert!(body.contains("<title>"));
+        assert!(body.contains("<title>Склады"));
+        let vals = tab_vals(&body);
+        assert_eq!(vals["url"], "/admin/shop/stores?a=1");
+        assert!(vals["title"].as_str().unwrap().starts_with("Склады"));
+    }
+
+    #[sqlx::test]
+    async fn title_with_special_chars_roundtrips_once_escaped(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO collections (code, name) VALUES ('c1', 'A & \"B\"') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let url = format!("/admin/collections/{id}");
+        let (status, _, body) = get_raw(&app, &url, &cookie).await;
+        assert_eq!(status, 200);
+        let vals = tab_vals(&String::from_utf8_lossy(&body));
+        let sent = vals["title"].as_str().unwrap();
+        assert!(sent.starts_with("A &amp; &quot;B&quot;"), "{sent}");
+        let (_, frag) = open_tab(&app, &cookie, &url, sent).await;
+        let stored: String = sqlx::query_scalar("SELECT title FROM admin_tabs")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert!(stored.starts_with("A & \"B\""), "{stored}");
+        assert!(frag.contains("A &amp; &quot;B&quot;"), "{frag}");
+        assert!(!frag.contains("&amp;amp;"));
     }
 
     #[sqlx::test]
