@@ -64,6 +64,10 @@ fn yes_no(raw: &str) -> Option<bool> {
     }
 }
 
+/// Текст покупателя для поиска (логин, почта, имя, свойства заказа); запрос с `orders o` и `users u`.
+pub(crate) const BUYER_TEXT_SQL: &str = "concat_ws(' ', u.login, u.email, u.name, u.last_name,
+                 (SELECT string_agg(v.value, ' ') FROM order_property_values v WHERE v.order_id = o.id))";
+
 /// Условия фильтра к запросу с `orders o` и `users u` (… WHERE TRUE).
 pub(crate) fn push_filters(qb: &mut QueryBuilder<Postgres>, q: &OrdersQuery) {
     let number = q.number.trim();
@@ -85,11 +89,10 @@ pub(crate) fn push_filters(qb: &mut QueryBuilder<Postgres>, q: &OrdersQuery) {
     }
     let buyer = q.buyer.trim();
     if !buyer.is_empty() {
-        qb.push(
-            " AND concat_ws(' ', u.login, u.email, u.name, u.last_name,
-                 (SELECT string_agg(v.value, ' ') FROM order_property_values v WHERE v.order_id = o.id)) ILIKE ",
-        )
-        .push_bind(format!("%{}%", buyer.replace('%', "")));
+        qb.push(" AND ")
+            .push(BUYER_TEXT_SQL)
+            .push(" ILIKE ")
+            .push_bind(format!("%{}%", buyer.replace('%', "")));
     }
     if let Some(paid) = yes_no(&q.paid) {
         qb.push(" AND o.paid = ").push_bind(paid);

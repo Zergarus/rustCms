@@ -73,6 +73,28 @@ pub(crate) async fn list(db: &PgPool, user_id: i64, current_path: &str) -> sqlx:
         .collect())
 }
 
+/// Последние открытые вкладки пользователя, новые первыми (для палитры).
+pub(crate) async fn recent(db: &PgPool, user_id: i64, limit: i64) -> sqlx::Result<Vec<Tab>> {
+    let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+        "SELECT id, url, title, kind FROM admin_tabs WHERE user_id = $1
+         ORDER BY opened_at DESC, id DESC LIMIT $2",
+    )
+    .bind(user_id)
+    .bind(limit)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, url, title, kind)| Tab {
+            id,
+            active: false,
+            url,
+            title,
+            kind,
+        })
+        .collect())
+}
+
 fn url_ok(url: &str) -> bool {
     url.starts_with("/admin/")
         && !url.contains("//")

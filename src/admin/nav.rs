@@ -506,6 +506,15 @@ pub(crate) async fn build(
     })
 }
 
+/// Название группы меню по её коду (для подсказок палитры).
+pub(crate) fn group_label(code: &str) -> &'static str {
+    CMS_GROUPS
+        .iter()
+        .chain(SHOP_GROUPS.iter())
+        .find(|(c, _)| *c == code)
+        .map_or("", |(_, label)| label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

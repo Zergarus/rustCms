@@ -9,6 +9,7 @@ mod groups;
 mod items;
 mod modules;
 mod nav;
+mod palette;
 mod sections;
 pub(crate) mod shell;
 mod shop;
@@ -338,6 +339,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         )
         .route("/modules", get(modules::form).post(modules::save))
         .route("/prefs", post(shell::save_prefs))
+        .route("/palette", get(palette::search_fragment))
         .route("/tabs", post(tabs::open_tab))
         .route("/tabs/{id}/close", post(tabs::close_tab))
         .route("/users", get(users::list).post(users::create))

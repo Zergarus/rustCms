@@ -1,0 +1,11 @@
+{#- Содержимое #palette-results: группы результатов командной палитры. -#}
+{%- for g in groups -%}
+<div class="pal-group">
+  <div class="pal-title">{{ g.title }}</div>
+  {%- for it in g.items %}
+  <a class="pal-item" href="{{ it.url }}"><span class="pal-label">{{ it.label }}</span>{% if it.hint %} <span class="pal-hint">{{ it.hint }}</span>{% endif %}</a>
+  {%- endfor %}
+</div>
+{%- else -%}
+<div class="pal-empty">Ничего не найдено</div>
+{%- endfor -%}
