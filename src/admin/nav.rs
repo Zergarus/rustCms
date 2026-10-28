@@ -133,12 +133,32 @@ pub(crate) struct NavCtx {
     pub collections: Vec<CollectionLink>,
 }
 
-pub(crate) async fn load_ctx(db: &PgPool, user: &Access) -> sqlx::Result<NavCtx> {
-    let shop_enabled = shop_enabled(db).await?;
-    let store_control = {
-        let mut conn = db.acquire().await?;
-        crate::stock::settings(&mut conn).await?.store_control
+/// Лёгкие флаги для каждого запроса: (магазин включён, складской учёт включён).
+/// Ошибка БД не валит запрос: магазин считается включённым, учёт — выключенным.
+pub(crate) async fn flags(db: &PgPool) -> (bool, bool) {
+    let shop = shop_enabled(db).await.unwrap_or_else(|err| {
+        tracing::warn!("не удалось прочитать module_shop: {err}");
+        true
+    });
+    let store_control = match db.acquire().await {
+        Ok(mut conn) => crate::stock::settings(&mut conn)
+            .await
+            .map(|s| s.store_control)
+            .unwrap_or_else(|err| {
+                tracing::warn!("не удалось прочитать настройки склада: {err}");
+                false
+            }),
+        Err(err) => {
+            tracing::warn!("нет соединения для настроек склада: {err}");
+            false
+        }
     };
+    (shop, store_control)
+}
+
+/// Полный контекст меню (с коллекциями и счётчиками) — только для полных страниц.
+pub(crate) async fn load_ctx(db: &PgPool, user: &Access) -> sqlx::Result<NavCtx> {
+    let (shop_enabled, store_control) = flags(db).await;
     let rows: Vec<(i64, String, bool, i64)> = sqlx::query_as(
         "SELECT c.id, c.name, c.is_catalog,
                 (SELECT count(*) FROM collection_items i WHERE i.collection_id = c.id)

@@ -395,22 +395,25 @@ async fn require_access(
     let full_page =
         is_get && (!headers.contains_key("hx-request") || headers.contains_key("hx-boosted"));
 
-    let ctx = match nav::load_ctx(&state.db, &access).await {
-        Ok(ctx) => ctx,
-        Err(err) => return AppError::from(err).into_response(),
-    };
+    let (shop_enabled, store_control) = nav::flags(&state.db).await;
     // Для вкладки «Документы» в меню «Магазин»
-    access.store_control = ctx.store_control;
+    access.store_control = store_control;
 
     if full_page {
-        match build_shell(&state, &access, &ctx, &jar, &path).await {
+        // коллекции и счётчики нужны только полной странице
+        let shell = async {
+            let ctx = nav::load_ctx(&state.db, &access).await?;
+            build_shell(&state, &access, &ctx, &jar, &path).await
+        }
+        .await;
+        match shell {
             Ok(shell) => access.shell = Some(shell),
             Err(err) => return AppError::from(err).into_response(),
         }
     }
 
     let user_id = access.user.id;
-    let res = if nav::mode_for(&path) == nav::Mode::Shop && !ctx.shop_enabled {
+    let res = if nav::mode_for(&path) == nav::Mode::Shop && !shop_enabled {
         match render(&state, "module_off.html", context! { user => &access }) {
             Ok(html) => (StatusCode::NOT_FOUND, html).into_response(),
             Err(err) => err.into_response(),
