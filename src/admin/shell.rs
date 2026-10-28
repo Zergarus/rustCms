@@ -209,6 +209,55 @@ mod page_tests {
     }
 
     #[sqlx::test]
+    async fn shell_renders_cms_menu(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (status, body) = get(&app, "/admin", &cookie).await;
+        assert_eq!(status, 200);
+        for s in [
+            "Контент",
+            "Модули",
+            "Система",
+            "data-palette-open",
+            "id=\"open-tabs\"",
+        ] {
+            assert!(body.contains(s), "нет {s}");
+        }
+        assert!(!body.contains("Типы цен"));
+    }
+
+    #[sqlx::test]
+    async fn shell_renders_shop_menu(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (status, body) = get(&app, "/admin/shop/stores", &cookie).await;
+        assert_eq!(status, 200);
+        for s in ["Все разделы", "Типы цен", "Поставщики"] {
+            assert!(body.contains(s), "нет {s}");
+        }
+        assert!(!body.contains("Документы"));
+    }
+
+    #[sqlx::test]
+    async fn shell_theme_attribute_from_prefs(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (_, body) = get(&app, "/admin", &cookie).await;
+        assert!(!body.contains("data-theme="));
+        sqlx::query("UPDATE users SET admin_prefs = '{\"theme\":\"light\"}' WHERE login = 'smoke'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let (_, body) = get(&app, "/admin", &cookie).await;
+        assert!(body.contains("data-theme=\"light\""));
+    }
+
+    #[test]
+    fn shell_old_shop_nav_gone() {
+        assert!(!std::path::Path::new("templates/admin/shop/_nav.html").exists());
+    }
+
+    #[sqlx::test]
     async fn module_off_404(db: PgPool) {
         let app = crate::app(test_state(db.clone()));
         let cookie = admin_cookie(&db).await;

@@ -3,7 +3,6 @@
 {% set tab = "rounding" %}
 {% block title %}{% if id %}Правило округления{% else %}Новое правило округления{% endif %}{% endblock %}
 {% block content %}
-{% include "shop/_nav.html" %}
 <div class="breadcrumbs"><a href="/admin/shop/rounding">Правила округления</a> /</div>
 <h1>{% if id %}Правило округления{% else %}Новое правило округления{% endif %}</h1>
 <form class="card form" method="post" action="{% if id %}/admin/shop/rounding/{{ id }}{% else %}/admin/shop/rounding{% endif %}">

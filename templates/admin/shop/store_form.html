@@ -3,7 +3,6 @@
 {% set tab = "stores" %}
 {% block title %}{% if id %}{{ form.name }}{% else %}Новый склад{% endif %}{% endblock %}
 {% block content %}
-{% include "shop/_nav.html" %}
 <div class="breadcrumbs"><a href="/admin/shop/stores">Склады</a> /</div>
 <h1>{% if id %}{{ form.name }}{% else %}Новый склад{% endif %}</h1>
 <form class="card form" method="post" action="{% if id %}/admin/shop/stores/{{ id }}{% else %}/admin/shop/stores{% endif %}">

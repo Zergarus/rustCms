@@ -3,7 +3,6 @@
 {% set tab = "currency-rates" %}
 {% block title %}{% if id %}Курс валюты{% else %}Новый курс{% endif %}{% endblock %}
 {% block content %}
-{% include "shop/_nav.html" %}
 <div class="breadcrumbs"><a href="/admin/shop/currency-rates">Курсы валют</a> /</div>
 <h1>{% if id %}Курс валюты{% else %}Новый курс{% endif %}</h1>
 <form class="card form" method="post" action="{% if id %}/admin/shop/currency-rates/{{ id }}{% else %}/admin/shop/currency-rates{% endif %}">

@@ -2792,7 +2792,7 @@ async fn exchange_settings_page(db: PgPool) {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (_, home) = get(&app, "/admin", &other).await;
-    assert!(!home.contains("Обмен с 1С"));
+    assert!(!home.contains("href=\"/admin/exchange\""));
     sqlx::query("INSERT INTO group_permissions (group_id, permission) VALUES ($1, 'exchange.1c')")
         .bind(group)
         .execute(&db)
@@ -2802,5 +2802,5 @@ async fn exchange_settings_page(db: PgPool) {
     assert_eq!(status, StatusCode::OK);
     let (st, home) = get(&app, "/admin", &other).await;
     assert_eq!(st, StatusCode::OK, "{home}");
-    assert!(home.contains("Обмен с 1С"), "{home}");
+    assert!(home.contains("href=\"/admin/exchange\""), "{home}");
 }

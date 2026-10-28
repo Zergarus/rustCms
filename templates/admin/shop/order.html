@@ -3,7 +3,6 @@
 {% set tab = "orders" %}
 {% block title %}Заказ № {{ order.account_number }}{% endblock %}
 {% block content %}
-{% include "shop/_nav.html" %}
 <div class="breadcrumbs"><a href="/admin/shop/orders">Заказы</a> /</div>
 <div class="page-head">
   <h1>Заказ № {{ order.account_number }} <span class="muted count">от {{ order.created_at[:16]|replace("T", " ") }}</span></h1>

@@ -1,78 +1,107 @@
-{%- macro icon(name) -%}
-<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-  {%- if name == "dashboard" -%}
-    <rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>
-  {%- elif name == "collections" -%}
-    <path d="M12 3 2.5 8 12 13l9.5-5L12 3Z"/><path d="m2.5 12.5 9.5 5 9.5-5"/><path d="m2.5 17 9.5 5 9.5-5"/>
-  {%- elif name == "users" -%}
-    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-  {%- elif name == "groups" -%}
-    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/>
-  {%- elif name == "shop" -%}
-    <circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M2 3h3l2.6 11.4a2 2 0 0 0 2 1.6h7.9a2 2 0 0 0 2-1.5L21 7H6"/>
-  {%- elif name == "discounts" -%}
-    <path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8Z"/><circle cx="7.5" cy="7.5" r="1.5"/>
-  {%- elif name == "exchange" -%}
-    <path d="M7 4 3 8l4 4"/><path d="M3 8h14"/><path d="m17 20 4-4-4-4"/><path d="M21 16H7"/>
-  {%- elif name == "logout" -%}
-    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>
-  {%- endif -%}
-</svg>
-{%- endmacro -%}
 <!doctype html>
-<html lang="ru">
+{%- set shell = user.shell if user else none %}
+<html lang="ru"{% if shell and shell.prefs.theme != "system" %} data-theme="{{ shell.prefs.theme }}"{% endif %}>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Админка{% endblock %} — CMS</title>
+  <link rel="preload" href="/admin/static/fonts/inter-cyrillic-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/admin/static/admin.css">
-  {#- 403 показываем как обычную страницу, а не alert -#}
+  {#- 403 показываем как обычную страницу, ошибки остальных кодов выводит admin.js -#}
   <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"403","swap":true,"error":false},{"code":"[45]..","swap":false,"error":true}]}'>
   <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
 </head>
-<body hx-boost="true" {% if user %}class="with-sidebar"{% endif %}>
-  {% if user %}
-  {#- Пункты меню: чтобы добавить раздел, допишите строку и иконку в макрос выше.
-      show — видит ли пункт текущий пользователь (сервер всё равно проверяет права сам) -#}
-  {% set menu = [
-    {"id": "dashboard", "url": "/admin", "label": "Рабочий стол", "show": true},
-    {"id": "collections", "url": "/admin/collections", "label": "Коллекции", "show": user.can_see_collections},
-    {"id": "shop", "url": "/admin/shop/orders" if "orders.manage" in user.permissions else "/admin/shop/stores", "label": "Магазин", "show": "shop.manage" in user.permissions or "orders.manage" in user.permissions},
-    {"id": "discounts", "url": "/admin/discounts", "label": "Скидки", "show": "discounts.manage" in user.permissions},
-    {"id": "exchange", "url": "/admin/exchange", "label": "Обмен с 1С", "show": "exchange.1c" in user.permissions or "exchange.1c.sale" in user.permissions},
-    {"id": "users", "url": "/admin/users", "label": "Пользователи", "show": "users.manage" in user.permissions},
-    {"id": "groups", "url": "/admin/groups", "label": "Группы", "show": user.is_admin},
-  ] %}
-  <aside class="sidebar">
-    <a class="brand" href="/admin" title="CMS">CMS</a>
-    <nav class="sidebar-nav">
-      {% for item in menu if item.show %}
-      <a href="{{ item.url }}" class="sidebar-item{% if section == item.id %} active{% endif %}"
-         {% if section == item.id %}aria-current="page"{% endif %}>
-        {{ icon(item.id) }}
-        <span>{{ item.label }}</span>
-      </a>
-      {% endfor %}
-    </nav>
-    <div class="sidebar-bottom">
-      <div class="avatar" title="{{ user.login }}">{{ user.login[:1]|upper }}</div>
-      <form method="post" action="/admin/logout">
-        <button class="sidebar-item" type="submit">
-          {{ icon("logout") }}
-          <span>Выйти</span>
-        </button>
-      </form>
-    </div>
-  </aside>
-  {% endif %}
+<body hx-boost="true"{% if shell %} class="with-shell" data-tabs="{{ 'on' if shell.prefs.tabs else 'off' }}"{% endif %}{% if no_tab %} data-no-tab{% endif %}>
+  {% if shell %}
+  {% import "_ui.html" as ui %}
+  <div class="shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="side-head">
+        <a class="logo" href="/admin" title="CMS">C</a>
+        <span class="side-name">CMS</span>
+        <button class="ico" type="button" data-palette-open aria-label="Поиск и команды (Ctrl+K)">{{ ui.icon("search") }}</button>
+      </div>
+      <button class="nav search-btn" type="button" data-palette-open>
+        {{ ui.icon("search") }}<span class="grow">Найти или выполнить…</span><kbd class="kbd">Ctrl K</kbd>
+      </button>
+      {% include "_nav.html" %}
+      <div class="side-bottom">
+        <details class="profile">
+          <summary class="profile-btn" title="{{ user.login }}">
+            <span class="avatar">{{ user.login[:1]|upper }}</span>
+            <span class="grow">{{ user.login }}</span>
+          </summary>
+          <div class="profile-menu">
+            <form method="post" action="/admin/prefs" hx-boost="false">
+              <input type="hidden" name="back" value="{{ shell.path }}">
+              <fieldset class="plain theme-pick">
+                <legend class="muted small">Тема</legend>
+                <label class="check"><input type="radio" name="theme" value="dark"{% if shell.prefs.theme == "dark" %} checked{% endif %}> <span>Тёмная</span></label>
+                <label class="check"><input type="radio" name="theme" value="light"{% if shell.prefs.theme == "light" %} checked{% endif %}> <span>Светлая</span></label>
+                <label class="check"><input type="radio" name="theme" value="system"{% if shell.prefs.theme == "system" %} checked{% endif %}> <span>Как в системе</span></label>
+              </fieldset>
+              <label class="check"><input type="checkbox" name="tabs" value="on"{% if shell.prefs.tabs %} checked{% endif %}> <span>Открытые вкладки</span></label>
+              <button class="btn" type="submit">Применить</button>
+            </form>
+            <form method="post" action="/admin/logout" hx-boost="false">
+              <button class="btn logout" type="submit">{{ ui.icon("logout") }}<span>Выйти</span></button>
+            </form>
+          </div>
+        </details>
+      </div>
+    </aside>
+    <div class="shell-main">
+      <header class="topbar">
+        <button class="ico nav-toggle" type="button" data-nav-toggle aria-controls="sidebar" aria-label="Меню">{{ ui.icon("menu") }}</button>
+        <div id="open-tabs" class="open-tabs">
+          {%- for t in shell.tabs %}
+          <div class="rec{% if t.active %} on{% endif %}" data-tab-id="{{ t.id }}" data-kind="{{ t.kind }}">
+            <a class="rec-open" href="{{ t.url }}"><span class="dot"></span><span class="rec-title">{{ t.title }}</span></a>
+            <button class="rec-x" type="button" data-tab-close="{{ t.id }}" aria-label="Закрыть вкладку «{{ t.title }}»">{{ ui.icon("close") }}</button>
+          </div>
+          {%- endfor %}
+        </div>
+      </header>
+    {% endif %}
   <main class="{% block main_class %}container{% endblock %}">
-    {% if user and user.shell and user.shell.flash %}<div class="flash" data-kind="{{ user.shell.flash.kind }}">{{ user.shell.flash.text }}</div>{% endif %}
     {% block content %}{% endblock %}
   </main>
-  <script>
-    document.addEventListener("htmx:responseError", function (e) {
-      alert("Ошибка " + e.detail.xhr.status + ": " + (e.detail.xhr.responseText || "").slice(0, 300));
-    });
-  </script>
+    {% if shell %}
+    </div>
+  </div>
+
+  {% for g in shell.nav.goto %}<a data-goto="{{ g[0] }}" href="{{ g[1] }}" hidden tabindex="-1" aria-hidden="true"></a>{% endfor %}
+
+  <div id="savebar" class="savebar" hidden>
+    <span>Есть несохранённые изменения</span>
+    <button class="btn" type="button" data-savebar-reset>Отменить</button>
+    <button class="btn primary" type="button" data-savebar-save>Применить</button>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite">
+    {% if shell.flash %}<div class="toast" data-kind="{{ shell.flash.kind }}" role="status">{{ shell.flash.text }}</div>{% endif %}
+  </div>
+
+  <dialog id="palette" class="palette" aria-label="Поиск и команды">
+    <input id="palette-q" type="search" name="q" placeholder="Найти раздел, запись или действие…" autocomplete="off"
+           hx-get="/admin/palette" hx-trigger="input changed delay:150ms, focus once" hx-target="#palette-results" hx-swap="innerHTML" hx-boost="false">
+    <div id="palette-results" class="palette-results"></div>
+  </dialog>
+
+  <dialog id="hotkeys" class="palette hotkeys" aria-label="Горячие клавиши">
+    <h2>Горячие клавиши</h2>
+    <dl class="keys">
+      <dt><kbd class="kbd">Ctrl</kbd> <kbd class="kbd">K</kbd></dt><dd>Поиск и команды</dd>
+      <dt><kbd class="kbd">?</kbd></dt><dd>Список клавиш</dd>
+      <dt><kbd class="kbd">G</kbd> <kbd class="kbd">D</kbd></dt><dd>Рабочий стол</dd>
+      <dt><kbd class="kbd">G</kbd> <kbd class="kbd">O</kbd></dt><dd>Заказы</dd>
+      <dt><kbd class="kbd">G</kbd> <kbd class="kbd">C</kbd></dt><dd>Коллекции</dd>
+      <dt><kbd class="kbd">G</kbd> <kbd class="kbd">U</kbd></dt><dd>Пользователи</dd>
+      <dt><kbd class="kbd">Ctrl</kbd> <kbd class="kbd">S</kbd></dt><dd>Применить изменения</dd>
+      <dt><kbd class="kbd">Esc</kbd></dt><dd>Закрыть окно</dd>
+    </dl>
+    <form method="dialog"><button class="btn">Закрыть</button></form>
+  </dialog>
+  {% endif %}
 </body>
 </html>

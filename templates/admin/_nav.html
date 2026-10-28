@@ -1,0 +1,45 @@
+{#- Меню строится только из user.shell.nav -#}
+{% import "_ui.html" as ui %}
+{% set nav = user.shell.nav %}
+{% macro modules(nav, ui) %}
+  <details class="nav-group" data-nav-group="modules" open>
+    <summary class="grp"><span class="grp-label">Модули</span></summary>
+    <a class="nav" href="{{ nav.shop.url|safe }}" data-module="shop">
+      {{ ui.icon("shop") }}<span class="grow">{{ nav.shop.label }}</span>
+      {% if nav.shop.count %}<span class="nav-count">{{ nav.shop.count }}</span>{% endif %}
+      <span class="chev" aria-hidden="true">›</span>
+    </a>
+  </details>
+{% endmacro %}
+<nav class="side-nav" aria-label="Разделы">
+  {% if nav.mode == "shop" %}
+  <a class="nav" href="/admin">{{ ui.icon("back") }}<span class="grow">Все разделы</span></a>
+  <div class="nav-title">{{ ui.icon("shop") }}<span>Магазин</span></div>
+  {% endif %}
+
+  {% for g in nav.groups %}
+  {% if g.code == "system" and nav.shop %}{{ modules(nav, ui) }}{% endif %}
+  {% if g.code == "main" %}
+    {% for it in g.items %}
+    <a class="nav{% if it.active %} on{% endif %}" href="{{ it.url|safe }}"{% if it.active %} aria-current="page"{% endif %}>
+      {{ ui.icon(it.code) }}<span class="grow">{{ it.label }}</span>
+    </a>
+    {% endfor %}
+  {% else %}
+  <details class="nav-group" data-nav-group="{{ g.code }}" open>
+    <summary class="grp">{% if nav.mode == "cms" or g.code != "shop_main" %}<span class="grp-label">{{ g.label }}</span>{% else %}<span class="grp-label">Основное</span>{% endif %}</summary>
+    {% for it in g.items %}
+    <a class="nav{% if it.active %} on{% endif %}" href="{{ it.url|safe }}"{% if it.active %} aria-current="page"{% endif %}>
+      {% if g.code == "content" %}{{ ui.icon("collection") }}{% else %}{{ ui.icon(it.code) }}{% endif %}
+      <span class="grow">{{ it.label }}</span>
+      {% if it.count %}<span class="nav-count">{{ it.count }}</span>{% endif %}
+    </a>
+    {% endfor %}
+    {% if g.code == "content" and nav.more_collections %}
+    <a class="nav more" href="/admin/collections">{{ ui.icon("plus") }}<span class="grow">Ещё…</span></a>
+    {% endif %}
+  </details>
+  {% endif %}
+  {% endfor %}
+  {% if nav.shop and not nav.groups|selectattr("code", "equalto", "system")|list %}{{ modules(nav, ui) }}{% endif %}
+</nav>

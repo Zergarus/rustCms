@@ -3,7 +3,6 @@
 {% set tab = "orders" %}
 {% block title %}Заказы{% endblock %}
 {% block content %}
-{% include "shop/_nav.html" %}
 <div class="page-head"><h1>Заказы <span class="muted count">{{ total }}</span></h1></div>
 <form class="card form filters" method="get" action="/admin/shop/orders">
   <div class="grid-4">

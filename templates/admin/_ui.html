@@ -1,0 +1,94 @@
+{#- Макросы интерфейса. Подключение: {% import "_ui.html" as ui %} -#}
+
+{%- macro icon(name) -%}
+<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  {%- if name == "desk" or name == "dashboard" -%}
+    <rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>
+  {%- elif name == "collection" or name == "collections" -%}
+    <path d="M12 3 2.5 8 12 13l9.5-5L12 3Z"/><path d="m2.5 12.5 9.5 5 9.5-5"/>
+  {%- elif name == "users" -%}
+    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+  {%- elif name == "groups" -%}
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/>
+  {%- elif name == "shop" -%}
+    <circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M2 3h3l2.6 11.4a2 2 0 0 0 2 1.6h7.9a2 2 0 0 0 2-1.5L21 7H6"/>
+  {%- elif name == "modules" -%}
+    <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/>
+  {%- elif name == "discounts" or name == "cumulative" -%}
+    <path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8Z"/><circle cx="7.5" cy="7.5" r="1.5"/>
+  {%- elif name == "exchange" -%}
+    <path d="M7 4 3 8l4 4"/><path d="M3 8h14"/><path d="m17 20 4-4-4-4"/><path d="M21 16H7"/>
+  {%- elif name == "orders" -%}
+    <path d="M6 2h12l2 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7l2-5Z"/><path d="M4 7h16"/><path d="M9 11h6"/>
+  {%- elif name == "search" -%}
+    <circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>
+  {%- elif name == "menu" -%}
+    <path d="M4 6h16M4 12h16M4 18h16"/>
+  {%- elif name == "back" -%}
+    <path d="m15 18-6-6 6-6"/>
+  {%- elif name == "plus" -%}
+    <path d="M12 5v14M5 12h14"/>
+  {%- elif name == "close" -%}
+    <path d="M6 6l12 12M18 6 6 18"/>
+  {%- elif name == "logout" -%}
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>
+  {%- else -%}
+    <rect x="8" y="8" width="8" height="8" rx="2"/>
+  {%- endif -%}
+</svg>
+{%- endmacro -%}
+
+{#- Шапка страницы: crumbs — пары (название, адрес|none), последний элемент — заголовок.
+    actions — готовая разметка кнопок (передавайте только литералы шаблона) либо call-блок. -#}
+{%- macro page_head(crumbs, actions=None) -%}
+<div class="page-head">
+  <div class="page-head-main">
+    {%- if crumbs|length > 1 %}
+    <nav class="breadcrumbs" aria-label="Путь">
+      {%- for c in crumbs[:-1] %}{% if c[1] %}<a href="{{ c[1] }}">{{ c[0] }}</a>{% else %}<span>{{ c[0] }}</span>{% endif %}<span class="sep" aria-hidden="true">/</span>{% endfor -%}
+    </nav>
+    {%- endif %}
+    <h1>{{ crumbs[-1][0] }}</h1>
+  </div>
+  {%- if actions or caller %}
+  <div class="head-actions">{% if actions %}{{ actions|safe }}{% endif %}{% if caller %}{{ caller() }}{% endif %}</div>
+  {%- endif %}
+</div>
+{%- endmacro -%}
+
+{#- Вкладки внутри страницы: items — тройки (код, название, адрес); содержимое подгружается в target -#}
+{%- macro tabs(items, active, target) -%}
+<nav class="tabs" role="tablist">
+  {%- for t in items %}
+  <a role="tab" href="{{ t[2] }}" class="tab{% if t[0] == active %} active{% endif %}"
+     {% if t[0] == active %}aria-selected="true" aria-current="page"{% else %}aria-selected="false"{% endif %}
+     hx-get="{{ t[2] }}" hx-target="{{ target }}" hx-push-url="true">{{ t[1] }}</a>
+  {%- endfor %}
+</nav>
+{%- endmacro -%}
+
+{#- Строка «свойство — значение»: {% call ui.prop("Статус") %}…{% endcall %} -#}
+{%- macro prop(label) -%}
+<div class="prop"><div class="prop-label">{{ label }}</div><div class="prop-val">{{ caller() }}</div></div>
+{%- endmacro -%}
+
+{%- macro card(title) -%}
+<section class="card">
+  {%- if title %}<h2>{{ title }}</h2>{% endif %}
+  {{ caller() }}
+</section>
+{%- endmacro -%}
+
+{#- Боковая колонка карточки записи -#}
+{%- macro aside() -%}
+<aside class="aside">{{ caller() }}</aside>
+{%- endmacro -%}
+
+{%- macro empty(text, action_label=None, action_url=None) -%}
+<div class="card empty">
+  <p class="muted">{{ text }}</p>
+  {%- if action_label and action_url %}
+  <p><a class="btn primary" href="{{ action_url }}">{{ action_label }}</a></p>
+  {%- endif %}
+</div>
+{%- endmacro -%}

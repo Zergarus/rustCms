@@ -1143,7 +1143,7 @@ mod tests {
         let (status, _) = post_form(&app, "/admin/exchange/sale", &sale, "").await;
         assert_eq!(status, StatusCode::SEE_OTHER);
         let (_, home) = get(&app, "/admin", &sale).await;
-        assert!(home.contains("Обмен с 1С"));
+        assert!(home.contains("href=\"/admin/exchange\""));
 
         // только каталог
         let (status, html) = get(&app, "/admin/exchange", &catalog).await;

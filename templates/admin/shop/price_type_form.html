@@ -3,7 +3,6 @@
 {% set tab = "price-types" %}
 {% block title %}{% if id %}{{ form.name }}{% else %}Новый тип цен{% endif %}{% endblock %}
 {% block content %}
-{% include "shop/_nav.html" %}
 <div class="breadcrumbs"><a href="/admin/shop/price-types">Типы цен</a> /</div>
 <h1>{% if id %}{{ form.name }}{% else %}Новый тип цен{% endif %}</h1>
 <form class="card form" method="post" action="{% if id %}/admin/shop/price-types/{{ id }}{% else %}/admin/shop/price-types{% endif %}">

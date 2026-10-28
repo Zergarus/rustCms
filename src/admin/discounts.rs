@@ -2211,7 +2211,7 @@ mod tests {
 
         // пункт меню — только с правом
         let (_, home) = get(&app, "/admin", &manager).await;
-        let item = "&#x2f;admin&#x2f;discounts";
+        let item = "href=\"/admin/discounts\"";
         assert!(home.contains(item), "{home}");
         let (_, home) = get(&app, "/admin", &none).await;
         assert!(!home.contains(item));
