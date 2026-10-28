@@ -169,7 +169,7 @@ pub(crate) async fn load_ctx(db: &PgPool, user: &Access) -> sqlx::Result<NavCtx>
 /// Включён ли режим магазина (по умолчанию да).
 pub(crate) async fn shop_enabled(db: &PgPool) -> sqlx::Result<bool> {
     let value: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM options WHERE module = 'admin' AND name = 'shop_enabled'",
+        "SELECT value FROM options WHERE module = 'admin' AND name = 'module_shop'",
     )
     .fetch_optional(db)
     .await?;
@@ -178,7 +178,7 @@ pub(crate) async fn shop_enabled(db: &PgPool) -> sqlx::Result<bool> {
 
 pub(crate) async fn set_shop_enabled(db: &PgPool, on: bool) -> sqlx::Result<()> {
     sqlx::query(
-        "INSERT INTO options (module, name, value) VALUES ('admin', 'shop_enabled', $1)
+        "INSERT INTO options (module, name, value) VALUES ('admin', 'module_shop', $1)
          ON CONFLICT (module, name) DO UPDATE SET value = EXCLUDED.value",
     )
     .bind(if on { "Y" } else { "N" })
@@ -380,14 +380,14 @@ pub(crate) async fn build(
     let all = sections(user, ctx);
 
     let orders_count = if ctx.shop_enabled && user.can(crate::access::ORDERS_MANAGE) {
-        Some(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM orders WHERE status = $1 AND NOT canceled",
-            )
-            .bind(crate::sale::INITIAL_STATUS)
-            .fetch_one(db)
-            .await?,
+        // нулевой счётчик не показываем
+        let n = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM orders WHERE status = $1 AND NOT canceled",
         )
+        .bind(crate::sale::INITIAL_STATUS)
+        .fetch_one(db)
+        .await?;
+        (n > 0).then_some(n)
     } else {
         None
     };
@@ -450,10 +450,8 @@ pub(crate) async fn build(
         })
         .collect();
 
-    let shop = if mode == Mode::Cms
-        && ctx.shop_enabled
-        && (user.can(crate::access::SHOP_MANAGE) || user.can(crate::access::ORDERS_MANAGE))
-    {
+    // видна, если доступен хоть один раздел магазина (при выключенном модуле их нет)
+    let shop = if mode == Mode::Cms {
         all.iter()
             .find(|s| s.mode == Mode::Shop)
             .map(|first| NavItem {
@@ -597,6 +595,12 @@ mod tests {
         assert!(sections(&user, &ctx).iter().any(|s| s.mode == Mode::Shop));
 
         set_shop_enabled(&db, false).await.unwrap();
+        let row: (String, String, String) =
+            sqlx::query_as("SELECT module, name, value FROM options WHERE module = 'admin'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(row, ("admin".into(), "module_shop".into(), "N".into()));
         let ctx = load_ctx(&db, &user).await.unwrap();
         assert!(!ctx.shop_enabled);
         assert!(
@@ -769,5 +773,37 @@ mod tests {
         assert_eq!(active(&nav), ["desk"]);
         let nav = build(&db, &user, &ctx, "/admin/users").await.unwrap();
         assert_eq!(active(&nav), ["users"]);
+    }
+
+    #[sqlx::test]
+    async fn orders_badge_absent_when_zero(db: PgPool) {
+        let user = access(&db, "root", None).await;
+        let ctx = load_ctx(&db, &user).await.unwrap();
+        let shop = build(&db, &user, &ctx, "/admin/shop/orders").await.unwrap();
+        let orders = shop.groups[0]
+            .items
+            .iter()
+            .find(|i| i.code == "orders")
+            .unwrap();
+        assert_eq!(orders.count, None);
+        let cms = build(&db, &user, &ctx, "/admin").await.unwrap();
+        assert_eq!(cms.shop.unwrap().count, None);
+    }
+
+    #[sqlx::test]
+    async fn shop_button_for_any_shop_section(db: PgPool) {
+        let user = access(&db, "marketer", Some(&["admin.access", "discounts.manage"])).await;
+        let ctx = load_ctx(&db, &user).await.unwrap();
+        let nav = build(&db, &user, &ctx, "/admin").await.unwrap();
+        assert_eq!(nav.shop.unwrap().url, "/admin/discounts");
+        set_shop_enabled(&db, false).await.unwrap();
+        let ctx = load_ctx(&db, &user).await.unwrap();
+        assert!(
+            build(&db, &user, &ctx, "/admin")
+                .await
+                .unwrap()
+                .shop
+                .is_none()
+        );
     }
 }
