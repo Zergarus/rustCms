@@ -817,7 +817,8 @@ mod tests {
         let id = first_doc(&db).await;
         let (_, html) = get(&app, &format!("/admin/shop/store-docs/{id}"), &cookie).await;
         assert!(
-            html.contains("Сохранить") && html.contains("Провести"),
+            html.contains("class=\"btn primary\" type=\"submit\">Сохранить</button>")
+                && html.contains("Провести"),
             "{html}"
         );
         let before: f64 = sqlx::query_scalar(
@@ -927,7 +928,10 @@ mod tests {
         .await;
         assert!(s.is_success(), "{s}");
         assert!(html.contains("Не указан поставщик."), "{html}");
-        assert!(html.contains("Сохранить"), "{html}");
+        assert!(
+            html.contains("class=\"btn primary\" type=\"submit\">Сохранить</button>"),
+            "{html}"
+        );
         let status: String =
             sqlx::query_scalar("SELECT status::text FROM store_documents WHERE id = $1")
                 .bind(id)
