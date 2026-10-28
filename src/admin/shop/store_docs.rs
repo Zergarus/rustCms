@@ -844,7 +844,11 @@ mod tests {
         .unwrap();
         assert_eq!(after, before + 3.0);
         let (_, html) = get(&app, &format!("/admin/shop/store-docs/{id}"), &cookie).await;
-        assert!(!html.contains("Сохранить"), "{html}");
+        // проведённый документ только для чтения: кнопки сохранения формы документа нет
+        assert!(
+            !html.contains("class=\"btn primary\" type=\"submit\">Сохранить</button>"),
+            "{html}"
+        );
         assert!(html.contains("Отменить проведение"), "{html}");
         // Отмена возвращает остаток
         let (s, _) = post_form(

@@ -41,7 +41,7 @@
                 <label class="check"><input type="radio" name="theme" value="system"{% if shell.prefs.theme == "system" %} checked{% endif %}> <span>Как в системе</span></label>
               </fieldset>
               <label class="check"><input type="checkbox" name="tabs" value="on"{% if shell.prefs.tabs %} checked{% endif %}> <span>Открытые вкладки</span></label>
-              <button class="btn" type="submit">Применить</button>
+              <button class="btn" type="submit">Сохранить</button>
             </form>
             <form method="post" action="/admin/logout" hx-boost="false">
               <button class="btn logout" type="submit">{{ ui.icon("logout") }}<span>Выйти</span></button>
@@ -75,7 +75,7 @@
   <div id="savebar" class="savebar" hidden>
     <span>Есть несохранённые изменения</span>
     <button class="btn" type="button" data-savebar-reset>Отменить</button>
-    <button class="btn primary" type="button" data-savebar-save>Применить</button>
+    <button class="btn primary" type="button" data-savebar-save>Сохранить</button>
   </div>
 
   <div id="toasts" class="toasts" aria-live="polite">
@@ -97,7 +97,7 @@
       <dt><kbd class="kbd">G</kbd> <kbd class="kbd">O</kbd></dt><dd>Заказы</dd>
       <dt><kbd class="kbd">G</kbd> <kbd class="kbd">C</kbd></dt><dd>Коллекции</dd>
       <dt><kbd class="kbd">G</kbd> <kbd class="kbd">U</kbd></dt><dd>Пользователи</dd>
-      <dt><kbd class="kbd">Ctrl</kbd> <kbd class="kbd">S</kbd></dt><dd>Применить изменения</dd>
+      <dt><kbd class="kbd">Ctrl</kbd> <kbd class="kbd">S</kbd></dt><dd>Сохранить</dd>
       <dt><kbd class="kbd">Esc</kbd></dt><dd>Закрыть окно</dd>
     </dl>
     <form method="dialog"><button class="btn">Закрыть</button></form>
