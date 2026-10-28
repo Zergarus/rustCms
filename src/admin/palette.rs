@@ -190,6 +190,8 @@ pub(crate) async fn search(
         let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(
             "SELECT id, login, email FROM users
              WHERE login ILIKE $1 ESCAPE '\\' OR COALESCE(email, '') ILIKE $1 ESCAPE '\\'
+                OR name ILIKE $1 ESCAPE '\\' OR last_name ILIKE $1 ESCAPE '\\'
+                OR concat_ws(' ', last_name, name) ILIKE $1 ESCAPE '\\'
              ORDER BY id LIMIT 5",
         )
         .bind(&pattern)
@@ -222,7 +224,7 @@ pub(super) async fn search_fragment(
     Extension(user): Extension<Access>,
     Query(query): Query<PaletteQuery>,
 ) -> AppResult<Html<String>> {
-    let ctx = nav::load_ctx(&state.db, &user).await?;
+    let ctx = nav::load_ctx_light(&state.db, &user).await?;
     let groups = search(&state.db, &user, &ctx, &query.q).await?;
     render(&state, "_palette.html", context! { groups })
 }
@@ -384,5 +386,22 @@ mod tests {
         assert!(body.contains("Недавние"), "{body}");
         let (a, b) = (body.find("Вторая"), body.find("Первая"));
         assert!(a.is_some() && b.is_some() && a < b, "{body}");
+    }
+
+    #[sqlx::test]
+    async fn palette_finds_user_by_name(db: PgPool) {
+        sqlx::query(
+            "INSERT INTO users (login, password_hash, name, last_name) VALUES ('ivan1', 'x', 'Иван', 'Петренко')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        for q in ["Петренко", "иван", "Петренко Иван"] {
+            let (status, body) = pal(&app, &cookie, q).await;
+            assert_eq!(status, 200);
+            assert!(body.contains("ivan1"), "{q}: {body}");
+        }
     }
 }

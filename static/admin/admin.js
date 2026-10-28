@@ -122,6 +122,12 @@
     if (dirtyForm && e.target === dirtyForm) submitting = true;
   });
 
+  // сохранение не удалось (ошибка ответа или сети): страница остаётся, защита от ухода возвращается
+  document.addEventListener('htmx:afterRequest', function (e) {
+    var d = e.detail || {};
+    if (dirtyForm && d.elt === dirtyForm && !d.successful) submitting = false;
+  });
+
   window.addEventListener('beforeunload', function (e) {
     if (isDirty() && !submitting) {
       e.preventDefault();

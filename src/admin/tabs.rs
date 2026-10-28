@@ -556,4 +556,39 @@ mod tests {
         assert_eq!(status, 404);
         assert!(!body.contains(r#"hx-post="/admin/tabs""#), "{body}");
     }
+
+    #[sqlx::test]
+    async fn close_active_location_get_has_shell(db: PgPool) {
+        use tower::ServiceExt;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        open_tab(&app, &cookie, "/admin/users", "Пользователи").await;
+        open_tab(&app, &cookie, "/admin/groups", "Группы").await;
+        let id: i64 = sqlx::query_scalar("SELECT id FROM admin_tabs WHERE key = '/admin/groups'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let (_, h, _) = post_form_raw(
+            &app,
+            &format!("/admin/tabs/{id}/close"),
+            &cookie,
+            "current=%2Fadmin%2Fgroups",
+        )
+        .await;
+        let loc: serde_json::Value =
+            serde_json::from_str(h["hx-location"].to_str().unwrap()).unwrap();
+        let path = loc["path"].as_str().unwrap();
+        // htmx при HX-Location с целью body шлёт только HX-Request
+        let req = axum::http::Request::get(path)
+            .header(axum::http::header::COOKIE, &cookie)
+            .header("HX-Request", "true")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), 200);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("data-palette-open"));
+    }
 }

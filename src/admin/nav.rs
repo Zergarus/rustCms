@@ -158,12 +158,23 @@ pub(crate) async fn flags(db: &PgPool) -> (bool, bool) {
 
 /// Полный контекст меню (с коллекциями и счётчиками) — только для полных страниц.
 pub(crate) async fn load_ctx(db: &PgPool, user: &Access) -> sqlx::Result<NavCtx> {
+    load_ctx_with(db, user, true).await
+}
+
+/// Контекст без счётчиков записей (`count = 0`): для палитры, где счётчики не нужны.
+pub(crate) async fn load_ctx_light(db: &PgPool, user: &Access) -> sqlx::Result<NavCtx> {
+    load_ctx_with(db, user, false).await
+}
+
+async fn load_ctx_with(db: &PgPool, user: &Access, counts: bool) -> sqlx::Result<NavCtx> {
     let (shop_enabled, store_control) = flags(db).await;
     let rows: Vec<(i64, String, bool, i64)> = sqlx::query_as(
         "SELECT c.id, c.name, c.is_catalog,
-                (SELECT count(*) FROM collection_items i WHERE i.collection_id = c.id)
+                CASE WHEN $1 THEN (SELECT count(*) FROM collection_items i WHERE i.collection_id = c.id)
+                     ELSE 0 END
          FROM collections c ORDER BY c.sort, c.id",
     )
+    .bind(counts)
     .fetch_all(db)
     .await?;
     let collections = rows
@@ -269,7 +280,10 @@ pub(crate) fn sections(user: &Access, ctx: &NavCtx) -> Vec<Section> {
                 [one] => format!("/admin/collections/{}/items", one.id),
                 _ => "/admin/collections".to_string(),
             };
-            s("products", "Товары", &url, "shop_main");
+            // без доступного каталога раздел вёл бы в пустоту
+            if !catalogs.is_empty() {
+                s("products", "Товары", &url, "shop_main");
+            }
             for (code, label) in [
                 ("price-types", "Типы цен"),
                 ("rounding", "Правила округления"),
@@ -389,6 +403,30 @@ fn covers(url: &str, path: &str) -> bool {
     url == path || (url != "/admin" && under(path, url))
 }
 
+/// Запрос коллекции по `/admin/{items,sections,fields}/{id}`.
+fn content_query(path: &str) -> Option<&'static str> {
+    [
+        (
+            "/admin/items/",
+            "SELECT collection_id FROM collection_items WHERE id = $1",
+        ),
+        (
+            "/admin/sections/",
+            "SELECT collection_id FROM collection_sections WHERE id = $1",
+        ),
+        (
+            "/admin/fields/",
+            "SELECT collection_id FROM collection_fields WHERE id = $1",
+        ),
+    ]
+    .into_iter()
+    .find(|(prefix, _)| {
+        path.strip_prefix(prefix)
+            .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
+    })
+    .map(|(_, table)| table)
+}
+
 pub(crate) async fn build(
     db: &PgPool,
     user: &Access,
@@ -443,12 +481,30 @@ pub(crate) async fn build(
         ));
     }
     // активен самый длинный подходящий адрес
-    let best = shown
+    let mut best = shown
         .iter()
         .enumerate()
         .filter(|(_, (s, _))| covers(&s.url, path))
         .max_by_key(|(i, (s, _))| (s.url.len(), std::cmp::Reverse(*i)))
         .map(|(i, _)| i);
+    if best.is_none()
+        && let Some(sql) = content_query(path)
+    {
+        // запись, раздел и поле принадлежат коллекции: подсвечиваем её, иначе «Все коллекции»
+        let id = path
+            .rsplit('/')
+            .next()
+            .and_then(|id| id.parse::<i64>().ok());
+        let collection_id: Option<i64> = match id {
+            Some(id) => sqlx::query_scalar(sql).bind(id).fetch_optional(db).await?,
+            None => None,
+        };
+        let own = collection_id.map(|c| format!("collection:{c}"));
+        best = shown
+            .iter()
+            .position(|(s, _)| Some(&s.code) == own.as_ref())
+            .or_else(|| shown.iter().position(|(s, _)| s.code == "collections"));
+    }
     if let Some(i) = best {
         shown[i].1.active = true;
     }
@@ -834,5 +890,60 @@ mod tests {
                 .shop
                 .is_none()
         );
+    }
+
+    #[sqlx::test]
+    async fn active_collection_for_item_section_field(db: PgPool) {
+        let c = test_support::content_fixture(&db).await;
+        let user = access(&db, "root", None).await;
+        let ctx = load_ctx(&db, &user).await.unwrap();
+        let active = |nav: &Nav| {
+            nav.groups
+                .iter()
+                .flat_map(|g| &g.items)
+                .filter(|i| i.active)
+                .map(|i| i.code.clone())
+                .collect::<Vec<_>>()
+        };
+        let own = vec![format!("collection:{}", c.collection_id)];
+        for path in [
+            format!("/admin/items/{}", c.item_id),
+            format!("/admin/sections/{}", c.section_id),
+            format!("/admin/fields/{}", c.field_id),
+        ] {
+            let nav = build(&db, &user, &ctx, &path).await.unwrap();
+            assert_eq!(active(&nav), own, "{path}");
+        }
+        // запись не найдена: «Все коллекции»
+        let nav = build(&db, &user, &ctx, "/admin/items/999999")
+            .await
+            .unwrap();
+        assert_eq!(active(&nav), ["collections"]);
+    }
+
+    #[sqlx::test]
+    async fn products_only_with_readable_catalog(db: PgPool) {
+        let user = access(&db, "root", None).await;
+        let ctx = load_ctx(&db, &user).await.unwrap();
+        assert!(!sections(&user, &ctx).iter().any(|s| s.code == "products"));
+        sqlx::query(
+            "INSERT INTO collections (code, name, is_catalog) VALUES ('cat', 'Каталог', TRUE)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let ctx = load_ctx(&db, &user).await.unwrap();
+        assert!(sections(&user, &ctx).iter().any(|s| s.code == "products"));
+    }
+
+    #[sqlx::test]
+    async fn light_ctx_skips_counts(db: PgPool) {
+        test_support::content_fixture(&db).await;
+        let user = access(&db, "root", None).await;
+        let full = load_ctx(&db, &user).await.unwrap();
+        let light = load_ctx_light(&db, &user).await.unwrap();
+        assert_eq!(full.collections[0].count, 1);
+        assert_eq!(light.collections[0].count, 0);
+        assert_eq!(full.collections[0].id, light.collections[0].id);
     }
 }

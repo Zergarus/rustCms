@@ -34,7 +34,7 @@
           </summary>
           <div class="profile-menu">
             <form method="post" action="/admin/prefs" hx-boost="false">
-              <input type="hidden" name="back" value="{{ shell.path }}">
+              <input type="hidden" name="back" value="{{ shell.path if shell.is_get else '/admin' }}">
               <fieldset class="plain theme-pick">
                 <legend class="muted small">Тема</legend>
                 <label class="check"><input type="radio" name="theme" value="dark"{% if shell.prefs.theme == "dark" %} checked{% endif %}> <span>Тёмная</span></label>
@@ -79,7 +79,7 @@
 
   <dialog id="palette" class="palette" aria-label="Поиск и команды">
     <input id="palette-q" type="search" name="q" placeholder="Найти раздел, запись или действие…" autocomplete="off"
-           hx-get="/admin/palette" hx-trigger="input changed delay:150ms, focus once" hx-target="#palette-results" hx-swap="innerHTML" hx-boost="false">
+           hx-get="/admin/palette" hx-trigger="input changed delay:150ms, focus once" hx-target="#palette-results" hx-swap="innerHTML" hx-sync="this:replace" hx-boost="false">
     <div id="palette-results" class="palette-results"></div>
   </dialog>
 

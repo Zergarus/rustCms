@@ -371,11 +371,22 @@ pub fn router(state: AppState) -> Router<AppState> {
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
 }
 
+/// Нужна ли странице оболочка: полная страница — всё, кроме настоящего запроса фрагмента.
+/// Фрагмент — это `HX-Request` с `HX-Target` (элемент с id), без `HX-Boosted` и
+/// `HX-History-Restore-Request`. Запрос без `HX-Target` (например, `HX-Location` с целью
+/// `body`) заменяет всё тело и обязан получить оболочку.
+fn is_full_page(headers: &header::HeaderMap) -> bool {
+    !headers.contains_key("hx-request")
+        || headers.contains_key("hx-boosted")
+        || headers.contains_key("hx-history-restore-request")
+        || !headers.contains_key("hx-target")
+}
+
 /// Пускает дальше пользователей с правом входа в админку (см. [`Access`]),
 /// остальных — на страницу входа. Права пересчитываются на каждый запрос,
 /// поэтому изменения групп действуют сразу.
 ///
-/// Для полных страниц (любой метод без `HX-Request` или с `HX-Boosted`; страница с ошибкой формы после POST тоже полная) заполняет `Access.shell`.
+/// Для полных страниц (см. [`is_full_page`]; страница с ошибкой формы после POST тоже полная) заполняет `Access.shell`.
 async fn require_access(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -405,7 +416,7 @@ async fn require_access(
         .map_or_else(|| path.clone(), |pq| pq.as_str().to_string());
     let is_get = req.method() == Method::GET;
     let headers = req.headers();
-    let full_page = !headers.contains_key("hx-request") || headers.contains_key("hx-boosted");
+    let full_page = is_full_page(headers);
 
     let (shop_enabled, store_control) = nav::flags(&state.db).await;
     // Для вкладки «Документы» в меню «Магазин»
@@ -474,10 +485,22 @@ async fn finish(
     user_id: i64,
     mut res: Response,
 ) -> Response {
-    if full_page && res.status() == StatusCode::OK && jar.get(flash::COOKIE).is_some() {
+    // Страницы с оболочкой всегда показали уведомление; редирект его ещё не показал
+    if full_page && !res.status().is_redirection() && jar.get(flash::COOKIE).is_some() {
         res.headers_mut().append(
             header::SET_COOKIE,
             header::HeaderValue::from_static("admin_flash=; Max-Age=0; Path=/admin"),
+        );
+    }
+    // ответ зависит от заголовков HTMX: кэш не должен подменять страницу фрагментом
+    res.headers_mut().append(
+        header::VARY,
+        header::HeaderValue::from_static("HX-Request, HX-Target, HX-Boosted"),
+    );
+    if !res.headers().contains_key(header::CACHE_CONTROL) {
+        res.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-cache"),
         );
     }
     if is_get
@@ -599,7 +622,40 @@ async fn dashboard(
 
 #[cfg(test)]
 mod tests {
-    use super::url_authority;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    use super::{is_full_page, url_authority};
+
+    fn hdrs(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, HeaderValue::from_static(v));
+        }
+        h
+    }
+
+    #[test]
+    fn full_page_detection() {
+        assert!(is_full_page(&hdrs(&[])));
+        assert!(is_full_page(&hdrs(&[
+            ("hx-request", "true"),
+            ("hx-boosted", "true"),
+            ("hx-target", "body"),
+        ])));
+        assert!(is_full_page(&hdrs(&[
+            ("hx-request", "true"),
+            ("hx-history-restore-request", "true"),
+            ("hx-target", "body"),
+        ])));
+        // HX-Location с целью body: HX-Target не приходит
+        assert!(is_full_page(&hdrs(&[("hx-request", "true")])));
+        for target in ["order-tab", "palette-results", "open-tabs"] {
+            assert!(
+                !is_full_page(&hdrs(&[("hx-request", "true"), ("hx-target", target)])),
+                "{target}"
+            );
+        }
+    }
 
     #[test]
     fn authority() {

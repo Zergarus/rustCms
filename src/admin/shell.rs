@@ -179,6 +179,12 @@ mod page_tests {
         format!("{cookie}; admin_flash={value}")
     }
 
+    /// Скрытое поле `back` с адресом `path` (MiniJinja экранирует `/`).
+    fn back_is(body: &str, path: &str) -> bool {
+        let escaped = path.replace('/', "&#x2f;");
+        body.contains(&format!(r#"name="back" value="{escaped}""#))
+    }
+
     fn hex(s: &str) -> String {
         s.bytes().map(|b| format!("{b:02x}")).collect()
     }
@@ -274,5 +280,49 @@ mod page_tests {
         assert_eq!(get(&app, "/admin/discounts", &cookie).await.0, 404);
         let (status, body) = get(&app, "/api/v1/iblock/list", &cookie).await;
         assert_eq!((status, body), (api_status, api_body));
+    }
+
+    #[sqlx::test]
+    async fn vary_and_cache_on_admin_html(db: PgPool) {
+        let f = crate::test_support::order_fixture(&db).await;
+        let id = crate::test_support::place_order(&db, &f, None).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (status, headers, _) =
+            get_raw(&app, &format!("/admin/shop/orders/{id}"), &cookie).await;
+        assert_eq!(status, 200);
+        let vary = headers[header::VARY].to_str().unwrap();
+        assert!(
+            vary.contains("HX-Request") && vary.contains("HX-Target"),
+            "{vary}"
+        );
+        assert_eq!(headers[header::CACHE_CONTROL], "no-cache");
+    }
+
+    #[sqlx::test]
+    async fn flash_cleared_on_not_found_shell_page(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = with_flash(&admin_cookie(&db).await, &hex("ok:Готово"));
+        nav::set_shop_enabled(&db, false).await.unwrap();
+        let (status, headers, body) = get_raw(&app, "/admin/shop/orders", &cookie).await;
+        assert_eq!(status, 404);
+        assert!(String::from_utf8_lossy(&body).contains("data-palette-open"));
+        let cleared = headers.get_all(header::SET_COOKIE).iter().any(|v| {
+            let v = v.to_str().unwrap();
+            v.starts_with("admin_flash=;") && v.contains("Max-Age=0")
+        });
+        assert!(cleared, "{headers:?}");
+    }
+
+    #[sqlx::test]
+    async fn prefs_back_on_post_error_page_is_admin(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (status, _, body) =
+            crate::test_support::post_form_raw(&app, "/admin/groups", &cookie, "name=").await;
+        assert!(status.is_success() || status.is_client_error(), "{status}");
+        assert!(back_is(&body, "/admin"), "{body}");
+        let (_, body) = get(&app, "/admin/groups", &cookie).await;
+        assert!(back_is(&body, "/admin/groups"), "{body}");
     }
 }
