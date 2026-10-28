@@ -96,7 +96,7 @@ pub(crate) async fn recent(db: &PgPool, user_id: i64, limit: i64) -> sqlx::Resul
 }
 
 fn url_ok(url: &str) -> bool {
-    url.starts_with("/admin/")
+    (url == "/admin" || url.starts_with("/admin?") || url.starts_with("/admin/"))
         && !url.contains("//")
         && !url.contains('\\')
         && !url.chars().any(char::is_control)
@@ -484,6 +484,64 @@ mod tests {
         assert!(stored.starts_with("A & \"B\""), "{stored}");
         assert!(frag.contains("A &amp; &quot;B&quot;"), "{frag}");
         assert!(!frag.contains("&amp;amp;"));
+    }
+
+    #[sqlx::test]
+    async fn dashboard_tab_accepted(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (status, _) = open_tab(&app, &cookie, "/admin", "Рабочий стол").await;
+        assert_eq!(status, 200);
+        let (status, _) = open_tab(&app, &cookie, "/admin?x=1", "Рабочий стол").await;
+        assert_eq!(status, 200);
+        let keys: Vec<String> = sqlx::query_scalar("SELECT key FROM admin_tabs")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(keys, vec!["/admin".to_string()]);
+        let (status, _) = open_tab(&app, &cookie, "/administrator", "x").await;
+        assert_eq!(status, 400);
+    }
+
+    #[sqlx::test]
+    async fn dashboard_trigger_posts_successfully(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (status, _, body) = get_raw(&app, "/admin", &cookie).await;
+        let body = String::from_utf8_lossy(&body);
+        assert_eq!(status, 200, "{body}");
+        let vals = tab_vals(&body);
+        assert_eq!(vals["url"], "/admin");
+        let (status, _) = open_tab(
+            &app,
+            &cookie,
+            vals["url"].as_str().unwrap(),
+            vals["title"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(count(&db).await, 1);
+    }
+
+    #[sqlx::test]
+    async fn trigger_is_not_ancestor_of_tab_links(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        open_tab(&app, &cookie, "/admin/shop/stores", "Склады").await;
+        let (_, _, body) = get_raw(&app, "/admin/shop/stores", &cookie).await;
+        let body = String::from_utf8_lossy(&body);
+        let start = body.find(r#"id="open-tabs""#).expect("open-tabs");
+        let tag = &body[start..start + body[start..].find('>').unwrap()];
+        assert!(
+            !tag.contains("hx-vals") && !tag.contains("hx-post"),
+            "{tag}"
+        );
+        // hx-vals живёт на элементе без потомков
+        let at = body.find(r#"hx-trigger="load""#).expect("trigger");
+        let open = body[..at].rfind('<').unwrap();
+        let rest = &body[open..];
+        let tag_end = rest.find('>').unwrap();
+        assert!(rest[tag_end..].starts_with("></span>"), "{}", &rest[..60]);
     }
 
     #[sqlx::test]
