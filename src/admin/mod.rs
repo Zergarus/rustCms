@@ -338,6 +338,8 @@ pub fn router(state: AppState) -> Router<AppState> {
         )
         .route("/modules", get(modules::form).post(modules::save))
         .route("/prefs", post(shell::save_prefs))
+        .route("/tabs", post(tabs::open_tab))
+        .route("/tabs/{id}/close", post(tabs::close_tab))
         .route("/users", get(users::list).post(users::create))
         .route("/users/new", get(users::new_form))
         .route("/users/{id}", get(users::edit_form).post(users::update))
@@ -432,11 +434,17 @@ async fn build_shell(
     jar: &CookieJar,
     path: &str,
 ) -> sqlx::Result<shell::Shell> {
+    let prefs = shell::load_prefs(&state.db, access.user.id).await?;
+    let tabs = if prefs.tabs {
+        tabs::list(&state.db, access.user.id, path).await?
+    } else {
+        Vec::new()
+    };
     Ok(shell::Shell {
         nav: nav::build(&state.db, access, ctx, path).await?,
-        prefs: shell::load_prefs(&state.db, access.user.id).await?,
+        prefs,
         flash: flash::read(jar),
-        tabs: Vec::new(),
+        tabs,
         path: path.to_string(),
     })
 }

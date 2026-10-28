@@ -53,14 +53,7 @@
     <div class="shell-main">
       <header class="topbar">
         <button class="ico nav-toggle" type="button" data-nav-toggle aria-controls="sidebar" aria-label="Меню">{{ ui.icon("menu") }}</button>
-        <div id="open-tabs" class="open-tabs">
-          {%- for t in shell.tabs %}
-          <div class="rec{% if t.active %} on{% endif %}" data-tab-id="{{ t.id }}" data-kind="{{ t.kind }}">
-            <a class="rec-open" href="{{ t.url }}"><span class="dot"></span><span class="rec-title">{{ t.title }}</span></a>
-            <button class="rec-x" type="button" data-tab-close="{{ t.id }}" aria-label="Закрыть вкладку «{{ t.title }}»">{{ ui.icon("close") }}</button>
-          </div>
-          {%- endfor %}
-        </div>
+        <div id="open-tabs" class="open-tabs"{% if shell.prefs.tabs and not no_tab %} hx-post="/admin/tabs" hx-trigger="load" hx-vals='js:{url: location.pathname + location.search, title: document.title}' hx-swap="innerHTML"{% endif %}>{% set tabs = shell.tabs %}{% include "_tabs.html" %}</div>
       </header>
     {% endif %}
   <main class="{% block main_class %}container{% endblock %}">

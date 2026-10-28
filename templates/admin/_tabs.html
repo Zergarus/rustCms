@@ -1,0 +1,8 @@
+{#- Содержимое полосы вкладок (#open-tabs); без пробелов по краям, чтобы работал :empty. -#}
+{%- import "_ui.html" as ui -%}
+{%- for t in tabs -%}
+<div class="rec{% if t.active %} on{% endif %}" data-tab-id="{{ t.id }}" data-kind="{{ t.kind }}">
+  <a class="rec-open" href="{{ t.url }}"><span class="dot"></span><span class="rec-title">{{ t.title }}</span></a>
+  <button class="rec-x" type="button" hx-post="/admin/tabs/{{ t.id }}/close" hx-vals='js:{current: location.pathname}' hx-target="#open-tabs" hx-swap="innerHTML" aria-label="Закрыть вкладку «{{ t.title }}»">{{ ui.icon("close") }}</button>
+</div>
+{%- endfor -%}
