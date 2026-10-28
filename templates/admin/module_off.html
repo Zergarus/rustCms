@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Модуль выключен{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Модуль „Магазин“ выключен</h1>
+</div>
+<div class="card">
+  <p>Разделы магазина недоступны, пока модуль не включён.</p>
+  {% if user.is_admin %}
+  <p><a class="btn primary" href="/admin/modules">Включить в разделе „Модули“</a></p>
+  {% endif %}
+</div>
+{% endblock %}

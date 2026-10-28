@@ -66,6 +66,7 @@
   </aside>
   {% endif %}
   <main class="{% block main_class %}container{% endblock %}">
+    {% if user and user.shell and user.shell.flash %}<div class="flash" data-kind="{{ user.shell.flash.kind }}">{{ user.shell.flash.text }}</div>{% endif %}
     {% block content %}{% endblock %}
   </main>
   <script>

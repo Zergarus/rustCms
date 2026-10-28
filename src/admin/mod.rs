@@ -4,17 +4,23 @@ mod auth_pages;
 mod collections;
 mod discounts;
 mod exchange;
+mod flash;
 mod groups;
 mod items;
+mod modules;
 mod nav;
 mod sections;
+pub(crate) mod shell;
 mod shop;
 mod sku;
+mod tabs;
 mod users;
 
 use axum::{
     Extension, Router,
-    extract::{DefaultBodyLimit, Multipart, Request, State, multipart::MultipartError},
+    extract::{
+        DefaultBodyLimit, Multipart, OriginalUri, Request, State, multipart::MultipartError,
+    },
     http::{Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
@@ -330,6 +336,8 @@ pub fn router(state: AppState) -> Router<AppState> {
             "/exchange/map/{person_type_id}",
             get(exchange::map_form).post(exchange::save_map_form),
         )
+        .route("/modules", get(modules::form).post(modules::save))
+        .route("/prefs", post(shell::save_prefs))
         .route("/users", get(users::list).post(users::create))
         .route("/users/new", get(users::new_form))
         .route("/users/{id}", get(users::edit_form).post(users::update))
@@ -358,6 +366,8 @@ pub fn router(state: AppState) -> Router<AppState> {
 /// Пускает дальше пользователей с правом входа в админку (см. [`Access`]),
 /// остальных — на страницу входа. Права пересчитываются на каждый запрос,
 /// поэтому изменения групп действуют сразу.
+///
+/// Для полных страниц (GET без `HX-Request` или с `HX-Boosted`) заполняет `Access.shell`.
 async fn require_access(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -369,21 +379,94 @@ async fn require_access(
         Ok(None) => return Redirect::to("/admin/login").into_response(),
         Err(err) => Err(err),
     };
-    match access {
-        Ok(mut access) if access.can_enter_admin() => {
-            // Для вкладки «Документы» в меню «Магазин»
-            access.store_control = match state.db.acquire().await {
-                Ok(mut conn) => crate::stock::settings(&mut conn)
-                    .await
-                    .is_ok_and(|s| s.store_control),
-                Err(_) => false,
-            };
-            req.extensions_mut().insert(access);
-            next.run(req).await
+    let mut access = match access {
+        Ok(access) if access.can_enter_admin() => access,
+        Ok(_) => return Redirect::to("/admin/login").into_response(),
+        Err(err) => return AppError::from(err).into_response(),
+    };
+    // внутри `nest` req.uri() без префикса `/admin`
+    let path = req
+        .extensions()
+        .get::<OriginalUri>()
+        .map_or_else(|| req.uri().path(), |u| u.0.path())
+        .to_string();
+    let is_get = req.method() == Method::GET;
+    let headers = req.headers();
+    let full_page =
+        is_get && (!headers.contains_key("hx-request") || headers.contains_key("hx-boosted"));
+
+    let ctx = match nav::load_ctx(&state.db, &access).await {
+        Ok(ctx) => ctx,
+        Err(err) => return AppError::from(err).into_response(),
+    };
+    // Для вкладки «Документы» в меню «Магазин»
+    access.store_control = ctx.store_control;
+
+    if full_page {
+        match build_shell(&state, &access, &ctx, &jar, &path).await {
+            Ok(shell) => access.shell = Some(shell),
+            Err(err) => return AppError::from(err).into_response(),
         }
-        Ok(_) => Redirect::to("/admin/login").into_response(),
-        Err(err) => AppError::from(err).into_response(),
     }
+
+    let user_id = access.user.id;
+    let res = if nav::mode_for(&path) == nav::Mode::Shop && !ctx.shop_enabled {
+        match render(&state, "module_off.html", context! { user => &access }) {
+            Ok(html) => (StatusCode::NOT_FOUND, html).into_response(),
+            Err(err) => err.into_response(),
+        }
+    } else {
+        req.extensions_mut().insert(access);
+        next.run(req).await
+    };
+    finish(&state, &jar, &path, is_get, full_page, user_id, res).await
+}
+
+async fn build_shell(
+    state: &AppState,
+    access: &Access,
+    ctx: &nav::NavCtx,
+    jar: &CookieJar,
+    path: &str,
+) -> sqlx::Result<shell::Shell> {
+    Ok(shell::Shell {
+        nav: nav::build(&state.db, access, ctx, path).await?,
+        prefs: shell::load_prefs(&state.db, access.user.id).await?,
+        flash: flash::read(jar),
+        tabs: Vec::new(),
+        path: path.to_string(),
+    })
+}
+
+/// Действия над готовым ответом: гасит показанное уведомление и убирает вкладку
+/// несуществующей страницы.
+async fn finish(
+    state: &AppState,
+    jar: &CookieJar,
+    path: &str,
+    is_get: bool,
+    full_page: bool,
+    user_id: i64,
+    mut res: Response,
+) -> Response {
+    if full_page && res.status() == StatusCode::OK && jar.get(flash::COOKIE).is_some() {
+        res.headers_mut().append(
+            header::SET_COOKIE,
+            header::HeaderValue::from_static("admin_flash=; Max-Age=0; Path=/admin"),
+        );
+    }
+    if is_get
+        && res.status() == StatusCode::NOT_FOUND
+        && let Some(key) = nav::tab_key(path)
+    {
+        // вкладка ведёт в никуда — закрываем
+        let _ = sqlx::query("DELETE FROM admin_tabs WHERE user_id = $1 AND key = $2")
+            .bind(user_id)
+            .bind(key)
+            .execute(&state.db)
+            .await;
+    }
+    res
 }
 
 /// Защита от CSRF: изменяющие запросы принимаются только с того же origin.

@@ -116,6 +116,8 @@ pub struct Access {
     /// Включён ли складской учёт (вкладка «Документы» в меню «Магазин»); выставляет
     /// middleware админки.
     pub store_control: bool,
+    /// Контекст оболочки; заполняется middleware админки только для полных страниц.
+    pub(crate) shell: Option<crate::admin::shell::Shell>,
     #[serde(skip)]
     collection_levels: HashMap<i64, Level>,
 }
@@ -128,6 +130,7 @@ impl Access {
                 permissions: PERMISSIONS.iter().map(|p| p.code.to_string()).collect(),
                 can_see_collections: true,
                 store_control: false,
+                shell: None,
                 collection_levels: HashMap::new(),
             });
         }
@@ -165,6 +168,7 @@ impl Access {
             permissions,
             can_see_collections,
             store_control: false,
+            shell: None,
             collection_levels,
         })
     }
@@ -234,6 +238,7 @@ mod tests {
             permissions: perms.iter().map(|s| s.to_string()).collect(),
             can_see_collections: false,
             store_control: false,
+            shell: None,
             collection_levels: levels.iter().copied().collect(),
         }
     }

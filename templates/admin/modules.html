@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% set section = "modules" %}
+{% block title %}Модули{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Модули</h1>
+</div>
+
+<form method="post" action="/admin/modules" class="card form">
+  <label class="check">
+    <input type="checkbox" name="shop" value="on"{% if shop %} checked{% endif %}>
+    <span>Магазин</span>
+  </label>
+  <p class="muted">Каталог, заказы, склады, скидки и обмен с 1С. Данные при выключении не удаляются.</p>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+  </div>
+</form>
+{% endblock %}

@@ -455,3 +455,49 @@ pub async fn add_usd_rate(db: &PgPool, date: chrono::NaiveDate, rate: f64) {
     .await
     .unwrap();
 }
+
+/// POST формы админки с правильным Origin: статус, заголовки и тело ответа.
+pub async fn post_form_raw(
+    app: &axum::Router,
+    path: &str,
+    cookie: &str,
+    body: &str,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+    use axum::http::header;
+    use tower::ServiceExt;
+    let req = axum::http::Request::post(path)
+        .header(header::COOKIE, cookie)
+        .header(header::HOST, "127.0.0.1:3000")
+        .header(header::ORIGIN, "http://127.0.0.1:3000")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let (status, headers) = (res.status(), res.headers().clone());
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, headers, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// GET как HTMX-запрос (`HX-Request: true`, `HX-Target`).
+pub async fn htmx_get(
+    app: &axum::Router,
+    path: &str,
+    cookie: &str,
+    target: &str,
+) -> (axum::http::StatusCode, String) {
+    use tower::ServiceExt;
+    let req = axum::http::Request::get(path)
+        .header(axum::http::header::COOKIE, cookie)
+        .header("HX-Request", "true")
+        .header("HX-Target", target)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
