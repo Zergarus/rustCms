@@ -1,0 +1,48 @@
+{% import "_ui.html" as ui %}
+<section class="card form">
+  <h2>Статус</h2>
+  <form method="post" action="/admin/shop/orders/{{ order.id }}/status">
+    {% call ui.prop("Статус") %}<select name="status">{% for s in statuses %}<option value="{{ s[0] }}" {% if order.status == s[0] %}selected{% endif %}>{{ s[1] }}</option>{% endfor %}</select>{% endcall %}
+    {% call ui.prop("Комментарий") %}<input name="comment">{% endcall %}
+    <div class="form-actions"><button class="btn primary" type="submit">Сменить статус</button></div>
+  </form>
+  <form method="post" action="/admin/shop/orders/{{ order.id }}/paid">
+    <input type="hidden" name="value" value="{% if order.paid %}N{% else %}Y{% endif %}">
+    {% call ui.prop("Оплата") %}{% if order.paid %}оплачен {{ (order.paid_at or "")[:16]|replace("T", " ") }}{% else %}не оплачен{% endif %}
+      <button class="btn" type="submit">{% if order.paid %}Снять оплату{% else %}Отметить оплату{% endif %}</button>{% endcall %}
+  </form>
+  <form method="post" action="/admin/shop/orders/{{ order.id }}/cancel">
+    {% if order.canceled %}
+    <input type="hidden" name="value" value="N">
+    {% call ui.prop("Отмена") %}Отменён {{ (order.canceled_at or "")[:16]|replace("T", " ") }}{% if order.cancel_reason %}: {{ order.cancel_reason }}{% endif %}
+      <button class="btn" type="submit">Снять отмену</button>{% endcall %}
+    {% else %}
+    <input type="hidden" name="value" value="Y">
+    {% call ui.prop("Причина отмены") %}<input name="reason">{% endcall %}
+    <div class="form-actions"><button class="btn danger" type="submit">Отменить заказ</button></div>
+    {% endif %}
+  </form>
+</section>
+
+<section class="card">
+  <h2>Покупатель</h2>
+  {% call ui.prop("Покупатель") %}{% if order.user_id %}<a href="/admin/users/{{ order.user_id }}">{{ order.user_login }}</a>{% if order.user_name %} — {{ order.user_name }}{% endif %}{% if order.user_email %}, {{ order.user_email }}{% endif %}{% else %}<span class="muted">пользователь удалён</span>{% endif %}{% endcall %}
+  {% if order.user_comment %}{% call ui.prop("Комментарий покупателя") %}{{ order.user_comment }}{% endcall %}{% endif %}
+</section>
+
+<section class="card table-wrap">
+  <h2>Состав заказа</h2>
+  <table>
+    <thead><tr><th>Товар</th><th>Кол-во</th><th>Цена</th><th>Сумма</th></tr></thead>
+    <tbody>
+      {% for i in order.items %}
+      <tr>
+        <td><a href="/admin/items/{{ i.product_id }}">{{ i.name }}</a>{% if i.custom_price %} <span class="muted">(своя цена)</span>{% endif %}{% for p in i.props %}{% if p.code != "PRODUCT.XML_ID" and p.code != "CATALOG.XML_ID" %}<br><span class="muted">{{ p.name }}: {{ p.value }}</span>{% endif %}{% endfor %}</td>
+        <td>{{ i.quantity }}</td>
+        <td>{{ i.price }}</td>
+        <td>{{ (i.price * i.quantity)|round(2) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>

@@ -1,0 +1,37 @@
+{#- Вкладка «Документы и 1С» -#}
+{% if file_fields %}
+<form class="card form" method="post" enctype="multipart/form-data" action="/admin/shop/orders/{{ order.id }}/files" data-dirty-guard>
+  <h2>Документы</h2>
+  {% for f in file_fields %}
+  <fieldset>
+    <legend>{{ f.name }}</legend>
+    {% for file in f.files %}
+    <p><a href="{{ file.url }}" target="_blank">{{ file.name }}</a>
+      <label class="check"><input type="checkbox" name="remove_{{ f.id }}_{{ file.id }}" value="Y"> удалить</label></p>
+    {% endfor %}
+    <input type="file" name="file_{{ f.id }}" {% if f.multiple %}multiple{% endif %}>
+    {% if not f.multiple and f.files %}<span class="muted">новый файл заменит текущий</span>{% endif %}
+  </fieldset>
+  {% endfor %}
+  <div class="form-actions"><button class="btn primary" type="submit">Сохранить документы</button></div>
+</form>
+{% else %}
+<div class="card">
+  <h2>Документы</h2>
+  <p class="muted">Файловых свойств у заказа нет.</p>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>1С</h2>
+  <p>Номер1С: {{ onec.id_1c or "—" }}{% if onec.version_1c %}, версия {{ onec.version_1c }}{% endif %}
+    {% if onec.updated_1c %}<span class="badge">изменён из 1С</span>{% endif %}
+    {% if onec.external %}<span class="badge">создан в 1С</span>{% endif %}</p>
+  {% for p in onec_payments %}
+  <p>Оплата{% if p.name %} «{{ p.name }}»{% endif %}: {{ p.id_1c or "—" }}{% if p.version_1c %}, версия {{ p.version_1c }}{% endif %}{% if p.pay_voucher_num or p.pay_voucher_date %}, платёжное поручение {{ p.pay_voucher_num }}{% if p.pay_voucher_date %} от {{ p.pay_voucher_date }}{% endif %}{% endif %}{% if p.is_return %} <span class="badge">возврат</span>{% if p.return_comment %} {{ p.return_comment }}{% endif %}{% endif %}</p>
+  {% endfor %}
+  {% for sh in onec_shipments %}
+  <p>Отгрузка{% if sh.delivery_name %} «{{ sh.delivery_name }}»{% endif %}: {{ sh.id_1c or "—" }}{% if sh.version_1c %}, версия {{ sh.version_1c }}{% endif %}{% if sh.deducted %}, <span class="badge ok">отгружена</span>{% if sh.deducted_at %} {{ sh.deducted_at }}{% endif %}{% endif %}{% if sh.delivery_doc_num or sh.delivery_doc_date %}, документ {{ sh.delivery_doc_num }}{% if sh.delivery_doc_date %} от {{ sh.delivery_doc_date }}{% endif %}{% endif %}{% if sh.tracking_number %}, трек {{ sh.tracking_number }}{% endif %}</p>
+  {% endfor %}
+  <p><a class="btn" href="/admin/shop/orders/{{ order.id }}/xml1c">Выгрузить XML</a> <span class="muted">документ заказа в формате 1С (схема 2.08), ничего не отмечает как выгруженное</span></p>
+</div>

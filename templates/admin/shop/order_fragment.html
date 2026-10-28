@@ -1,0 +1,8 @@
+{#- Содержимое области #order-tab: навигация, сообщения и вкладка. При HTMX-запросе
+    вкладки (fragment) сюда же добавляется колонка справа как out-of-band фрагмент. -#}
+{% import "_ui.html" as ui %}
+{{ ui.tabs(tab_items, active_tab, "#order-tab") }}
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+{% include "shop/order/_" ~ (active_tab or "overview") ~ ".html" %}
+{% if fragment %}{% include "shop/order/_aside.html" %}{% endif %}

@@ -1,0 +1,12 @@
+{#- Вкладка «История» -#}
+<div class="card table-wrap">
+  <h2>История статусов</h2>
+  <table>
+    <thead><tr><th>Когда</th><th>Статус</th><th>Кто</th><th>Комментарий</th></tr></thead>
+    <tbody>
+      {% for h in order.history %}
+      <tr><td class="muted">{{ h.created_at[:16]|replace("T", " ") }}</td><td>{{ h.status_name }}</td><td>{{ h.user_login or "система" }}</td><td>{{ h.comment }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

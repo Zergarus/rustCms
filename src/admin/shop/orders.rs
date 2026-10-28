@@ -4,9 +4,9 @@ use std::collections::HashMap;
 
 use axum::{
     Extension,
-    extract::{Multipart, Path, Query, State},
-    http::header,
-    response::{Html, IntoResponse, Redirect, Response},
+    extract::{MatchedPath, Multipart, Path, Query, State},
+    http::{HeaderMap, header},
+    response::{Html, IntoResponse, Response},
 };
 use axum_extra::extract::Form;
 use chrono::{Days, NaiveDate, TimeZone, Utc};
@@ -17,7 +17,11 @@ use sqlx::{FromRow, Postgres, QueryBuilder};
 
 use crate::{
     access::{Access, ORDERS_MANAGE},
-    admin::{read_upload_form, render},
+    admin::{
+        flash::{self, FlashKind},
+        nav::ORDER_TABS,
+        read_upload_form, render, shell, tabs,
+    },
     error::{AppError, AppResult},
     files,
     sale::{self, OrderProperty, mail, repo, validate::validate_properties},
@@ -270,13 +274,38 @@ struct OneCShipment {
     tracking_number: String,
 }
 
+/// Адрес вкладки карточки заказа (`""` — «Обзор»).
+fn tab_url(id: i64, tab: &str) -> String {
+    match tab {
+        "" => format!("/admin/shop/orders/{id}"),
+        t => format!("/admin/shop/orders/{id}/{t}"),
+    }
+}
+
+/// Запрос вкладки из HTMX-навигации карточки: отдаётся только вкладка и колонка справа.
+fn is_tab_fragment(headers: &HeaderMap) -> bool {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    header("hx-request") == Some("true")
+        && header("hx-target") == Some("order-tab")
+        && !headers.contains_key("hx-boosted")
+}
+
+/// Карточка заказа на вкладке `tab` (код из [`ORDER_TABS`], неизвестный — 404): страница
+/// целиком или, при `fragment`, вкладка с колонкой справа (out-of-band).
 pub(crate) async fn card(
     state: &AppState,
     user: Access,
     id: i64,
+    tab: &str,
     error: Option<String>,
     notice: Option<String>,
-) -> AppResult<Html<String>> {
+    fragment: bool,
+) -> AppResult<Response> {
+    let active_tab = ORDER_TABS
+        .iter()
+        .map(|(code, _)| *code)
+        .find(|code| *code == tab)
+        .ok_or(AppError::NotFound)?;
     let order = repo::load(&state.db, id).await?.ok_or(AppError::NotFound)?;
     let settings = sale::load_settings(&state.db).await?;
     let values: HashMap<&str, &str> = order
@@ -432,22 +461,64 @@ pub(crate) async fn card(
         sqlx::query_as("SELECT id, name FROM catalog_stores WHERE active ORDER BY sort, id")
             .fetch_all(&state.db)
             .await?;
-    render(
+    let discount_total = (discounts.iter().map(|d| d.sum).sum::<f64>() * 100.0).round() / 100.0;
+    let tab_items: Vec<(&str, &str, String)> = ORDER_TABS
+        .iter()
+        .map(|(code, label)| (*code, *label, tab_url(id, code)))
+        .collect();
+    let title = format!("Заказ № {}", order.account_number);
+    if fragment {
+        // Полная страница не загружается — полоса вкладок узнаёт адрес вкладки здесь
+        let user_id = user.user.id;
+        match shell::load_prefs(&state.db, user_id).await {
+            Ok(prefs) if prefs.tabs => {
+                let url = tab_url(id, active_tab);
+                if let Err(e) = tabs::open(&state.db, user_id, &url, &title).await {
+                    tracing::warn!(order_id = id, error = %e, "вкладка заказа не запомнена");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(order_id = id, error = %e, "вкладка заказа не запомнена"),
+        }
+    }
+    let template = if fragment {
+        "shop/order_fragment.html"
+    } else {
+        "shop/order.html"
+    };
+    Ok(render(
         state,
-        "shop/order.html",
+        template,
         context! { user, order, reserves, active_stores, fields, file_fields, extra, stores, statuses, person_type, error, notice,
         store_list, deliveries, pay_systems, version, onec, onec_payments, onec_shipments, discounts,
-        shipment_base, shipped, ship_stores },
-    )
+        shipment_base, shipped, ship_stores, active_tab, tab_items, title, fragment, discount_total },
+    )?
+    .into_response())
 }
 
+/// «Обзор»: `/admin/shop/orders/{id}`.
 pub async fn view(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
-) -> AppResult<Html<String>> {
+    headers: HeaderMap,
+) -> AppResult<Response> {
     require_orders(&user)?;
-    card(&state, user, id, None, None).await
+    card(&state, user, id, "", None, None, is_tab_fragment(&headers)).await
+}
+
+/// Остальные вкладки: `/admin/shop/orders/{id}/<вкладка>`; код вкладки — последний
+/// сегмент шаблона маршрута.
+pub async fn view_tab(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+    matched: MatchedPath,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    require_orders(&user)?;
+    let tab = matched.as_str().rsplit('/').next().unwrap_or_default();
+    card(&state, user, id, tab, None, None, is_tab_fragment(&headers)).await
 }
 
 /// XML заказа в формате обмена с 1С (схема 2.08) для проверки. Ничего не отмечает: Ид
@@ -498,8 +569,9 @@ fn send(state: &AppState, event: String, order_id: i64) {
     tokio::spawn(async move { mail::notify(&state, &event, order_id).await });
 }
 
-fn back(id: i64) -> Response {
-    Redirect::to(&format!("/admin/shop/orders/{id}")).into_response()
+/// 303 на вкладку `tab` карточки с уведомлением `text`.
+pub(crate) fn back(id: i64, tab: &str, text: &str) -> Response {
+    flash::redirect(&tab_url(id, tab), text, FlashKind::Ok)
 }
 
 #[derive(Deserialize)]
@@ -522,11 +594,16 @@ pub async fn set_status(
             .fetch_optional(&state.db)
             .await?;
     let Some(notify) = notify else {
-        return Ok(
-            card(&state, user, id, Some("Нет такого статуса".into()), None)
-                .await?
-                .into_response(),
-        );
+        return card(
+            &state,
+            user,
+            id,
+            "",
+            Some("Нет такого статуса".into()),
+            None,
+            false,
+        )
+        .await;
     };
     if repo::set_status(
         &state.db,
@@ -540,7 +617,7 @@ pub async fn set_status(
     {
         send(&state, format!("SALE_STATUS_CHANGED_{}", form.status), id);
     }
-    Ok(back(id))
+    Ok(back(id, "", "Статус изменён"))
 }
 
 #[derive(Deserialize)]
@@ -562,7 +639,7 @@ pub async fn set_paid(
     if repo::set_paid(&state.db, id, paid).await? && paid {
         send(&state, "SALE_ORDER_PAID".into(), id);
     }
-    Ok(back(id))
+    Ok(back(id, "", "Оплата сохранена"))
 }
 
 pub async fn set_canceled(
@@ -578,13 +655,11 @@ pub async fn set_canceled(
             if changed && cancel {
                 send(&state, "SALE_ORDER_CANCEL".into(), id);
             }
-            Ok(back(id))
+            Ok(back(id, "", "Отмена заказа сохранена"))
         }
         // Отгруженный заказ не отменяется — ошибка в карточке
         Err(StockError::Rejected(messages)) => {
-            Ok(card(&state, user, id, Some(messages.join("; ")), None)
-                .await?
-                .into_response())
+            card(&state, user, id, "", Some(messages.join("; ")), None, false).await
         }
         Err(StockError::Db(e)) => Err(e.into()),
     }
@@ -599,12 +674,11 @@ pub async fn recalculate_discounts(
 ) -> AppResult<Response> {
     require_orders(&user)?;
     let hook = state.project.discount_condition_hook.as_deref();
-    let (error, notice) = match repo::recalculate_discounts_with(&state.db, id, hook).await {
-        Ok(()) => (None, Some("Скидки пересчитаны".to_string())),
-        Err(e) if e.downcast_ref::<sqlx::Error>().is_some() => return Err(e.into()),
-        Err(e) => (Some(e.to_string()), None),
-    };
-    Ok(card(&state, user, id, error, notice).await?.into_response())
+    match repo::recalculate_discounts_with(&state.db, id, hook).await {
+        Ok(()) => Ok(back(id, "items", "Скидки пересчитаны")),
+        Err(e) if e.downcast_ref::<sqlx::Error>().is_some() => Err(e.into()),
+        Err(e) => card(&state, user, id, "items", Some(e.to_string()), None, false).await,
+    }
 }
 
 /// Свойства (`prop_<код>`) и комментарий менеджера.
@@ -635,11 +709,7 @@ pub async fn save_properties(
     let known = repo::known_locations(&state.db, &input).await?;
     let values = match validate_properties(&props, &settings.variants, &input, &known) {
         Ok(v) => v,
-        Err(e) => {
-            return Ok(card(&state, user, id, Some(e.message), None)
-                .await?
-                .into_response());
-        }
+        Err(e) => return card(&state, user, id, "props", Some(e.message), None, false).await,
     };
     let rows: Vec<(i64, String, String, String)> = values
         .into_iter()
@@ -653,7 +723,7 @@ pub async fn save_properties(
         .map(|s| s.trim())
         .unwrap_or_default();
     repo::update_properties(&state.db, id, &rows, &keep, comment).await?;
-    Ok(back(id))
+    Ok(back(id, "props", "Свойства сохранены"))
 }
 
 /// Файлы свойств: загрузка (`file_<id свойства>`) и удаление (`remove_<свойство>_<файл>`).
@@ -696,11 +766,10 @@ pub async fn save_files(
         }
     }
     if !form.rejected.is_empty() {
-        return Ok(card(&state, user, id, Some(form.rejected.join("; ")), None)
-            .await?
-            .into_response());
+        let error = Some(form.rejected.join("; "));
+        return card(&state, user, id, "files", error, None, false).await;
     }
-    Ok(back(id))
+    Ok(back(id, "files", "Документы сохранены"))
 }
 
 /// Ручной резерв («Зарезервировать») и снятие резерва («Снять резерв»): весь заказ или одна
@@ -739,9 +808,16 @@ async fn change_reserve(
     };
     if let Some(message) = refusal {
         drop(tx);
-        return Ok(card(&state, user, id, Some(message.into()), None)
-            .await?
-            .into_response());
+        return card(
+            &state,
+            user,
+            id,
+            "shipment",
+            Some(message.into()),
+            None,
+            false,
+        )
+        .await;
     }
     let warnings = match (reserve, line) {
         (true, Some(l)) => stock::reserve::reserve_line(&mut tx, id, l, Some(user.user.id)).await?,
@@ -757,11 +833,15 @@ async fn change_reserve(
     };
     tx.commit().await?;
     if warnings.is_empty() {
-        Ok(back(id))
+        let text = if reserve {
+            "Резерв поставлен"
+        } else {
+            "Резерв снят"
+        };
+        Ok(back(id, "shipment", text))
     } else {
-        Ok(card(&state, user, id, None, Some(warnings.join("; ")))
-            .await?
-            .into_response())
+        let notice = Some(warnings.join("; "));
+        card(&state, user, id, "shipment", None, notice, false).await
     }
 }
 
@@ -839,13 +919,20 @@ pub async fn save_shipment(
     match result {
         Ok(_) => {
             tx.commit().await?;
-            Ok(back(id))
+            Ok(back(id, "shipment", "Отгрузка сохранена"))
         }
         Err(StockError::Rejected(m)) => {
             drop(tx);
-            Ok(card(&state, user, id, Some(m.join("; ")), None)
-                .await?
-                .into_response())
+            card(
+                &state,
+                user,
+                id,
+                "shipment",
+                Some(m.join("; ")),
+                None,
+                false,
+            )
+            .await
         }
         Err(StockError::Db(e)) => Err(e.into()),
     }
@@ -953,7 +1040,7 @@ mod tests {
         let app = crate::app(state);
         let cookie = admin_cookie(&db).await;
 
-        let (status, html) = get(&app, &format!("/admin/shop/orders/{id}"), &cookie).await;
+        let (status, html) = get(&app, &format!("/admin/shop/orders/{id}/files"), &cookie).await;
         assert_eq!(status, StatusCode::OK);
         for n in [
             "N-77",
@@ -1120,7 +1207,7 @@ mod tests {
         assert_eq!((amount(1).await, amount(2).await), (5.0, 4.0));
 
         // Карточка: флажок стоит, склад позиции выбран
-        let (_, html) = get(&app, &format!("/admin/shop/orders/{id}"), &cookie).await;
+        let (_, html) = get(&app, &path, &cookie).await;
         assert!(
             html.contains(r#"name="deducted" value="Y" checked"#),
             "{html}"
@@ -1195,7 +1282,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rows, [(2, 1.0)]);
-        let (_, html) = get(&app, &format!("/admin/shop/orders/{id}"), &cookie).await;
+        let (_, html) = get(&app, &path, &cookie).await;
         assert!(html.contains(r#"<option value="2" selected>"#), "{html}");
         let mut tx = db.begin().await.unwrap();
         assert!(
@@ -1263,7 +1350,8 @@ mod tests {
         let app = crate::app(test_state(db.clone()));
         let cookie = admin_cookie(&db).await;
         let (_, html) =
-            crate::smoke_tests::get(&app, &format!("/admin/shop/orders/{id}"), &cookie).await;
+            crate::smoke_tests::get(&app, &format!("/admin/shop/orders/{id}/shipment"), &cookie)
+                .await;
         assert!(html.contains("<th>Резерв</th>"), "{html}");
         assert!(
             html.contains("<td>1.0</td>\n        <td>1.0</td>"),
@@ -1367,7 +1455,8 @@ mod tests {
         let cookie = admin_cookie(&db).await;
         let path = format!("/admin/shop/orders/{id}");
         let page = || async {
-            let (_, html) = crate::smoke_tests::get(&app, &path, &cookie).await;
+            let (_, html) =
+                crate::smoke_tests::get(&app, &format!("{path}/shipment"), &cookie).await;
             html.split(&format!(r#"name="store_{line}""#))
                 .nth(1)
                 .unwrap()
@@ -1402,7 +1491,7 @@ mod tests {
         let cookie = admin_cookie(&db).await;
         let path = format!("/admin/shop/orders/{id}");
         let items_form = || async {
-            let (_, html) = crate::smoke_tests::get(&app, &path, &cookie).await;
+            let (_, html) = crate::smoke_tests::get(&app, &format!("{path}/items"), &cookie).await;
             assert!(!html.contains("Остатки: "), "{html}");
             html.split(&format!(r#"action="/admin/shop/orders/{id}/items""#))
                 .nth(1)
@@ -1425,7 +1514,7 @@ mod tests {
             "{form}"
         );
         // Запрос в обход формы отклоняется
-        let (_, html) = crate::smoke_tests::get(&app, &path, &cookie).await;
+        let (_, html) = crate::smoke_tests::get(&app, &format!("{path}/items"), &cookie).await;
         let version = html
             .split(r#"name="version" value=""#)
             .nth(1)
@@ -1517,7 +1606,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(applied, [(Some(rule), 10.0)]);
-        let (_, card) = get(&app, &format!("/admin/shop/orders/{id}"), &cookie).await;
+        let (_, card) = get(&app, &format!("/admin/shop/orders/{id}/items"), &cookie).await;
         assert!(card.contains("Скидки"), "блок скидок");
         assert!(card.contains("Минус 10%"));
         assert!(card.contains(&path), "кнопка «Пересчитать скидки»");
@@ -1545,5 +1634,204 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(price, 90.0);
+    }
+
+    /// Адреса всех вкладок карточки заказа.
+    fn tab_urls(id: i64) -> Vec<String> {
+        crate::admin::nav::ORDER_TABS
+            .iter()
+            .map(|(code, _)| match *code {
+                "" => format!("/admin/shop/orders/{id}"),
+                c => format!("/admin/shop/orders/{id}/{c}"),
+            })
+            .collect()
+    }
+
+    #[sqlx::test]
+    async fn order_tabs_full_and_fragment(db: sqlx::PgPool) {
+        use crate::test_support::htmx_get;
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let number: String = sqlx::query_scalar("SELECT account_number FROM orders WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let title = format!("<title>Заказ № {number} — CMS</title>");
+        for (url, (_, label)) in tab_urls(id).iter().zip(crate::admin::nav::ORDER_TABS) {
+            let (status, html) = get(&app, url, &cookie).await;
+            assert_eq!(status, StatusCode::OK, "{url}");
+            assert!(html.contains(r#"id="order-tab""#), "{url}: {html}");
+            assert!(html.contains(r#"id="order-aside""#), "{url}: {html}");
+            for (_, l) in crate::admin::nav::ORDER_TABS {
+                assert!(html.contains(l), "{url}: нет вкладки «{l}»");
+            }
+            assert!(html.contains(&title), "{url}: заголовок «{title}»");
+
+            let (status, frag) = htmx_get(&app, url, &cookie, "order-tab").await;
+            assert_eq!(status, StatusCode::OK, "{url}");
+            assert!(!frag.contains("<html"), "{url}: {frag}");
+            assert!(frag.contains(r#"hx-swap-oob="true""#), "{url}: {frag}");
+            assert!(frag.contains(r#"id="order-aside""#), "{url}: {frag}");
+            // В навигации фрагмента активна запрошенная вкладка
+            let active = frag
+                .split(r#"aria-current="page""#)
+                .nth(1)
+                .and_then(|rest| rest.split("</a>").next())
+                .unwrap_or_default();
+            assert!(active.ends_with(label), "{url}: {active}");
+        }
+
+        // Фрагмент запоминает последнюю вкладку карточки в полосе открытых вкладок
+        let (status, _) = htmx_get(
+            &app,
+            &format!("/admin/shop/orders/{id}/shipment"),
+            &cookie,
+            "order-tab",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let url: String = sqlx::query_scalar("SELECT url FROM admin_tabs WHERE key = $1")
+            .bind(format!("/admin/shop/orders/{id}"))
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert!(url.ends_with("/shipment"), "{url}");
+    }
+
+    #[sqlx::test]
+    async fn order_unknown_tab_404(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (status, _) = get(&app, &format!("/admin/shop/orders/{id}/bogus"), &cookie).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    async fn order_tabs_require_orders_manage(db: sqlx::PgPool) {
+        use crate::test_support::htmx_get;
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let app = crate::app(test_state(db.clone()));
+        let shop = permitted_cookie(&db, "shopman", &["shop.manage"]).await;
+        for url in tab_urls(id) {
+            let (status, _) = get(&app, &url, &shop).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{url}");
+            let (status, _) = htmx_get(&app, &url, &shop, "order-tab").await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{url}");
+        }
+        let admin = admin_cookie(&db).await;
+        for url in tab_urls(999_999) {
+            let (status, _) = get(&app, &url, &admin).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{url}");
+        }
+    }
+
+    #[sqlx::test]
+    async fn order_post_redirects_to_tab(db: sqlx::PgPool) {
+        use crate::test_support::post_form_raw;
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let base = format!("/admin/shop/orders/{id}");
+
+        let (status, headers, body) = post_form_raw(
+            &app,
+            &format!("{base}/shipment"),
+            &cookie,
+            "tracking_number=T-9",
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+        assert_eq!(headers[header::LOCATION], format!("{base}/shipment"));
+        let flash = headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .any(|v| v.to_str().unwrap_or_default().starts_with("admin_flash="));
+        assert!(flash, "{headers:?}");
+
+        let (status, headers, body) =
+            post_form_raw(&app, &format!("{base}/status"), &cookie, "status=N").await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+        assert_eq!(headers[header::LOCATION], base);
+
+        // Скидки — до оплаты (оплаченный заказ не пересчитывается), отмена — после резервов
+        for (action, form, tab) in [
+            ("discounts", "", "/items"),
+            ("props", "manager_comment=x", "/props"),
+            ("unreserve", "", "/shipment"),
+            ("reserve", "", "/shipment"),
+            ("paid", "value=Y", ""),
+            ("cancel", "value=Y", ""),
+            ("cancel", "value=N", ""),
+        ] {
+            let (status, headers, body) =
+                post_form_raw(&app, &format!("{base}/{action}"), &cookie, form).await;
+            assert_eq!(status, StatusCode::SEE_OTHER, "{action}: {body}");
+            assert_eq!(
+                headers[header::LOCATION],
+                format!("{base}{tab}"),
+                "{action}"
+            );
+        }
+
+        // Уведомление показывается на следующей полной странице
+        let (_, headers, _) =
+            post_form_raw(&app, &format!("{base}/status"), &cookie, "status=N").await;
+        let flash = headers[header::SET_COOKIE].to_str().unwrap();
+        let flash = flash.split(';').next().unwrap();
+        let (status, html) = get(&app, &base, &format!("{cookie}; {flash}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("Статус изменён"), "{html}");
+    }
+
+    #[sqlx::test]
+    async fn order_form_error_renders_tab(db: sqlx::PgPool) {
+        use crate::smoke_tests::post_form;
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (status, html) = post_form(
+            &app,
+            &format!("/admin/shop/orders/{id}/status"),
+            &cookie,
+            "status=NOPE",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("Нет такого статуса"), "{html}");
+        let active = html
+            .split(r#"aria-current="page""#)
+            .nth(1)
+            .and_then(|rest| rest.split("</a>").next())
+            .unwrap_or_default();
+        assert!(active.ends_with("Обзор"), "{active}");
+    }
+
+    #[sqlx::test]
+    async fn order_aside_totals(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        sqlx::query("UPDATE orders SET price = 1234.5 WHERE id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (_, html) = get(&app, &format!("/admin/shop/orders/{id}/history"), &cookie).await;
+        let aside = html
+            .split(r#"id="order-aside""#)
+            .nth(1)
+            .and_then(|rest| rest.split("</aside>").next())
+            .unwrap_or_default();
+        assert!(aside.contains("1234.5 RUB"), "{aside}");
+        assert!(aside.contains("Итого"), "{aside}");
     }
 }

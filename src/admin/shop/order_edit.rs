@@ -5,13 +5,13 @@ use std::collections::HashMap;
 use axum::{
     Extension,
     extract::{Path, State},
-    response::{IntoResponse, Redirect, Response},
+    response::Response,
 };
 use axum_extra::extract::Form;
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::PgPool;
 
-use super::orders::{card, require_orders};
+use super::orders::{back, card, require_orders};
 use crate::{
     access::Access,
     cart::repo::{Owner, ensure_buyer},
@@ -397,8 +397,8 @@ pub async fn save_items(
         Err(e) => Err(e),
     };
     match result {
-        Ok(()) => Ok(Redirect::to(&format!("/admin/shop/orders/{id}")).into_response()),
-        Err(e) => Ok(card(&state, user, id, Some(e), None).await?.into_response()),
+        Ok(()) => Ok(back(id, "items", "Состав сохранён")),
+        Err(e) => card(&state, user, id, "items", Some(e), None, false).await,
     }
 }
 

@@ -129,11 +129,14 @@
     }
   });
 
-  // Переход по hx-boost при грязной форме. Отправка самой формы (сохранение) — не уход.
+  // Переход по hx-boost при грязной форме, а также запрос, ответ которого заменит область
+  // с этой формой (вкладки карточки). Отправка самой формы (сохранение) — не уход.
   document.addEventListener('htmx:beforeRequest', function (e) {
     var d = e.detail || {};
+    if (!isDirty()) return;
     var boosted = d.boosted || (d.requestConfig && d.requestConfig.boosted);
-    if (!boosted || !isDirty()) return;
+    var replaces = d.target && d.target.contains && d.target.contains(dirtyForm);
+    if (!boosted && !replaces) return;
     if (d.elt === dirtyForm || (d.elt && dirtyForm.contains(d.elt))) return;
     if (!window.confirm('Есть несохранённые изменения. Уйти?')) e.preventDefault();
   });

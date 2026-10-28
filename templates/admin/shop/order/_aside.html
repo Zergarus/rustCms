@@ -1,0 +1,17 @@
+{#- Колонка справа на всех вкладках заказа -#}
+{% import "_ui.html" as ui %}
+<div id="order-aside" class="order-aside"{% if fragment %} hx-swap-oob="true"{% endif %}>
+{% call ui.aside() %}
+<section class="card">
+  {% call ui.prop("Итого") %}<b>{{ order.price }} {{ order.currency }}</b>{% endcall %}
+  {% call ui.prop("Товары") %}{{ order.goods_price }} {{ order.currency }}{% endcall %}
+  {% call ui.prop("Скидка") %}{% if discount_total %}{{ discount_total }} {{ order.currency }}{% else %}—{% endif %}{% endcall %}
+  {% call ui.prop("Доставка") %}{{ order.delivery_price }} {{ order.currency }}{% endcall %}
+</section>
+<section class="card">
+  {% call ui.prop("Статус") %}{{ order.status_name or order.status }}{% if order.canceled %} <span class="badge">отменён</span>{% endif %}{% endcall %}
+  {% call ui.prop("Оплата") %}{% if order.paid %}<span class="badge ok">оплачен</span>{% else %}не оплачен{% endif %}{% endcall %}
+  {% call ui.prop("Отгрузка") %}{% if shipped %}<span class="badge ok">отгружен</span>{% else %}не отгружен{% endif %}{% if order.shipment and order.shipment.allow_delivery %}, доставка разрешена{% endif %}{% endcall %}
+</section>
+{% endcall %}
+</div>

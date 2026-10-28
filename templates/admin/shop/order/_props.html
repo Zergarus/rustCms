@@ -1,0 +1,31 @@
+{#- Вкладка «Покупатель и свойства» -#}
+<div class="card">
+  <h2>Покупатель</h2>
+  <p>{% if order.user_id %}<a href="/admin/users/{{ order.user_id }}">{{ order.user_login }}</a>{% if order.user_name %} — {{ order.user_name }}{% endif %}{% if order.user_email %}, {{ order.user_email }}{% endif %}{% else %}<span class="muted">пользователь удалён</span>{% endif %}</p>
+  <p>Тип плательщика: {{ person_type }}</p>
+  <p>Доставка: {% if order.shipment %}{{ order.shipment.delivery_name }}, {{ order.shipment.price }} {{ order.currency }}{% if order.shipment.store_id %}, склад: {{ stores[order.shipment.store_id|string] }}{% endif %}{% endif %}</p>
+  <p>Оплата: {% if order.payment %}{{ order.payment.name }}, {{ order.payment.sum }} {{ order.currency }}{% endif %}</p>
+  {% if order.user_comment %}<p>Комментарий покупателя: {{ order.user_comment }}</p>{% endif %}
+</div>
+
+<form class="card form" method="post" action="/admin/shop/orders/{{ order.id }}/props" data-dirty-guard>
+  <h2>Свойства заказа</h2>
+  <div class="grid-2">
+    {% for f in fields %}
+    <label>{{ f.name }}{% if f.required %} *{% endif %}{% if f.util %} <span class="muted">(служебное)</span>{% endif %}
+      {% if f.kind == "select" %}
+      <select name="prop_{{ f.code }}"><option value="">—</option>{% for o in f.options %}<option value="{{ o[0] }}" {% if f.value == o[0] %}selected{% endif %}>{{ o[1] }}</option>{% endfor %}</select>
+      {% elif f.kind == "checkbox" %}
+      <select name="prop_{{ f.code }}"><option value="N">Нет</option><option value="Y" {% if f.value == "Y" %}selected{% endif %}>Да</option></select>
+      {% elif f.kind == "textarea" %}
+      <textarea name="prop_{{ f.code }}" rows="2">{{ f.value }}</textarea>
+      {% else %}
+      <input name="prop_{{ f.code }}" value="{{ f.value }}">
+      {% endif %}
+    </label>
+    {% endfor %}
+  </div>
+  {% if extra %}<p class="muted">Прочие значения: {% for v in extra %}{{ v.name }}: {{ v.value }}{% if not loop.last %}; {% endif %}{% endfor %}</p>{% endif %}
+  <label>Комментарий менеджера<textarea name="manager_comment" rows="2">{{ order.manager_comment }}</textarea></label>
+  <div class="form-actions"><button class="btn primary" type="submit">Сохранить свойства</button></div>
+</form>
