@@ -300,6 +300,10 @@ a.stat:hover { text-decoration: none; border-color: var(--accent); }
 }
 .toast[data-kind="ok"] { border-left-color: var(--ok); }
 .toast[data-kind="error"] { border-left-color: var(--danger); }
+.toast { transition: opacity .2s, transform .2s; position: relative; }
+.toast.is-leaving { opacity: 0; transform: translateY(6px); }
+.toast-x { position: absolute; top: 2px; right: 6px; border: 0; background: none; color: var(--muted); font-size: 18px; line-height: 1; cursor: pointer; }
+.toast[data-kind="error"] { padding-right: 32px; }
 .savebar {
   position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 50;
   display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 16px;
@@ -321,7 +325,7 @@ dialog.palette input[type=search]:focus { outline: 0; }
   display: flex; align-items: center; gap: 12px; width: 100%; min-height: 40px; padding: 0 14px;
   border: 0; border-radius: 8px; background: none; color: var(--text); text-align: left; cursor: pointer;
 }
-.palette-results .pal-item:hover, .palette-results .pal-item.sel { background: var(--selected); text-decoration: none; }
+.palette-results .pal-item:hover, .palette-results .pal-item.is-selected { background: var(--selected); text-decoration: none; }
 .hotkeys { padding: 20px; }
 .keys { display: grid; grid-template-columns: auto 1fr; gap: 8px 20px; margin: 0 0 16px; }
 .keys dt { white-space: nowrap; }
