@@ -375,7 +375,7 @@ pub fn router(state: AppState) -> Router<AppState> {
 /// остальных — на страницу входа. Права пересчитываются на каждый запрос,
 /// поэтому изменения групп действуют сразу.
 ///
-/// Для полных страниц (GET без `HX-Request` или с `HX-Boosted`) заполняет `Access.shell`.
+/// Для полных страниц (любой метод без `HX-Request` или с `HX-Boosted`; страница с ошибкой формы после POST тоже полная) заполняет `Access.shell`.
 async fn require_access(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -405,8 +405,7 @@ async fn require_access(
         .map_or_else(|| path.clone(), |pq| pq.as_str().to_string());
     let is_get = req.method() == Method::GET;
     let headers = req.headers();
-    let full_page =
-        is_get && (!headers.contains_key("hx-request") || headers.contains_key("hx-boosted"));
+    let full_page = !headers.contains_key("hx-request") || headers.contains_key("hx-boosted");
 
     let (shop_enabled, store_control) = nav::flags(&state.db).await;
     // Для вкладки «Документы» в меню «Магазин»
@@ -416,7 +415,7 @@ async fn require_access(
         // коллекции и счётчики нужны только полной странице
         let shell = async {
             let ctx = nav::load_ctx(&state.db, &access).await?;
-            build_shell(&state, &access, &ctx, &jar, &path, &url).await
+            build_shell(&state, &access, &ctx, &jar, &path, &url, is_get).await
         }
         .await;
         match shell {
@@ -445,6 +444,7 @@ async fn build_shell(
     jar: &CookieJar,
     path: &str,
     url: &str,
+    is_get: bool,
 ) -> sqlx::Result<shell::Shell> {
     let prefs = shell::load_prefs(&state.db, access.user.id).await?;
     let tabs = if prefs.tabs {
@@ -459,6 +459,7 @@ async fn build_shell(
         tabs,
         path: path.to_string(),
         url: url.to_string(),
+        is_get,
     })
 }
 

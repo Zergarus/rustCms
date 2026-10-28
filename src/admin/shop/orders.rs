@@ -1806,12 +1806,13 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(html.contains("Нет такого статуса"), "{html}");
-        let active = html
+        // активных ссылок несколько (меню, вкладки): нужна среди них «Обзор»
+        let active: Vec<&str> = html
             .split(r#"aria-current="page""#)
-            .nth(1)
-            .and_then(|rest| rest.split("</a>").next())
-            .unwrap_or_default();
-        assert!(active.ends_with("Обзор"), "{active}");
+            .skip(1)
+            .filter_map(|rest| rest.split("</a>").next())
+            .collect();
+        assert!(active.iter().any(|a| a.ends_with("Обзор")), "{active:?}");
     }
 
     #[sqlx::test]
@@ -1833,5 +1834,25 @@ mod tests {
             .unwrap_or_default();
         assert!(aside.contains("1234.5 RUB"), "{aside}");
         assert!(aside.contains("Итого"), "{aside}");
+    }
+
+    #[sqlx::test]
+    async fn post_error_page_has_shell(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let cookie = admin_cookie(&db).await;
+        let app = crate::app(test_state(db.clone()));
+        let (status, _, body) = crate::test_support::post_form_raw(
+            &app,
+            &format!("/admin/shop/orders/{id}/status"),
+            &cookie,
+            "status=NOPE",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("Нет такого статуса"), "{body}");
+        assert!(body.contains("Все разделы"), "{body}");
+        assert!(body.contains("data-palette-open"), "{body}");
+        assert!(!body.contains("hx-post=\"/admin/tabs\""), "{body}");
     }
 }

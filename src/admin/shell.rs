@@ -80,6 +80,8 @@ pub(crate) struct Shell {
     pub path: String,
     /// Адрес запроса вместе с query: его открывает вкладка.
     pub url: String,
+    /// Страница получена GET-ом: только такую можно открыть вкладкой (после POST адрес — не страница).
+    pub is_get: bool,
 }
 
 #[derive(Deserialize)]
