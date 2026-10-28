@@ -6,6 +6,7 @@ mod discounts;
 mod exchange;
 mod groups;
 mod items;
+mod nav;
 mod sections;
 mod shop;
 mod sku;

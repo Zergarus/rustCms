@@ -147,7 +147,7 @@ pub struct SaleSettings {
 }
 
 /// Начальный статус заказа в Битриксе (`OrderStatus::getInitialStatus`).
-const INITIAL_STATUS: &str = "N";
+pub(crate) const INITIAL_STATUS: &str = "N";
 
 impl SaleSettings {
     /// Участвует ли свойство в заказе с этими платёжкой и доставкой.
