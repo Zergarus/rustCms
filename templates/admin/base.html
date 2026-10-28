@@ -53,7 +53,7 @@
     <div class="shell-main">
       <header class="topbar">
         <button class="ico nav-toggle" type="button" data-nav-toggle aria-controls="sidebar" aria-label="Меню">{{ ui.icon("menu") }}</button>
-        <div id="open-tabs" class="open-tabs"{% if shell.prefs.tabs and not no_tab %} hx-post="/admin/tabs" hx-trigger="load" hx-vals='js:{url: location.pathname + location.search, title: document.title}' hx-swap="innerHTML"{% endif %}>{% set tabs = shell.tabs %}{% include "_tabs.html" %}</div>
+        <div id="open-tabs" class="open-tabs"{% if shell.prefs.tabs and not no_tab %} hx-post="/admin/tabs" hx-trigger="load" hx-vals='{{ {"url": shell.url, "title": self.title()}|tojson }}' hx-swap="innerHTML"{% endif %}>{% set tabs = shell.tabs %}{% include "_tabs.html" %}</div>
       </header>
     {% endif %}
   <main class="{% block main_class %}container{% endblock %}">

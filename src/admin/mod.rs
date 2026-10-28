@@ -392,6 +392,11 @@ async fn require_access(
         .get::<OriginalUri>()
         .map_or_else(|| req.uri().path(), |u| u.0.path())
         .to_string();
+    let url = req
+        .extensions()
+        .get::<OriginalUri>()
+        .and_then(|u| u.0.path_and_query())
+        .map_or_else(|| path.clone(), |pq| pq.as_str().to_string());
     let is_get = req.method() == Method::GET;
     let headers = req.headers();
     let full_page =
@@ -405,7 +410,7 @@ async fn require_access(
         // коллекции и счётчики нужны только полной странице
         let shell = async {
             let ctx = nav::load_ctx(&state.db, &access).await?;
-            build_shell(&state, &access, &ctx, &jar, &path).await
+            build_shell(&state, &access, &ctx, &jar, &path, &url).await
         }
         .await;
         match shell {
@@ -433,6 +438,7 @@ async fn build_shell(
     ctx: &nav::NavCtx,
     jar: &CookieJar,
     path: &str,
+    url: &str,
 ) -> sqlx::Result<shell::Shell> {
     let prefs = shell::load_prefs(&state.db, access.user.id).await?;
     let tabs = if prefs.tabs {
@@ -446,6 +452,7 @@ async fn build_shell(
         flash: flash::read(jar),
         tabs,
         path: path.to_string(),
+        url: url.to_string(),
     })
 }
 

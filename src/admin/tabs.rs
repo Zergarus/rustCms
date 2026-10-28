@@ -404,4 +404,31 @@ mod tests {
         assert_eq!(status, 404);
         assert_eq!(count(&db).await, 0);
     }
+
+    #[sqlx::test]
+    async fn page_renders_trigger_with_own_url_and_title(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (status, _, body) = get_raw(&app, "/admin/shop/stores?a=1", &cookie).await;
+        let body = String::from_utf8_lossy(&body);
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains(r#"hx-post="/admin/tabs""#));
+        assert!(body.contains("hx-vals="));
+        assert!(body.contains("/admin/shop/stores?a=1"), "{body}");
+        assert!(body.contains("Склады"));
+        assert!(body.contains("<title>"));
+    }
+
+    #[sqlx::test]
+    async fn module_off_page_has_no_tab_trigger(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        crate::admin::nav::set_shop_enabled(&db, false)
+            .await
+            .unwrap();
+        let (status, _, body) = get_raw(&app, "/admin/shop/stores", &cookie).await;
+        let body = String::from_utf8_lossy(&body);
+        assert_eq!(status, 404);
+        assert!(!body.contains(r#"hx-post="/admin/tabs""#), "{body}");
+    }
 }

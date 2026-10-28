@@ -78,6 +78,8 @@ pub(crate) struct Shell {
     pub flash: Option<Flash>,
     pub tabs: Vec<Tab>,
     pub path: String,
+    /// Адрес запроса вместе с query: его открывает вкладка.
+    pub url: String,
 }
 
 #[derive(Deserialize)]
