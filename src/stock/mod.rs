@@ -67,13 +67,16 @@ pub struct Settings {
     pub clear_period: i32,
     /// `sale.allow_deduction_on_delivery`
     pub deduct_on_delivery: bool,
+    /// `catalog.cost_price_calculation_method` — метод партий; `None` — партий нет
+    pub method: Option<batches::Method>,
 }
 
 pub async fn settings(db: &mut PgConnection) -> sqlx::Result<Settings> {
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT module, name, value FROM options
          WHERE (module = 'catalog' AND name IN ('default_use_store_control', 'enable_reservation',
-                                                'allow_negative_amount'))
+                                                'allow_negative_amount',
+                                                'cost_price_calculation_method'))
             OR (module = 'sale' AND name IN ('product_reserve_condition',
                                              'product_reserve_clear_period',
                                              'allow_deduction_on_delivery'))",
@@ -97,6 +100,8 @@ pub async fn settings(db: &mut PgConnection) -> sqlx::Result<Settings> {
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(0),
         deduct_on_delivery: flag("sale", "allow_deduction_on_delivery", false),
+        method: get("catalog", "cost_price_calculation_method")
+            .and_then(|v| batches::Method::from_code(v)),
     })
 }
 

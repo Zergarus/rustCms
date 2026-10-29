@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 use sqlx::PgConnection;
 
-use super::{StockError, barcodes, recalc_quantity, settings};
+use super::{StockError, barcodes, batches, recalc_quantity, settings};
 use crate::catalog;
 
 /// Тип документа (`b_catalog_store_docs.DOC_TYPE`).
@@ -69,12 +69,12 @@ impl DocType {
     }
 
     /// Склад-источник у строки (перемещение, списание).
-    fn uses_source(self) -> bool {
+    pub(super) fn uses_source(self) -> bool {
         matches!(self, DocType::Moving | DocType::Deduct)
     }
 
     /// Склад-получатель у строки (всё, кроме списания).
-    fn uses_destination(self) -> bool {
+    pub(super) fn uses_destination(self) -> bool {
         !matches!(self, DocType::Deduct)
     }
 }
@@ -367,7 +367,8 @@ async fn run(
     user: Option<i64>,
     cancel: bool,
 ) -> Result<(), StockError> {
-    if !settings(&mut *tx).await?.store_control {
+    let s = settings(&mut *tx).await?;
+    if !s.store_control {
         return Err(reject("Складской учёт выключен"));
     }
     let doc: DocRow = sqlx::query_as(
@@ -536,6 +537,10 @@ async fn run(
         .await?;
     }
     recalc_quantity(&mut *tx, &item_ids).await?;
+    if let Some(method) = s.method {
+        let currency = currency_or_site(&mut *tx, &doc.currency).await?;
+        batches::apply_document(&mut *tx, method, doc_type, &lines, &currency, cancel).await?;
+    }
 
     if !cancel && matches!(doc_type, DocType::Arrival | DocType::Adjustment) {
         let currency = currency_or_site(&mut *tx, &doc.currency).await?;

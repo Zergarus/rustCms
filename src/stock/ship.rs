@@ -5,9 +5,9 @@ use std::collections::{HashMap, HashSet};
 
 use sqlx::PgConnection;
 
-use super::barcodes;
 use super::reserve::{self, Event};
 use super::{Condition, Settings, StockError, recalc_quantity, settings, store_name};
+use super::{barcodes, batches};
 use crate::{catalog, sale::repo::traced_locked, sale::stock::StockLine};
 
 const EPS: f64 = 1e-9;
@@ -423,16 +423,20 @@ async fn ship(
                 .bind(m.quantity)
                 .execute(&mut *tx)
                 .await?;
-                sqlx::query(
+                let row: i64 = sqlx::query_scalar(
                     "INSERT INTO shipment_item_stores (shipment_id, cart_item_id, store_id, quantity)
-                     VALUES ($1, $2, $3, $4::float8::numeric)",
+                     VALUES ($1, $2, $3, $4::float8::numeric)
+                     RETURNING id",
                 )
                 .bind(shipment_id)
                 .bind(m.line)
                 .bind(store)
                 .bind(m.quantity)
-                .execute(&mut *tx)
+                .fetch_one(&mut *tx)
                 .await?;
+                if let Some(method) = s.method {
+                    batches::ship_out(tx, method, row, m.item_id, store, m.quantity).await?;
+                }
             }
             None => {
                 sqlx::query(
@@ -467,6 +471,9 @@ async fn unship(
     .await?;
     if s.store_control {
         barcodes::ship_back(tx, shipment_id).await?;
+    }
+    if let Some(method) = s.method {
+        batches::ship_back(tx, method, shipment_id).await?;
     }
     let mut items = Vec::new();
     for line in lines.iter().filter(|l| traced.contains(&l.item_id)) {
