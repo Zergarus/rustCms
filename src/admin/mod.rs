@@ -353,6 +353,11 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/users/new", get(users::new_form))
         .route("/users/{id}", get(users::edit_form).post(users::update))
         .route("/users/{id}/delete", post(users::delete))
+        .route("/users/{id}/api-keys", post(users::issue_key))
+        .route(
+            "/users/{id}/api-keys/{key_id}/revoke",
+            post(users::revoke_key),
+        )
         .route("/groups", get(groups::list).post(groups::create))
         .route("/groups/new", get(groups::new_form))
         .route("/groups/{id}", get(groups::edit_form).post(groups::update))

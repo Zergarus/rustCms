@@ -1,7 +1,5 @@
 //! API-ключи: выпуск, отзыв, проверка. Формат `cms_<prefix>_<секрет>`; хранится только
 //! sha256 секрета.
-// Потребители (extractor ApiAccess, админка) появятся в следующих задачах подпроекта.
-#![allow(dead_code)]
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -38,6 +36,8 @@ pub struct KeyRow {
 }
 
 pub struct KeyOwner {
+    // читается API склада (следующие задачи подпроекта)
+    #[allow(dead_code)]
     pub key_id: i64,
     pub user_id: i64,
     pub scopes: Vec<String>,

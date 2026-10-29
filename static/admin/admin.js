@@ -431,6 +431,22 @@
     }
   });
 
+  /* ---------- Копирование в буфер ---------- */
+
+  // Кнопка [data-copy="#селектор"] копирует текст элемента (ключ API показывается один раз)
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest && e.target.closest('[data-copy]');
+    if (!btn) return;
+    var src = $(btn.getAttribute('data-copy'));
+    if (!src) return;
+    var text = src.textContent.trim();
+    if (!navigator.clipboard) { toast('Не удалось скопировать', 'error'); return; }
+    navigator.clipboard.writeText(text).then(
+      function () { toast('Скопировано', 'ok'); },
+      function () { toast('Не удалось скопировать', 'error'); }
+    );
+  });
+
   /* ---------- Инициализация страницы ---------- */
 
   function init() {

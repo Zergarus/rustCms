@@ -77,6 +77,82 @@
   </div>
 </form>
 
+{% if target %}
+<section class="card form" id="api-keys">
+  <h2>API-ключи</h2>
+  <p class="muted hint">Ключи для внешних систем (API склада). Действуют с правами этого пользователя.</p>
+
+  {% if new_key %}
+  <div class="alert">
+    <p><strong>Сохраните ключ — потом его не показать.</strong></p>
+    <p><code id="new-key">{{ new_key }}</code>
+      <button class="btn" type="button" data-copy="#new-key">Копировать</button></p>
+  </div>
+  {% endif %}
+
+  {% if confirm_key %}
+  <form method="post" action="/admin/users/{{ target.id }}/api-keys/{{ confirm_key.id }}/revoke">
+    <div class="alert">Отозвать ключ «{{ confirm_key.name }}» (cms_{{ confirm_key.prefix }}_…)? Внешние системы с этим ключом потеряют доступ, действие необратимо.</div>
+    <input type="hidden" name="confirm" value="1">
+    <div class="form-actions"><button class="btn danger" type="submit">Отозвать</button>
+      <a class="btn" href="/admin/users/{{ target.id }}">Отмена</a></div>
+  </form>
+  {% endif %}
+
+  {% if keys %}
+  <table>
+    <thead><tr><th>Название</th><th>Ключ</th><th>Scope</th><th>Выпущен</th><th>Последнее использование</th><th>Срок</th><th></th></tr></thead>
+    <tbody>
+    {% for k in keys %}
+      <tr>
+        <td>{{ k.name }}</td>
+        <td><code>cms_{{ k.prefix }}_…</code></td>
+        <td>{% for s in k.scopes %}<span class="badge">{{ s }}</span> {% endfor %}</td>
+        <td>{{ k.created_at[:16]|replace("T", " ") }}</td>
+        <td>{% if k.last_used_at %}{{ k.last_used_at[:16]|replace("T", " ") }}{% if k.last_used_ip %} · {{ k.last_used_ip }}{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td>{% if k.expires_at %}{{ k.expires_at[:10] }}{% else %}<span class="muted">бессрочно</span>{% endif %}</td>
+        <td>
+          {% if k.revoked_at %}<span class="badge">отозван</span>
+          {% else %}
+          <form method="post" action="/admin/users/{{ target.id }}/api-keys/{{ k.id }}/revoke">
+            <button class="btn danger" type="submit">Отозвать</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Ключей пока нет.</p>
+  {% endif %}
+
+  <form method="post" action="/admin/users/{{ target.id }}/api-keys" autocomplete="off">
+    <h3>Выпустить ключ</h3>
+    {% if key_error %}<div class="alert">{{ key_error }}</div>{% endif %}
+    <div class="grid-2">
+      <label>Название *
+        <input name="name" value="{{ key_name or '' }}" required maxlength="100" placeholder="Например, 1С склад">
+      </label>
+      <label>Действует до
+        <input name="expires_at" type="date" value="{{ key_expires or '' }}">
+        <small>Пусто — бессрочно</small>
+      </label>
+    </div>
+    <fieldset>
+      <legend>Доступ (scope)</legend>
+      {% for s in scopes %}
+      <label class="check">
+        <input type="checkbox" name="scopes" value="{{ s.code }}" {% if key_scopes and s.code in key_scopes %}checked{% endif %}>
+        {{ s.name }} <span class="muted">— {{ s.code }}</span>
+      </label>
+      {% endfor %}
+    </fieldset>
+    <div class="form-actions"><button class="btn primary" type="submit">Выпустить ключ</button></div>
+  </form>
+</section>
+{% endif %}
+
 {% if target and not is_self %}
 <section class="card danger-zone">
   <h2>Удаление</h2>
