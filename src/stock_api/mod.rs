@@ -17,7 +17,14 @@ use crate::{access::Access, apikeys, auth, state::AppState};
 use error::{ApiError, ApiResult};
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/stores", get(read::stores))
+    Router::new()
+        .route("/stores", get(read::stores))
+        .route("/rests", get(read::rests))
+        .route("/products/lookup", get(read::lookup))
+        .route("/documents", get(read::documents))
+        .route("/documents/{id}", get(read::document))
+        .route("/contractors", get(read::contractors))
+        .route("/contractors/{id}", get(read::contractor))
 }
 
 /// Вызывающий API: ключ, его scope и права пользователя ключа.
@@ -314,5 +321,373 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(headers[header::WWW_AUTHENTICATE], "Bearer");
         assert_eq!(body["message"], UNAUTHORIZED);
+    }
+
+    const BASE: &str = "/api/stock/v1";
+
+    async fn read_key(db: &PgPool, perms: &[&str]) -> String {
+        format!("Bearer {}", key_for(db, perms, &["stock.read"]).await)
+    }
+
+    /// Два товара (простой и предложение), два склада, остатки.
+    async fn stock_fixture(db: &PgPool) -> (i64, i64) {
+        let f = crate::test_support::order_fixture(db).await;
+        sqlx::query("INSERT INTO catalog_stores (id, name) VALUES (2, 'Второй')")
+            .execute(db)
+            .await
+            .unwrap();
+        let coll: i64 =
+            sqlx::query_scalar("SELECT collection_id FROM collection_items WHERE id = $1")
+                .bind(f.product_id)
+                .fetch_one(db)
+                .await
+                .unwrap();
+        sqlx::query("UPDATE collection_items SET xml_id = 'X-1' WHERE id = $1")
+            .bind(f.product_id)
+            .execute(db)
+            .await
+            .unwrap();
+        let second: i64 = sqlx::query_scalar(
+            "INSERT INTO collection_items (collection_id, code, name, product_id, xml_id)
+             VALUES ($1, 'offer', 'Предложение', $2, 'X-2') RETURNING id",
+        )
+        .bind(coll)
+        .bind(f.product_id)
+        .fetch_one(db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO catalog_products (item_id, quantity) VALUES ($1, 3)")
+            .bind(second)
+            .execute(db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO catalog_store_amounts (item_id, store_id, amount, quantity_reserved)
+             VALUES ($1, 2, 7, 1), ($2, 1, 3, 0)",
+        )
+        .bind(f.product_id)
+        .bind(second)
+        .execute(db)
+        .await
+        .unwrap();
+        (f.product_id, second)
+    }
+
+    /// Отдельный простой товар (не родитель предложений).
+    async fn simple_item(db: &PgPool, a: i64, xml: &str) -> i64 {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO collection_items (collection_id, code, name, xml_id)
+             SELECT collection_id, 'simple', 'Простой', $2 FROM collection_items WHERE id = $1
+             RETURNING id",
+        )
+        .bind(a)
+        .bind(xml)
+        .fetch_one(db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO catalog_products (item_id) VALUES ($1)")
+            .bind(id)
+            .execute(db)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[sqlx::test]
+    async fn rests_filters(db: PgPool) {
+        let (a, b) = stock_fixture(&db).await;
+        let auth = read_key(&db, &["shop.manage"]).await;
+        let (status, _, body) = get(&db, &format!("{BASE}/rests"), Some(&auth)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total"], 3);
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items[0]["item_id"], a);
+        assert_eq!(items[0]["store_id"], 1);
+        assert_eq!(items[0]["amount"], 5.0);
+        assert_eq!(items[1]["store_id"], 2);
+        assert_eq!(items[1]["amount"], 7.0);
+        assert_eq!(items[1]["quantity_reserved"], 1.0);
+        assert_eq!(items[2]["item_id"], b);
+        let (_, _, body) = get(&db, &format!("{BASE}/rests?item_id={b}"), Some(&auth)).await;
+        assert_eq!(body["total"], 1);
+        let (_, _, body) = get(
+            &db,
+            &format!("{BASE}/rests?item_id={a},{b}&store_id=1"),
+            Some(&auth),
+        )
+        .await;
+        assert_eq!(body["total"], 2);
+        let (_, _, body) = get(&db, &format!("{BASE}/rests?store_id=2"), Some(&auth)).await;
+        assert_eq!(body["items"][0]["item_id"], a);
+        for bad in ["item_id=1,x", "item_id=", "store_id=abc"] {
+            let (status, _, body) = get(&db, &format!("{BASE}/rests?{bad}"), Some(&auth)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+            assert_eq!(body["error"], "bad_request");
+        }
+    }
+
+    #[sqlx::test]
+    async fn lookup_by_barcode_xml_id_id(db: PgPool) {
+        let (a, b) = stock_fixture(&db).await;
+        sqlx::query(
+            "INSERT INTO catalog_barcodes (item_id, barcode, store_id, order_id) VALUES
+             ($1, 'BC-1', NULL, NULL), ($1, 'BC-UNIT', 1, NULL)",
+        )
+        .bind(a)
+        .execute(&db)
+        .await
+        .unwrap();
+        let auth = read_key(&db, &["shop.manage"]).await;
+        for q in ["barcode=BC-1", "xml_id=X-1", &format!("id={a}")] {
+            let (status, _, body) =
+                get(&db, &format!("{BASE}/products/lookup?{q}"), Some(&auth)).await;
+            assert_eq!(status, StatusCode::OK, "{q}");
+            assert_eq!(body["id"], a);
+            assert_eq!(body["xml_id"], "X-1");
+            assert_eq!(body["name"], "Товар");
+            // Родитель предложений получает тип «с предложениями» — не simple/offer.
+            assert_eq!(body["type"], "other");
+            assert_eq!(body["barcode_multi"], false);
+            assert_eq!(body["barcodes"], serde_json::json!(["BC-1"]));
+            let stores = body["stores"].as_array().unwrap();
+            assert_eq!(stores.len(), 2);
+            assert_eq!(stores[0]["store_id"], 1);
+            assert_eq!(stores[1]["amount"], 7.0);
+            assert_eq!(stores[1]["quantity_reserved"], 1.0);
+        }
+        let (_, _, body) = get(&db, &format!("{BASE}/products/lookup?id={b}"), Some(&auth)).await;
+        assert_eq!(body["type"], "offer");
+        let c = simple_item(&db, a, "X-3").await;
+        let (_, _, body) = get(&db, &format!("{BASE}/products/lookup?id={c}"), Some(&auth)).await;
+        assert_eq!(body["type"], "simple");
+        for q in ["barcode=NOPE", "xml_id=NOPE", "id=999999"] {
+            let (status, _, body) =
+                get(&db, &format!("{BASE}/products/lookup?{q}"), Some(&auth)).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{q}");
+            assert_eq!(body["error"], "not_found");
+        }
+    }
+
+    #[sqlx::test]
+    async fn lookup_one_param_required(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        let auth = read_key(&db, &["shop.manage"]).await;
+        for q in [
+            String::new(),
+            format!("?id={a}&xml_id=X-1"),
+            "?barcode=1&id=1".into(),
+            "?id=abc".into(),
+        ] {
+            let (status, _, body) =
+                get(&db, &format!("{BASE}/products/lookup{q}"), Some(&auth)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{q}");
+            assert_eq!(body["error"], "bad_request");
+        }
+    }
+
+    #[sqlx::test]
+    async fn lookup_purchase_price_needs_right(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        let a = simple_item(&db, a, "X-4").await;
+        sqlx::query(
+            "UPDATE catalog_products SET purchasing_price = 12.5, purchasing_currency = 'RUB' WHERE item_id = $1",
+        )
+        .bind(a)
+        .execute(&db)
+        .await
+        .unwrap();
+        let auth = read_key(&db, &["shop.manage"]).await;
+        let (_, _, body) = get(&db, &format!("{BASE}/products/lookup?id={a}"), Some(&auth)).await;
+        assert!(body.get("purchasing_price").is_none());
+        assert!(body.get("purchasing_currency").is_none());
+        let gid: i64 = sqlx::query_scalar("SELECT id FROM groups WHERE code = 'g_wms'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO group_permissions (group_id, permission) VALUES ($1, 'catalog.purchase_info')",
+        )
+        .bind(gid)
+        .execute(&db)
+        .await
+        .unwrap();
+        let (_, _, body) = get(&db, &format!("{BASE}/products/lookup?id={a}"), Some(&auth)).await;
+        assert_eq!(body["purchasing_price"], 12.5);
+        assert_eq!(body["purchasing_currency"], "RUB");
+    }
+
+    async fn doc(
+        db: &PgPool,
+        t: &str,
+        status: &str,
+        date: &str,
+        xml: &str,
+        contractor: Option<i64>,
+    ) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO store_documents (doc_type, title, doc_number, date_document, status, xml_id,
+                                          contractor_id, commentary, total)
+             VALUES ($1, 'Т', 'N-1', $2::date, $3, $4, $5, 'комм', 150.5) RETURNING id",
+        )
+        .bind(t)
+        .bind(date)
+        .bind(status)
+        .bind(xml)
+        .bind(contractor)
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn documents_list_filters(db: PgPool) {
+        let c: i64 =
+            sqlx::query_scalar("INSERT INTO contractors (company) VALUES ('ООО') RETURNING id")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let d1 = doc(&db, "A", "N", "2026-10-01", "W-1", Some(c)).await;
+        let d2 = doc(&db, "S", "Y", "2026-10-15", "W-2", None).await;
+        let d3 = doc(&db, "A", "Y", "2026-10-20", "", None).await;
+        let auth = read_key(&db, &["shop.manage"]).await;
+        let list = |q: String| {
+            let (db, auth) = (db.clone(), auth.clone());
+            async move { get(&db, &format!("{BASE}/documents{q}"), Some(&auth)).await }
+        };
+        let ids = |b: &Value| -> Vec<i64> {
+            b["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["id"].as_i64().unwrap())
+                .collect()
+        };
+        let (status, _, body) = list(String::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total"], 3);
+        assert_eq!(ids(&body), vec![d3, d2, d1]);
+        let first = &body["items"][2];
+        assert_eq!(first["type"], "A");
+        assert_eq!(first["number"], "N-1");
+        assert_eq!(first["date"], "2026-10-01");
+        assert_eq!(first["status"], "draft");
+        assert_eq!(first["contractor_id"], c);
+        assert_eq!(first["comment"], "комм");
+        assert_eq!(first["total"], 150.5);
+        assert_eq!(first["xml_id"], "W-1");
+        assert!(first.get("lines").is_none());
+        assert_eq!(body["items"][0]["status"], "conducted");
+        assert_eq!(body["items"][0]["xml_id"], "");
+        assert_eq!(ids(&list("?type=A".into()).await.2), vec![d3, d1]);
+        assert_eq!(ids(&list("?status=conducted".into()).await.2), vec![d3, d2]);
+        assert_eq!(ids(&list("?status=draft".into()).await.2), vec![d1]);
+        assert_eq!(
+            ids(&list("?from=2026-10-10&to=2026-10-15".into()).await.2),
+            vec![d2]
+        );
+        assert_eq!(ids(&list(format!("?contractor_id={c}")).await.2), vec![d1]);
+        assert_eq!(ids(&list("?xml_id=W-2".into()).await.2), vec![d2]);
+        for bad in [
+            "type=Z",
+            "status=Y",
+            "from=2026-13-01",
+            "to=abc",
+            "contractor_id=x",
+        ] {
+            let (status, _, body) = list(format!("?{bad}")).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+            assert_eq!(body["error"], "bad_request");
+        }
+    }
+
+    #[sqlx::test]
+    async fn document_with_lines_and_barcodes(db: PgPool) {
+        let (a, b) = stock_fixture(&db).await;
+        let id = doc(&db, "M", "N", "2026-10-02", "W-9", None).await;
+        let l1: i64 = sqlx::query_scalar(
+            "INSERT INTO store_document_items (doc_id, item_id, store_from, store_to, amount, purchasing_price)
+             VALUES ($1, $2, 1, 2, 2.5, 10) RETURNING id",
+        )
+        .bind(id)
+        .bind(a)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO store_document_items (doc_id, item_id, store_to, amount) VALUES ($1, $2, 2, 1)")
+            .bind(id)
+            .bind(b)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO store_document_barcodes (doc_item_id, barcode) VALUES ($1, 'U-2'), ($1, 'U-1')")
+            .bind(l1)
+            .execute(&db)
+            .await
+            .unwrap();
+        let auth = read_key(&db, &["shop.manage"]).await;
+        let (status, _, body) = get(&db, &format!("{BASE}/documents/{id}"), Some(&auth)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["id"], id);
+        assert_eq!(body["type"], "M");
+        let lines = body["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["id"], l1);
+        assert_eq!(lines[0]["item_id"], a);
+        assert_eq!(lines[0]["store_from"], 1);
+        assert_eq!(lines[0]["store_to"], 2);
+        assert_eq!(lines[0]["amount"], 2.5);
+        assert_eq!(lines[0]["purchasing_price"], 10.0);
+        assert_eq!(lines[0]["barcodes"], serde_json::json!(["U-1", "U-2"]));
+        assert_eq!(lines[1]["store_from"], Value::Null);
+        assert_eq!(lines[1]["purchasing_price"], Value::Null);
+        assert_eq!(lines[1]["barcodes"], serde_json::json!([]));
+        let (status, _, body) = get(&db, &format!("{BASE}/documents/999999"), Some(&auth)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "not_found");
+    }
+
+    #[sqlx::test]
+    async fn contractors_list_and_get(db: PgPool) {
+        let c2: i64 = sqlx::query_scalar(
+            "INSERT INTO contractors (person_type, company, inn, email) VALUES ('C', 'ООО Ромашка', '7700', 'a@b.c') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let auth = read_key(&db, &["shop.manage"]).await;
+        let (status, _, body) = get(&db, &format!("{BASE}/contractors"), Some(&auth)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["items"][0]["id"], c2);
+        let (status, _, body) = get(&db, &format!("{BASE}/contractors/{c2}"), Some(&auth)).await;
+        assert_eq!(status, StatusCode::OK);
+        for (k, v) in [
+            ("person_type", "C"),
+            ("company", "ООО Ромашка"),
+            ("inn", "7700"),
+            ("email", "a@b.c"),
+            ("kpp", ""),
+            ("post_index", ""),
+        ] {
+            assert_eq!(body[k], v, "{k}");
+        }
+        assert!(body["created_at"].is_string());
+        let (status, _, _) = get(&db, &format!("{BASE}/contractors/999999"), Some(&auth)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    async fn list_params_bounds(db: PgPool) {
+        let auth = read_key(&db, &["shop.manage"]).await;
+        for path in ["rests", "documents", "contractors"] {
+            for (q, want) in [
+                ("limit=100000", 400),
+                ("offset=-1", 400),
+                ("limit=500", 200),
+            ] {
+                let (status, _, _) = get(&db, &format!("{BASE}/{path}?{q}"), Some(&auth)).await;
+                assert_eq!(status.as_u16(), want, "{path}?{q}");
+            }
+        }
     }
 }
