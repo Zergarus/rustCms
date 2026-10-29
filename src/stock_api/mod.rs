@@ -2,6 +2,7 @@
 
 pub mod error;
 mod read;
+mod write;
 
 use std::net::SocketAddr;
 
@@ -21,9 +22,20 @@ pub fn router() -> Router<AppState> {
         .route("/stores", get(read::stores))
         .route("/rests", get(read::rests))
         .route("/products/lookup", get(read::lookup))
-        .route("/documents", get(read::documents))
-        .route("/documents/{id}", get(read::document))
-        .route("/contractors", get(read::contractors))
+        .route(
+            "/documents",
+            get(read::documents).post(write::create_document),
+        )
+        .route(
+            "/documents/{id}",
+            get(read::document)
+                .put(write::replace_document)
+                .delete(write::delete_document),
+        )
+        .route(
+            "/contractors",
+            get(read::contractors).post(write::create_contractor),
+        )
         .route("/contractors/{id}", get(read::contractor))
 }
 
@@ -541,6 +553,7 @@ mod tests {
 
     #[sqlx::test]
     async fn documents_list_filters(db: PgPool) {
+        control_on(&db).await;
         let c: i64 =
             sqlx::query_scalar("INSERT INTO contractors (company) VALUES ('ООО') RETURNING id")
                 .fetch_one(&db)
@@ -602,6 +615,7 @@ mod tests {
 
     #[sqlx::test]
     async fn document_with_lines_and_barcodes(db: PgPool) {
+        control_on(&db).await;
         let (a, b) = stock_fixture(&db).await;
         let id = doc(&db, "M", "N", "2026-10-02", "W-9", None).await;
         let l1: i64 = sqlx::query_scalar(
@@ -678,6 +692,7 @@ mod tests {
 
     #[sqlx::test]
     async fn list_params_bounds(db: PgPool) {
+        control_on(&db).await;
         let auth = read_key(&db, &["shop.manage"]).await;
         for path in ["rests", "documents", "contractors"] {
             for (q, want) in [
@@ -689,5 +704,412 @@ mod tests {
                 assert_eq!(status.as_u16(), want, "{path}?{q}");
             }
         }
+    }
+
+    // --- запись ---
+
+    async fn control_on(db: &PgPool) {
+        let mut tx = db.begin().await.unwrap();
+        crate::stock::set_store_control(&mut tx, true)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    async fn write_key(db: &PgPool) -> (i64, String) {
+        let (uid, key) = key_for_user(db, &["shop.manage"], &["stock.write", "stock.read"]).await;
+        (uid, format!("Bearer {key}"))
+    }
+
+    async fn send(
+        db: &PgPool,
+        method: &str,
+        path: &str,
+        auth: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let app = crate::app(test_state(db.clone()));
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, auth)
+            .header(header::CONTENT_TYPE, "application/json");
+        let req = req
+            .body(match body {
+                Some(b) => Body::from(b.to_string()),
+                None => Body::empty(),
+            })
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn doc_count(db: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM store_documents")
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    fn arrival(item: Value) -> Value {
+        let mut line = serde_json::json!({"store_to": 1, "amount": 10, "purchasing_price": 100});
+        line.as_object_mut()
+            .unwrap()
+            .extend(item.as_object().unwrap().clone());
+        serde_json::json!({
+            "type": "A", "xml_id": "WMS-1042", "number": "WMS-1042", "date": "2026-10-30",
+            "currency": "RUB", "comment": "из WMS", "lines": [line]
+        })
+    }
+
+    #[sqlx::test]
+    async fn create_draft_by_item_id(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        control_on(&db).await;
+        let (_, auth) = write_key(&db).await;
+        let (status, body) = send(
+            &db,
+            "POST",
+            &format!("{BASE}/documents"),
+            &auth,
+            Some(arrival(serde_json::json!({"item_id": a}))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["status"], "draft");
+        assert_eq!(body["type"], "A");
+        assert_eq!(body["xml_id"], "WMS-1042");
+        assert_eq!(body["number"], "WMS-1042");
+        assert_eq!(body["comment"], "из WMS");
+        assert_eq!(body["lines"][0]["item_id"], a);
+        assert_eq!(body["lines"][0]["amount"], 10.0);
+        assert_eq!(body["total"], 1000.0);
+    }
+
+    #[sqlx::test]
+    async fn create_by_item_xml_id(db: PgPool) {
+        let (a, b) = stock_fixture(&db).await;
+        control_on(&db).await;
+        let (_, auth) = write_key(&db).await;
+        let (status, body) = send(
+            &db,
+            "POST",
+            &format!("{BASE}/documents"),
+            &auth,
+            Some(arrival(serde_json::json!({"item_xml_id": "X-2"}))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["lines"][0]["item_id"], b);
+        assert_ne!(a, b);
+        // оба или ни одного — 400
+        for item in [
+            serde_json::json!({"item_id": a, "item_xml_id": "X-1"}),
+            serde_json::json!({}),
+        ] {
+            let mut req = arrival(item);
+            req["xml_id"] = "OTHER".into();
+            let (status, body) =
+                send(&db, "POST", &format!("{BASE}/documents"), &auth, Some(req)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["error"], "bad_request");
+        }
+        assert_eq!(doc_count(&db).await, 1);
+    }
+
+    #[sqlx::test]
+    async fn unknown_item_xml_id_rejected(db: PgPool) {
+        stock_fixture(&db).await;
+        control_on(&db).await;
+        let (_, auth) = write_key(&db).await;
+        let mut req = arrival(serde_json::json!({"item_xml_id": "NOPE"}));
+        req["lines"].as_array_mut().unwrap().push(serde_json::json!(
+            {"item_xml_id": "X-1", "store_to": 1, "amount": "много"}
+        ));
+        let (status, body) =
+            send(&db, "POST", &format!("{BASE}/documents"), &auth, Some(req)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["error"], "rejected");
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2, "{body}");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m == "Не найден товар с внешним кодом NOPE")
+        );
+        assert_eq!(doc_count(&db).await, 0);
+    }
+
+    #[sqlx::test]
+    async fn duplicate_xml_id_conflict(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        control_on(&db).await;
+        let (_, auth) = write_key(&db).await;
+        let req = arrival(serde_json::json!({"item_id": a}));
+        let (_, first) = send(
+            &db,
+            "POST",
+            &format!("{BASE}/documents"),
+            &auth,
+            Some(req.clone()),
+        )
+        .await;
+        let (status, body) =
+            send(&db, "POST", &format!("{BASE}/documents"), &auth, Some(req)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "conflict");
+        assert_eq!(
+            body["message"],
+            "Документ с внешним кодом WMS-1042 уже есть"
+        );
+        assert_eq!(body["id"], first["id"]);
+        assert_eq!(doc_count(&db).await, 1);
+    }
+
+    #[sqlx::test]
+    async fn put_replaces_lines(db: PgPool) {
+        let (a, b) = stock_fixture(&db).await;
+        control_on(&db).await;
+        let (_, auth) = write_key(&db).await;
+        let (_, created) = send(
+            &db,
+            "POST",
+            &format!("{BASE}/documents"),
+            &auth,
+            Some(arrival(serde_json::json!({"item_id": a}))),
+        )
+        .await;
+        let id = created["id"].as_i64().unwrap();
+        let mut req = arrival(serde_json::json!({"item_id": b}));
+        req["comment"] = "новый".into();
+        req["xml_id"] = "WMS-2".into();
+        let (status, body) = send(
+            &db,
+            "PUT",
+            &format!("{BASE}/documents/{id}"),
+            &auth,
+            Some(req),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["id"], id);
+        assert_eq!(body["comment"], "новый");
+        assert_eq!(body["xml_id"], "WMS-2");
+        let lines = body["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["item_id"], b);
+        assert_eq!(body["title"], created["title"]);
+        let (status, _) = send(
+            &db,
+            "PUT",
+            &format!("{BASE}/documents/999999"),
+            &auth,
+            Some(arrival(serde_json::json!({"item_id": a}))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    async fn put_conducted_conflict(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        control_on(&db).await;
+        let (_, auth) = write_key(&db).await;
+        let id = doc(&db, "A", "Y", "2026-10-02", "", None).await;
+        let (status, body) = send(
+            &db,
+            "PUT",
+            &format!("{BASE}/documents/{id}"),
+            &auth,
+            Some(arrival(serde_json::json!({"item_id": a}))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "conflict");
+        assert_eq!(
+            body["message"],
+            "Проведённый документ нельзя изменить — сначала отмените проведение"
+        );
+    }
+
+    #[sqlx::test]
+    async fn delete_draft_and_conducted(db: PgPool) {
+        stock_fixture(&db).await;
+        control_on(&db).await;
+        let (_, auth) = write_key(&db).await;
+        let draft = doc(&db, "A", "N", "2026-10-02", "", None).await;
+        let done = doc(&db, "A", "Y", "2026-10-02", "", None).await;
+        let (status, _) = send(
+            &db,
+            "DELETE",
+            &format!("{BASE}/documents/{draft}"),
+            &auth,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, body) = send(
+            &db,
+            "DELETE",
+            &format!("{BASE}/documents/{done}"),
+            &auth,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(
+            body["message"],
+            "Проведённый документ нельзя удалить — сначала отмените проведение"
+        );
+        let (status, _) = send(
+            &db,
+            "DELETE",
+            &format!("{BASE}/documents/{draft}"),
+            &auth,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(doc_count(&db).await, 1);
+    }
+
+    #[sqlx::test]
+    async fn author_is_key_user(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        control_on(&db).await;
+        let (uid, auth) = write_key(&db).await;
+        let (_, body) = send(
+            &db,
+            "POST",
+            &format!("{BASE}/documents"),
+            &auth,
+            Some(arrival(serde_json::json!({"item_id": a}))),
+        )
+        .await;
+        assert_eq!(body["created_by"], uid);
+        let responsible: Option<i64> =
+            sqlx::query_scalar("SELECT responsible_id FROM store_documents WHERE id = $1")
+                .bind(body["id"].as_i64().unwrap())
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(responsible, Some(uid));
+    }
+
+    #[sqlx::test]
+    async fn multi_barcodes_in_lines(db: PgPool) {
+        let (a0, _) = stock_fixture(&db).await;
+        let a = simple_item(&db, a0, "S-1").await;
+        control_on(&db).await;
+        sqlx::query("UPDATE catalog_products SET barcode_multi = TRUE WHERE item_id = $1")
+            .bind(a)
+            .execute(&db)
+            .await
+            .unwrap();
+        let (_, auth) = write_key(&db).await;
+        let mut req = arrival(serde_json::json!({"item_id": a, "amount": 2,
+            "barcodes": ["B-2", "B-1"]}));
+        req["xml_id"] = "".into();
+        let c: i64 =
+            sqlx::query_scalar("INSERT INTO contractors (company) VALUES ('ООО') RETURNING id")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        req["contractor_id"] = c.into();
+        let (status, body) =
+            send(&db, "POST", &format!("{BASE}/documents"), &auth, Some(req)).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(
+            body["lines"][0]["barcodes"],
+            serde_json::json!(["B-1", "B-2"])
+        );
+        // проведение через склад принимает коды
+        let id = body["id"].as_i64().unwrap();
+        let mut tx = db.begin().await.unwrap();
+        crate::stock::documents::conduct(&mut tx, id, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    #[sqlx::test]
+    async fn store_control_off_conflict(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        let (_, auth) = write_key(&db).await;
+        let id = doc(&db, "A", "N", "2026-10-02", "", None).await;
+        let req = arrival(serde_json::json!({"item_id": a}));
+        let cases = [
+            ("GET", format!("{BASE}/documents"), None),
+            ("GET", format!("{BASE}/documents/{id}"), None),
+            ("POST", format!("{BASE}/documents"), Some(req.clone())),
+            ("PUT", format!("{BASE}/documents/{id}"), Some(req)),
+            ("DELETE", format!("{BASE}/documents/{id}"), None),
+        ];
+        for (method, path, body) in cases {
+            let (status, resp) = send(&db, method, &path, &auth, body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{method} {path}: {resp}");
+            assert_eq!(resp["message"], "Складской учёт выключен");
+        }
+        assert_eq!(doc_count(&db).await, 1);
+    }
+
+    #[sqlx::test]
+    async fn create_contractor(db: PgPool) {
+        let (uid, auth) = write_key(&db).await;
+        let (status, body) = send(
+            &db,
+            "POST",
+            &format!("{BASE}/contractors"),
+            &auth,
+            Some(
+                serde_json::json!({"person_type": "C", "company": "ООО Ромашка",
+                "inn": "7700000000", "phone": "+7"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["company"], "ООО Ромашка");
+        assert_eq!(body["inn"], "7700000000");
+        assert!(body["id"].as_i64().is_some());
+        for bad in [
+            serde_json::json!({"person_type": "X", "company": "a"}),
+            serde_json::json!({"person_type": "C"}),
+            serde_json::json!({"company": "a"}),
+        ] {
+            let (status, _) = send(
+                &db,
+                "POST",
+                &format!("{BASE}/contractors"),
+                &auth,
+                Some(bad),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+        // без scope stock.write — 403
+        let new_key = NewKey {
+            user_id: uid,
+            name: "RO".into(),
+            scopes: vec!["stock.read".into()],
+            expires_at: None,
+        };
+        let (_, full) = apikeys::issue(&db, &new_key, uid).await.unwrap();
+        let read_only = format!("Bearer {full}");
+        let (status, _) = send(
+            &db,
+            "POST",
+            &format!("{BASE}/contractors"),
+            &read_only,
+            Some(serde_json::json!({"person_type": "C", "company": "a"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 }

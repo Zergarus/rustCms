@@ -145,14 +145,31 @@ pub struct DocInput {
     pub items_received_date: Option<NaiveDate>,
     pub responsible_id: Option<i64>,
     pub commentary: String,
+    /// Внешний код документа (WMS и т.п.); пусто — нет кода.
+    pub xml_id: String,
     pub lines: Vec<Line>,
 }
 
-const NOT_EDITABLE: &str = "Проведённый документ нельзя изменить — сначала отмените проведение";
-const NOT_DELETABLE: &str = "Проведённый документ нельзя удалить — сначала отмените проведение";
+pub const NOT_EDITABLE: &str = "Проведённый документ нельзя изменить — сначала отмените проведение";
+pub const NOT_DELETABLE: &str = "Проведённый документ нельзя удалить — сначала отмените проведение";
 
 fn reject(message: impl Into<String>) -> StockError {
     StockError::Rejected(vec![message.into()])
+}
+
+const XML_ID_INDEX: &str = "store_documents_xml_id_uq";
+
+/// Текст отказа при повторе внешнего кода (API по нему находит конфликт).
+pub fn duplicate_xml_id_message(xml_id: &str) -> String {
+    format!("Документ с внешним кодом {xml_id} уже есть")
+}
+
+/// Нарушение уникальности внешнего кода — отказ правил, остальное — ошибка БД.
+fn xml_id_error(e: sqlx::Error, xml_id: &str) -> StockError {
+    match e.as_database_error().and_then(|d| d.constraint()) {
+        Some(XML_ID_INDEX) => reject(duplicate_xml_id_message(xml_id)),
+        _ => StockError::Db(e),
+    }
 }
 
 fn not_found(id: i64) -> StockError {
@@ -239,9 +256,9 @@ pub async fn create(
         "INSERT INTO store_documents
              (doc_type, title, doc_number, date_document, contractor_id, currency, total,
               items_order_date, items_received_date, responsible_id, commentary,
-              created_by, modified_by)
+              created_by, modified_by, xml_id)
          VALUES ($1, $2, $3, COALESCE($4::date::timestamptz, now()), $5, $6, $7::float8::numeric,
-                 $8::date::timestamptz, $9::date::timestamptz, $10, $11, $12, $12)
+                 $8::date::timestamptz, $9::date::timestamptz, $10, $11, $12, $12, $13)
          RETURNING id",
     )
     .bind(doc_type.code())
@@ -256,8 +273,10 @@ pub async fn create(
     .bind(input.responsible_id)
     .bind(&input.commentary)
     .bind(user)
+    .bind(&input.xml_id)
     .fetch_one(&mut *tx)
-    .await?;
+    .await
+    .map_err(|e| xml_id_error(e, &input.xml_id))?;
     insert_lines(tx, id, &input.lines).await?;
     Ok(id)
 }
@@ -288,7 +307,8 @@ pub async fn update(
              doc_number = $2, date_document = COALESCE($3::date::timestamptz, date_document),
              contractor_id = $4, currency = $5, total = $6::float8::numeric,
              items_order_date = $7::date::timestamptz, items_received_date = $8::date::timestamptz,
-             responsible_id = $9, commentary = $10, modified_by = $11, updated_at = now()
+             responsible_id = $9, commentary = $10, modified_by = $11, xml_id = $12,
+             updated_at = now()
          WHERE id = $1",
     )
     .bind(id)
@@ -302,8 +322,10 @@ pub async fn update(
     .bind(input.responsible_id)
     .bind(&input.commentary)
     .bind(user)
+    .bind(&input.xml_id)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .map_err(|e| xml_id_error(e, &input.xml_id))?;
     sqlx::query("DELETE FROM store_document_items WHERE doc_id = $1")
         .bind(id)
         .execute(&mut *tx)

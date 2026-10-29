@@ -28,6 +28,7 @@
     <label>Дата получения<input type="date" name="items_received_date" value="{{ form.items_received_date }}"></label>
   </div>
   {% endif %}
+  <label>Внешний код<input name="xml_id" value="{{ form.xml_id }}" maxlength="100"></label>
   <label>Комментарий<textarea name="commentary" rows="2">{{ form.commentary }}</textarea></label>
 
   <h2>Товары</h2>

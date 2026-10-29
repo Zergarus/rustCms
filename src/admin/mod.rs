@@ -12,7 +12,7 @@ mod nav;
 mod palette;
 mod sections;
 pub(crate) mod shell;
-mod shop;
+pub(crate) mod shop;
 mod sku;
 mod tabs;
 mod users;

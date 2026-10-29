@@ -17,7 +17,7 @@ use crate::{
     access::{PURCHASE_INFO, SHOP_MANAGE},
     catalog::{TYPE_OFFER, TYPE_SIMPLE},
     state::AppState,
-    stock::barcodes,
+    stock::{self, barcodes},
 };
 
 fn bad(message: &str) -> ApiError {
@@ -228,6 +228,19 @@ pub async fn lookup(
     Ok(Json(body))
 }
 
+/// Складской учёт выключен — 409 для всех методов документов (как раздел в админке).
+pub(crate) async fn require_store_control(db: &PgPool) -> ApiResult<()> {
+    let mut conn = db.acquire().await?;
+    if stock::settings(&mut conn).await?.store_control {
+        Ok(())
+    } else {
+        Err(ApiError::Conflict {
+            message: "Складской учёт выключен".into(),
+            id: None,
+        })
+    }
+}
+
 /// Документ без строк (общие поля списка и карточки).
 #[derive(Serialize, FromRow)]
 pub struct DocumentHead {
@@ -327,6 +340,7 @@ pub async fn documents(
     Query(q): Query<DocumentsQuery>,
 ) -> ApiResult<Json<Value>> {
     api.require("stock.read", SHOP_MANAGE)?;
+    require_store_control(&state.db).await?;
     let kind = match q.kind.as_deref() {
         None => None,
         Some(t) if matches!(t, "A" | "S" | "M" | "R" | "D") => Some(t),
@@ -394,6 +408,7 @@ pub async fn document(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<DocumentView>> {
     api.require("stock.read", SHOP_MANAGE)?;
+    require_store_control(&state.db).await?;
     Ok(Json(load_document(&state.db, id).await?))
 }
 
@@ -443,12 +458,17 @@ pub async fn contractor(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<Value>> {
     api.require("stock.read", SHOP_MANAGE)?;
+    Ok(Json(contractor_json(&state.db, id).await?))
+}
+
+/// Поставщик как JSON; нет — 404.
+pub(crate) async fn contractor_json(db: &PgPool, id: i64) -> ApiResult<Value> {
     let row: ContractorRow = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {CONTRACTOR_COLUMNS} FROM contractors WHERE id = $1"
     )))
     .bind(id)
-    .fetch_optional(&state.db)
+    .fetch_optional(db)
     .await?
     .ok_or(ApiError::NotFound)?;
-    Ok(Json(json!(row)))
+    Ok(json!(row))
 }

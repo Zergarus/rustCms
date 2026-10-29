@@ -55,11 +55,12 @@
 {% if items %}
 <div class="card table-wrap">
   <table>
-    <thead><tr><th>Номер</th><th>Тип</th><th>Дата</th><th>Сумма</th><th>Статус</th></tr></thead>
+    <thead><tr><th>Номер</th><th>Внешний код</th><th>Тип</th><th>Дата</th><th>Сумма</th><th>Статус</th></tr></thead>
     <tbody>
       {% for d in items %}
       <tr>
         <td><a href="/admin/shop/store-docs/{{ d.id }}">{{ d.title }}</a>{% if d.doc_number %} <span class="muted">№ {{ d.doc_number }}</span>{% endif %}</td>
+        <td>{{ d.xml_id }}</td>
         <td>{% for t in types %}{% if t.code == d.doc_type %}{{ t.name }}{% endif %}{% endfor %}</td>
         <td>{{ d.date }}</td>
         <td>{{ "%.2f"|format(d.total) }} {{ d.currency }}</td>

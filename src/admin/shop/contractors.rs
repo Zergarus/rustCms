@@ -42,7 +42,7 @@ pub struct ContractorForm {
 
 impl ContractorForm {
     /// Проверка: у юрлица обязательна компания, у физлица — имя.
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         match self.person_type.as_str() {
             "I" if self.person_name.trim().is_empty() => Err("Укажите имя поставщика".into()),
             "C" if self.company.trim().is_empty() => Err("Укажите название компании".into()),

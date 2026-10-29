@@ -58,6 +58,7 @@ struct DocRow {
     total: f64,
     currency: String,
     status: String,
+    xml_id: String,
 }
 
 /// Страница «Складской учёт выключен» вместо раздела.
@@ -95,7 +96,7 @@ pub async fn list(
     let status = matches!(q.status.as_str(), "N" | "Y").then_some(q.status.as_str());
     let items: Vec<DocRow> = sqlx::query_as(
         "SELECT id, doc_type::text, title, doc_number, to_char(date_document, 'DD.MM.YYYY') AS date,
-                total::float8, currency, status::text
+                total::float8, currency, status::text, COALESCE(xml_id, '') AS xml_id
          FROM store_documents
          WHERE ($1::text IS NULL OR doc_type = $1) AND ($2::text IS NULL OR status = $2)
            AND ($3::bigint IS NULL OR EXISTS (
@@ -157,6 +158,8 @@ pub struct DocForm {
     pub items_received_date: String,
     #[serde(default)]
     pub commentary: String,
+    #[serde(default)]
+    pub xml_id: String,
     #[serde(default, rename = "line_item[]")]
     pub line_item: Vec<String>,
     #[serde(default, rename = "line_store_from[]")]
@@ -245,6 +248,7 @@ impl DocForm {
             items_received_date: parse_date(&self.items_received_date, "Дата получения")?,
             responsible_id,
             commentary: self.commentary.trim().to_string(),
+            xml_id: self.xml_id.trim().to_string(),
             lines,
         })
     }
@@ -261,6 +265,7 @@ struct DocHead {
     items_order_date: String,
     items_received_date: String,
     commentary: String,
+    xml_id: String,
     status: String,
     total: f64,
 }
@@ -286,7 +291,7 @@ const HEAD_SQL: &str = "SELECT doc_type::text, title, doc_number,
         to_char(date_document, 'YYYY-MM-DD') AS date_document, contractor_id, currency,
         COALESCE(to_char(items_order_date, 'YYYY-MM-DD'), '') AS items_order_date,
         COALESCE(to_char(items_received_date, 'YYYY-MM-DD'), '') AS items_received_date,
-        commentary, status::text, total::float8
+        commentary, COALESCE(xml_id, '') AS xml_id, status::text, total::float8
     FROM store_documents WHERE id = $1";
 
 /// Строки документа для формы: названия товаров подтягиваются из каталога.
@@ -467,6 +472,7 @@ async fn show(state: &AppState, user: Access, id: i64, errors: Vec<String>) -> A
         items_order_date: head.items_order_date,
         items_received_date: head.items_received_date,
         commentary: head.commentary,
+        xml_id: head.xml_id,
         ..Default::default()
     };
     let lines = load_lines(state, id).await?;
@@ -1240,5 +1246,43 @@ mod tests {
         assert!(s.is_redirection(), "{s}");
         let (_, html) = get(&app, &format!("/admin/shop/contractors/{id}"), &cookie).await;
         assert!(html.contains("value=\"Иван\""), "{html}");
+    }
+
+    #[sqlx::test]
+    async fn admin_form_saves_xml_id(db: PgPool) {
+        let f = order_fixture(&db).await;
+        control(&db, true).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let body = format!("{}&xml_id=WMS-7", arrival_body(f.product_id, None));
+        let (s, _) = post_form(&app, "/admin/shop/store-docs", &cookie, &body).await;
+        assert!(s.is_redirection(), "{s}");
+        let doc = first_doc(&db).await;
+        let saved: Option<String> =
+            sqlx::query_scalar("SELECT xml_id FROM store_documents WHERE id = $1")
+                .bind(doc)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(saved.as_deref(), Some("WMS-7"));
+        let (_, html) = get(&app, &format!("/admin/shop/store-docs/{doc}"), &cookie).await;
+        assert!(html.contains("value=\"WMS-7\""), "{html}");
+        let (_, html) = get(&app, "/admin/shop/store-docs", &cookie).await;
+        assert!(
+            html.contains("Внешний код") && html.contains("WMS-7"),
+            "{html}"
+        );
+        // повтор кода — ошибка формы, второго документа нет
+        let (s, html) = post_form(&app, "/admin/shop/store-docs", &cookie, &body).await;
+        assert!(s.is_success(), "{s}");
+        assert!(
+            html.contains("Документ с внешним кодом WMS-7 уже есть"),
+            "{html}"
+        );
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM store_documents")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
     }
 }
