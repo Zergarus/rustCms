@@ -97,7 +97,14 @@ pub fn average_remove(old_amount: f64, old_price: f64, amount: f64, price: f64) 
     if rest <= EPS {
         return old_price;
     }
-    round2((old_amount * old_price - amount * price) / rest)
+    let average = round2((old_amount * old_price - amount * price) / rest);
+    // Партия уже частично израсходована по старой средней: «вычесть» приход по его цене
+    // можно только до нуля стоимости, иначе цена уйдёт в минус — тогда цена остаётся прежней
+    if average.is_finite() && average >= 0.0 {
+        average
+    } else {
+        old_price
+    }
 }
 
 // --- БД ---
@@ -313,6 +320,8 @@ async fn receive(
     currency: &str,
 ) -> Result<(), StockError> {
     let link = Link::Doc(row_id);
+    // Цена партии и приходного движения округляется одинаково
+    let price = round2(price);
     let existing = match method {
         Method::Fifo => None,
         Method::Average => store_batches(&mut *tx, item, store)
@@ -323,7 +332,7 @@ async fn receive(
     let Some(batch) = existing else {
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO catalog_store_batches (item_id, store_id, available, price, currency)
-             VALUES ($1, $2, $3::float8::numeric, round($4::float8::numeric, 2), $5)
+             VALUES ($1, $2, $3::float8::numeric, $4::float8::numeric, $5)
              RETURNING id",
         )
         .bind(item)
@@ -644,6 +653,11 @@ mod tests {
     fn average_remove_to_zero_keeps_price() {
         assert_eq!(average_remove(10.0, 125.0, 10.0, 150.0), 125.0);
         assert_eq!(average_remove(5.0, 125.0, 8.0, 150.0), 125.0);
+    }
+
+    #[test]
+    fn average_remove_negative_keeps_price() {
+        assert_eq!(average_remove(11.0, 125.0, 10.0, 150.0), 125.0);
     }
 
     #[test]
@@ -1130,6 +1144,40 @@ mod db_tests {
         assert_eq!(store_amount(&db, f.product_id, 1).await, 0.0);
         assert_eq!(batches(&db, f.product_id).await, [b(1, 0.0, 125.0)]);
         assert_eq!(ship_moves(&db, sh).await, [(-15.0, 125.0)]);
+    }
+
+    /// Отмена прихода в частично израсходованную партию: пересчёт дал бы
+    /// (11·125 − 10·150) / 1 = −125, цена партии остаётся прежней.
+    #[sqlx::test]
+    async fn average_cancel_after_partial_ship_keeps_price(db: PgPool) {
+        let f = setup(&db, Some(Method::Average)).await;
+        // Без остатка фикстуры: на складе только партии
+        sqlx::query("UPDATE catalog_store_amounts SET amount = 0 WHERE item_id = $1")
+            .bind(f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        arrival(&db, f.product_id, 1, 10.0, 100.0).await;
+        let a2 = arrival(&db, f.product_id, 1, 10.0, 150.0).await;
+        let sh = order(&db, &f, 9.0).await;
+        set_shipped(&db, sh, true).await;
+        assert_eq!(batches(&db, f.product_id).await, [b(1, 11.0, 125.0)]);
+        assert_eq!(store_amount(&db, f.product_id, 1).await, 11.0);
+        cancel(&db, a2).await;
+        assert_eq!(store_amount(&db, f.product_id, 1).await, 1.0);
+        assert_eq!(batches(&db, f.product_id).await, [b(1, 1.0, 125.0)]);
+        let next = order(&db, &f, 1.0).await;
+        set_shipped(&db, next, true).await;
+        assert_eq!(ship_moves(&db, next).await, [(-1.0, 125.0)]);
+    }
+
+    /// Цена с тремя знаками: партия и её приходное движение округлены одинаково.
+    #[sqlx::test]
+    async fn fifo_price_rounded_same_in_batch_and_move(db: PgPool) {
+        let f = setup(&db, Some(Method::Fifo)).await;
+        let a = arrival(&db, f.product_id, 1, 2.0, 100.125).await;
+        assert_eq!(batches(&db, f.product_id).await, [b(1, 2.0, 100.13)]);
+        assert_eq!(doc_moves(&db, a).await, [(2.0, 100.13)]);
     }
 
     #[sqlx::test]
