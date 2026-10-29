@@ -6,6 +6,7 @@
 pub mod barcodes;
 pub mod batches;
 pub mod cleaner;
+pub mod cost;
 pub mod documents;
 pub mod rebuild;
 pub mod reserve;
