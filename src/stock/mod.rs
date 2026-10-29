@@ -4,6 +4,7 @@
 //! `basket_reservations_counters`; здесь — пересчёт доступного по остаткам складов.
 
 pub mod barcodes;
+pub mod batches;
 pub mod cleaner;
 pub mod documents;
 pub mod reserve;
