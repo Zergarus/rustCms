@@ -1,8 +1,11 @@
 //! Штрихкоды товара: хранение (`catalog_barcodes`) и поиск товара по коду.
 
+use std::collections::HashMap;
+
 use sqlx::PgConnection;
 
 use super::StockError;
+use super::documents::{DocType, Line};
 
 /// Штрихкод товара: общий (`store_id`/`order_id` пусты) или единица на складе/в заказе.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
@@ -129,6 +132,233 @@ pub async fn find_item(db: &mut PgConnection, code: &str) -> sqlx::Result<Option
 pub fn looks_like_barcode(q: &str) -> bool {
     let q = q.trim();
     (8..=14).contains(&q.len()) && q.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Что делает строка документа со штрихкодами единиц поштучного товара.
+#[derive(Clone, Copy)]
+enum Action {
+    /// Привязать к складу (приход, оприходование, возврат; отмена списания).
+    Bind(i64),
+    /// Убрать со склада (отмена прихода, оприходования, возврата).
+    Unbind(i64),
+    /// Код должен лежать на складе, затем запись удаляется (списание).
+    Remove(i64),
+    /// Код должен лежать на первом складе, затем переходит на второй (перемещение).
+    Move(i64, i64),
+}
+
+fn action(doc_type: DocType, line: &Line, cancel: bool) -> Option<Action> {
+    Some(match (doc_type, cancel) {
+        (DocType::Arrival | DocType::Adjustment | DocType::Return, false) => {
+            Action::Bind(line.store_to?)
+        }
+        (DocType::Arrival | DocType::Adjustment | DocType::Return, true) => {
+            Action::Unbind(line.store_to?)
+        }
+        (DocType::Deduct, false) => Action::Remove(line.store_from?),
+        (DocType::Deduct, true) => Action::Bind(line.store_from?),
+        (DocType::Moving, false) => Action::Move(line.store_from?, line.store_to?),
+        (DocType::Moving, true) => Action::Move(line.store_to?, line.store_from?),
+    })
+}
+
+fn clean_codes(line: &Line) -> Vec<&str> {
+    line.barcodes
+        .iter()
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+/// Штрихкоды строк при проведении и отмене документа склада. Сначала всё проверяется (ошибки
+/// собираются списком), и только потом пишется: отказ ничего не меняет.
+pub(super) async fn apply_document(
+    tx: &mut PgConnection,
+    doc_type: DocType,
+    lines: &[Line],
+    names: &HashMap<i64, String>,
+    stores: &HashMap<i64, (String, bool)>,
+    cancel: bool,
+    user: Option<i64>,
+) -> Result<(), StockError> {
+    let mut item_ids: Vec<i64> = lines.iter().filter_map(|l| l.item_id).collect();
+    item_ids.sort_unstable();
+    item_ids.dedup();
+    let multi: Vec<i64> = sqlx::query_scalar(
+        "SELECT item_id FROM catalog_products WHERE item_id = ANY($1) AND barcode_multi",
+    )
+    .bind(&item_ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    let name_of = |id: i64| names.get(&id).map(String::as_str).unwrap_or_default();
+    let store_name = |id: i64| stores.get(&id).map(|s| s.0.as_str()).unwrap_or_default();
+    let bound_msg = |code: &str, id: i64, other: i64| {
+        format!(
+            "Штрихкод {code} товара #{id} ({}) привязан к товару {other}",
+            name_of(id)
+        )
+    };
+
+    let mut errors: Vec<String> = Vec::new();
+    // Общие коды обычных товаров к добавлению
+    let mut common: Vec<(i64, &str)> = Vec::new();
+    // Коды обычных товаров, занятые в этом документе: код -> товар
+    let mut claimed: HashMap<&str, i64> = HashMap::new();
+    // Проверка количества — только при проведении
+    if !cancel {
+        for &id in &multi {
+            let mine: Vec<&Line> = lines.iter().filter(|l| l.item_id == Some(id)).collect();
+            let sum_codes: usize = mine.iter().map(|l| clean_codes(l).len()).sum();
+            let sum_amount: f64 = mine.iter().map(|l| l.amount).sum();
+            if (sum_codes as f64 - sum_amount).abs() > 1e-9 {
+                errors.push(format!(
+                    "В документе складского учета число штрихкодов товара #{id} ({}) не совпадает с количеством самого товара",
+                    name_of(id)
+                ));
+            } else if mine
+                .iter()
+                .any(|l| (clean_codes(l).len() as f64 - l.amount).abs() > 1e-9)
+            {
+                errors.push(format!(
+                    "Не совпадает количество товара #{id} ({}) и число штрихкодов в строке документа складского учета",
+                    name_of(id)
+                ));
+            }
+        }
+    }
+    if !errors.is_empty() {
+        return Err(StockError::Rejected(errors));
+    }
+
+    let mut seen: Vec<&str> = Vec::new();
+    let mut plan: Vec<(i64, &str, Action)> = Vec::new();
+    for line in lines {
+        let Some(id) = line.item_id else { continue };
+        let codes = clean_codes(line);
+        if codes.is_empty() {
+            continue;
+        }
+        if !multi.contains(&id) {
+            if cancel {
+                continue;
+            }
+            for code in codes {
+                let owner: Option<i64> =
+                    sqlx::query_scalar("SELECT item_id FROM catalog_barcodes WHERE barcode = $1")
+                        .bind(code)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                let owner = owner.or(claimed.get(code).copied());
+                match owner {
+                    Some(o) if o != id => errors.push(bound_msg(code, id, o)),
+                    Some(_) => {}
+                    None => {
+                        claimed.insert(code, id);
+                        common.push((id, code));
+                    }
+                }
+            }
+            continue;
+        }
+        let Some(act) = action(doc_type, line, cancel) else {
+            continue;
+        };
+        for code in codes {
+            if seen.contains(&code) {
+                errors.push(format!(
+                    "Штрихкод {code}, введенный для товара {}, уже существует.",
+                    name_of(id)
+                ));
+                continue;
+            }
+            seen.push(code);
+            let row: Option<(i64, Option<i64>)> =
+                sqlx::query_as("SELECT item_id, store_id FROM catalog_barcodes WHERE barcode = $1")
+                    .bind(code)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if let Some((owner, _)) = row
+                && owner != id
+            {
+                errors.push(bound_msg(code, id, owner));
+                continue;
+            }
+            let store_of = row.and_then(|r| r.1);
+            match act {
+                Action::Bind(_) if store_of.is_some() => errors.push(format!(
+                    "Штрихкод {code}, введенный для товара {}, уже существует.",
+                    name_of(id)
+                )),
+                Action::Remove(s) | Action::Move(s, _) if store_of != Some(s) => {
+                    errors.push(format!(
+                        "На складе {} нет товара {} со штрихкодом {code}",
+                        store_name(s),
+                        name_of(id)
+                    ))
+                }
+                _ => {}
+            }
+            plan.push((id, code, act));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(StockError::Rejected(errors));
+    }
+
+    for (id, code) in common {
+        sqlx::query(
+            "INSERT INTO catalog_barcodes (item_id, barcode, created_by, modified_by)
+             VALUES ($1, $2, $3, $3) ON CONFLICT (barcode) DO NOTHING",
+        )
+        .bind(id)
+        .bind(code)
+        .bind(user)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for (id, code, act) in plan {
+        match act {
+            Action::Bind(store) => {
+                sqlx::query(
+                    "INSERT INTO catalog_barcodes (item_id, barcode, store_id, created_by, modified_by)
+                     VALUES ($1, $2, $3, $4, $4)
+                     ON CONFLICT (barcode) DO UPDATE
+                     SET store_id = EXCLUDED.store_id, order_id = NULL,
+                         modified_by = EXCLUDED.modified_by, updated_at = now()",
+                )
+                .bind(id)
+                .bind(code)
+                .bind(store)
+                .bind(user)
+                .execute(&mut *tx)
+                .await?;
+            }
+            Action::Unbind(store) | Action::Remove(store) => {
+                sqlx::query(
+                    "DELETE FROM catalog_barcodes
+                     WHERE item_id = $1 AND barcode = $2 AND store_id = $3",
+                )
+                .bind(id)
+                .bind(code)
+                .bind(store)
+                .execute(&mut *tx)
+                .await?;
+            }
+            Action::Move(_, to) => {
+                sqlx::query(
+                    "UPDATE catalog_barcodes SET store_id = $3, modified_by = $4, updated_at = now()
+                     WHERE item_id = $1 AND barcode = $2",
+                )
+                .bind(id)
+                .bind(code)
+                .bind(to)
+                .bind(user)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

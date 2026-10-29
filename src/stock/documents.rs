@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 use sqlx::PgConnection;
 
-use super::{StockError, recalc_quantity, settings};
+use super::{StockError, barcodes, recalc_quantity, settings};
 use crate::catalog;
 
 /// Тип документа (`b_catalog_store_docs.DOC_TYPE`).
@@ -89,6 +89,8 @@ pub struct Line {
     pub amount: f64,
     pub purchasing_price: Option<f64>,
     pub base_price: Option<f64>,
+    /// Штрихкоды строки (`store_document_barcodes`).
+    pub barcodes: Vec<String>,
 }
 
 /// Изменение остатка товара на складе.
@@ -192,10 +194,11 @@ async fn currency_or_site(tx: &mut PgConnection, currency: &str) -> sqlx::Result
 
 async fn insert_lines(tx: &mut PgConnection, doc_id: i64, lines: &[Line]) -> sqlx::Result<()> {
     for line in lines {
-        sqlx::query(
+        let row_id: i64 = sqlx::query_scalar(
             "INSERT INTO store_document_items
                  (doc_id, store_from, store_to, item_id, amount, purchasing_price, base_price)
-             VALUES ($1, $2, $3, $4, $5::float8::numeric, $6::float8::numeric, $7::float8::numeric)",
+             VALUES ($1, $2, $3, $4, $5::float8::numeric, $6::float8::numeric, $7::float8::numeric)
+             RETURNING id",
         )
         .bind(doc_id)
         .bind(line.store_from)
@@ -204,8 +207,17 @@ async fn insert_lines(tx: &mut PgConnection, doc_id: i64, lines: &[Line]) -> sql
         .bind(line.amount)
         .bind(line.purchasing_price)
         .bind(line.base_price)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?;
+        for code in &line.barcodes {
+            sqlx::query(
+                "INSERT INTO store_document_barcodes (doc_item_id, barcode) VALUES ($1, $2)",
+            )
+            .bind(row_id)
+            .bind(code)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
     Ok(())
 }
@@ -394,8 +406,23 @@ async fn run(
         amount: r.amount,
         purchasing_price: r.purchasing_price,
         base_price: r.base_price,
+        barcodes: Vec::new(),
     })
     .collect();
+    let mut lines = lines;
+    let codes: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT b.doc_item_id, b.barcode FROM store_document_barcodes b
+         JOIN store_document_items i ON i.id = b.doc_item_id
+         WHERE i.doc_id = $1 ORDER BY b.id",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    for (row, code) in codes {
+        if let Some(l) = lines.iter_mut().find(|l| l.row_id == row) {
+            l.barcodes.push(code);
+        }
+    }
     if lines.is_empty() {
         return Err(reject(format!(
             "Не найдены позиции документа складского учета с идентификатором #{id}"
@@ -493,6 +520,7 @@ async fn run(
     if !errors.is_empty() {
         return Err(StockError::Rejected(errors));
     }
+    barcodes::apply_document(&mut *tx, doc_type, &lines, &names, &stores, cancel, user).await?;
 
     for m in totals.iter().filter(|m| m.delta != 0.0) {
         sqlx::query(
@@ -717,6 +745,7 @@ mod tests {
             amount: 3.0,
             purchasing_price: None,
             base_price: None,
+            barcodes: Vec::new(),
         }
     }
 
@@ -789,6 +818,7 @@ mod tests {
             amount,
             purchasing_price: None,
             base_price: None,
+            barcodes: Vec::new(),
         }
     }
 
@@ -1274,5 +1304,242 @@ mod tests {
         );
         assert_eq!(amount(&db, item, 1).await, 1.0);
         assert_eq!(status(&db, second).await.0, "N");
+    }
+
+    fn lnb(item: i64, from: Option<i64>, to: Option<i64>, codes: &[&str]) -> Line {
+        Line {
+            barcodes: codes.iter().map(|c| c.to_string()).collect(),
+            ..ln(item, from, to, codes.len() as f64)
+        }
+    }
+
+    async fn make_multi(db: &PgPool, item: i64) {
+        sqlx::query("UPDATE catalog_products SET barcode_multi = TRUE WHERE item_id = $1")
+            .bind(item)
+            .execute(db)
+            .await
+            .unwrap();
+    }
+
+    /// Штрихкоды в базе: (код, склад).
+    async fn codes_of(db: &PgPool, item: i64) -> Vec<(String, Option<i64>)> {
+        sqlx::query_as(
+            "SELECT barcode, store_id FROM catalog_barcodes WHERE item_id = $1 ORDER BY barcode",
+        )
+        .bind(item)
+        .fetch_all(db)
+        .await
+        .unwrap()
+    }
+
+    fn cs(code: &str, store: Option<i64>) -> (String, Option<i64>) {
+        (code.to_string(), store)
+    }
+
+    #[sqlx::test]
+    async fn ordinary_line_barcodes_become_common(db: PgPool) {
+        let item = setup(&db).await;
+        let line = Line {
+            barcodes: vec!["A1".into(), " A2 ".into(), "A1".into(), "".into()],
+            ..ln(item, None, Some(1), 2.0)
+        };
+        let id = create_doc(&db, &input("A", vec![line])).await;
+        run(&db, id, false, None).await.unwrap();
+        assert_eq!(codes_of(&db, item).await, [cs("A1", None), cs("A2", None)]);
+        // Отмена коды не трогает
+        run(&db, id, true, None).await.unwrap();
+        assert_eq!(codes_of(&db, item).await.len(), 2);
+        // Повторное проведение: коды уже у этого товара
+        run(&db, id, false, None).await.unwrap();
+        assert_eq!(codes_of(&db, item).await.len(), 2);
+    }
+
+    #[sqlx::test]
+    async fn ordinary_foreign_barcode_rejected(db: PgPool) {
+        let item = setup(&db).await;
+        let other: i64 = sqlx::query_scalar(
+            "INSERT INTO collection_items (collection_id, code, name)
+             SELECT collection_id, 'drugoy', 'Другой' FROM collection_items WHERE id = $1
+             RETURNING id",
+        )
+        .bind(item)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO catalog_barcodes (item_id, barcode) VALUES ($1, 'F1')")
+            .bind(other)
+            .execute(&db)
+            .await
+            .unwrap();
+        let id = create_doc(&db, &input("A", vec![lnb(item, None, Some(1), &["F1"])])).await;
+        assert_eq!(
+            rejected(run(&db, id, false, None).await),
+            [format!(
+                "Штрихкод F1 товара #{item} (Товар) привязан к товару {other}"
+            )]
+        );
+        assert_eq!(status(&db, id).await.0, "N");
+        assert_eq!(amount(&db, item, 1).await, 5.0);
+    }
+
+    #[sqlx::test]
+    async fn multi_count_mismatch_rejected(db: PgPool) {
+        let item = setup(&db).await;
+        make_multi(&db, item).await;
+        let two = Line {
+            barcodes: vec!["M1".into()],
+            ..ln(item, None, Some(1), 2.0)
+        };
+        let id = create_doc(&db, &input("A", vec![two])).await;
+        assert_eq!(
+            rejected(run(&db, id, false, None).await),
+            [format!(
+                "В документе складского учета число штрихкодов товара #{item} (Товар) не совпадает с количеством самого товара"
+            )]
+        );
+        // Сумма сходится, по строкам — нет
+        let a = Line {
+            barcodes: vec!["M1".into(), "M2".into()],
+            ..ln(item, None, Some(1), 1.0)
+        };
+        let b = Line {
+            barcodes: vec![],
+            ..ln(item, None, Some(1), 1.0)
+        };
+        let id = create_doc(&db, &input("A", vec![a, b])).await;
+        assert_eq!(
+            rejected(run(&db, id, false, None).await),
+            [format!(
+                "Не совпадает количество товара #{item} (Товар) и число штрихкодов в строке документа складского учета"
+            )]
+        );
+        assert!(codes_of(&db, item).await.is_empty());
+    }
+
+    #[sqlx::test]
+    async fn multi_arrival_binds_and_cancel_removes(db: PgPool) {
+        let item = setup(&db).await;
+        make_multi(&db, item).await;
+        let id = create_doc(
+            &db,
+            &input("A", vec![lnb(item, None, Some(2), &["M1", "M2"])]),
+        )
+        .await;
+        run(&db, id, false, None).await.unwrap();
+        assert_eq!(
+            codes_of(&db, item).await,
+            [cs("M1", Some(2)), cs("M2", Some(2))]
+        );
+        assert_eq!(amount(&db, item, 2).await, 2.0);
+        run(&db, id, true, None).await.unwrap();
+        assert!(codes_of(&db, item).await.is_empty());
+        // Код уже на складе у этого товара
+        run(&db, id, false, None).await.unwrap();
+        let again = create_doc(&db, &input("A", vec![lnb(item, None, Some(1), &["M1"])])).await;
+        assert_eq!(
+            rejected(run(&db, again, false, None).await),
+            ["Штрихкод M1, введенный для товара Товар, уже существует."]
+        );
+    }
+
+    #[sqlx::test]
+    async fn multi_moving_moves_and_back(db: PgPool) {
+        let item = setup(&db).await;
+        make_multi(&db, item).await;
+        let arr = create_doc(&db, &input("A", vec![lnb(item, None, Some(1), &["M1"])])).await;
+        run(&db, arr, false, None).await.unwrap();
+        let mv = create_doc(&db, &input("M", vec![lnb(item, Some(1), Some(2), &["M1"])])).await;
+        run(&db, mv, false, None).await.unwrap();
+        assert_eq!(codes_of(&db, item).await, [cs("M1", Some(2))]);
+        run(&db, mv, true, None).await.unwrap();
+        assert_eq!(codes_of(&db, item).await, [cs("M1", Some(1))]);
+    }
+
+    #[sqlx::test]
+    async fn multi_moving_wrong_store_rejected(db: PgPool) {
+        let item = setup(&db).await;
+        make_multi(&db, item).await;
+        let arr = create_doc(&db, &input("A", vec![lnb(item, None, Some(2), &["M1"])])).await;
+        run(&db, arr, false, None).await.unwrap();
+        // Остаток на складе 1 есть, но код лежит на складе 2
+        let mv = create_doc(&db, &input("M", vec![lnb(item, Some(1), Some(2), &["M1"])])).await;
+        assert_eq!(
+            rejected(run(&db, mv, false, None).await),
+            ["На складе Склад нет товара Товар со штрихкодом M1"]
+        );
+        assert_eq!(codes_of(&db, item).await, [cs("M1", Some(2))]);
+        assert_eq!(amount(&db, item, 1).await, 5.0);
+    }
+
+    #[sqlx::test]
+    async fn multi_deduct_removes_and_cancel_restores(db: PgPool) {
+        let item = setup(&db).await;
+        make_multi(&db, item).await;
+        let arr = create_doc(
+            &db,
+            &input("A", vec![lnb(item, None, Some(1), &["M1", "M2"])]),
+        )
+        .await;
+        run(&db, arr, false, None).await.unwrap();
+        let d = create_doc(&db, &input("D", vec![lnb(item, Some(1), None, &["M1"])])).await;
+        run(&db, d, false, None).await.unwrap();
+        assert_eq!(codes_of(&db, item).await, [cs("M2", Some(1))]);
+        run(&db, d, true, None).await.unwrap();
+        assert_eq!(
+            codes_of(&db, item).await,
+            [cs("M1", Some(1)), cs("M2", Some(1))]
+        );
+    }
+
+    #[sqlx::test]
+    async fn duplicate_barcode_in_document_rejected(db: PgPool) {
+        let item = setup(&db).await;
+        make_multi(&db, item).await;
+        let id = create_doc(
+            &db,
+            &input(
+                "A",
+                vec![
+                    lnb(item, None, Some(1), &["M1"]),
+                    lnb(item, None, Some(2), &["M1"]),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(
+            rejected(run(&db, id, false, None).await),
+            ["Штрихкод M1, введенный для товара Товар, уже существует."]
+        );
+        assert!(codes_of(&db, item).await.is_empty());
+    }
+
+    #[sqlx::test]
+    async fn multi_enabled_after_stock_requires_barcodes(db: PgPool) {
+        let item = setup(&db).await;
+        let arr = create_doc(&db, &input("A", vec![ln(item, None, Some(1), 2.0)])).await;
+        run(&db, arr, false, None).await.unwrap();
+        make_multi(&db, item).await;
+        let d = create_doc(&db, &input("D", vec![lnb(item, Some(1), None, &["X1"])])).await;
+        assert_eq!(
+            rejected(run(&db, d, false, None).await),
+            ["На складе Склад нет товара Товар со штрихкодом X1"]
+        );
+        assert_eq!(amount(&db, item, 1).await, 7.0);
+    }
+
+    #[sqlx::test]
+    async fn barcodes_ignored_without_multi_flag(db: PgPool) {
+        let item = setup(&db).await;
+        let id = create_doc(
+            &db,
+            &input("A", vec![lnb(item, None, Some(2), &["Z1", "Z2"])]),
+        )
+        .await;
+        run(&db, id, false, None).await.unwrap();
+        assert_eq!(amount(&db, item, 2).await, 2.0);
+        assert_eq!(quantity(&db, item).await, 7.0);
+        run(&db, id, true, None).await.unwrap();
+        assert_eq!(amount(&db, item, 2).await, 0.0);
+        assert_eq!(quantity(&db, item).await, 5.0);
     }
 }

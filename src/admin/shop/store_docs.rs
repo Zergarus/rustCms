@@ -220,6 +220,7 @@ impl DocForm {
                     "Закупочная цена",
                 )?,
                 base_price: None,
+                barcodes: Vec::new(),
             });
         }
         Ok(DocInput {
