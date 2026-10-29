@@ -3,9 +3,9 @@
 <form class="card form" method="post" action="/admin/shop/orders/{{ order.id }}/shipment" data-dirty-guard>
   <h2>Отгрузка</h2>
   <div class="grid-2">
-    <label>Трек-номер<input name="tracking_number" value="{{ order.shipment.tracking_number }}"></label>
-    <label class="check"><input type="checkbox" name="allow_delivery" value="Y" {% if order.shipment.allow_delivery %}checked{% endif %}> Доставка разрешена</label>
-    <label class="check"><input type="checkbox" name="deducted" value="Y" {% if shipped %}checked{% endif %}> Отгружено</label>
+    <label>Трек-номер<input name="tracking_number" value="{{ typed_form.tracking_number if typed_form else order.shipment.tracking_number }}"></label>
+    <label class="check"><input type="checkbox" name="allow_delivery" value="Y" {% if (typed_form.allow_delivery if typed_form else order.shipment.allow_delivery) %}checked{% endif %}> Доставка разрешена</label>
+    <label class="check"><input type="checkbox" name="deducted" value="Y" {% if (typed_form.deducted if typed_form else shipped) %}checked{% endif %}> Отгружено</label>
   </div>
   {% if active_stores %}
   <table id="ship-lines">

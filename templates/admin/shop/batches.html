@@ -22,7 +22,7 @@
       {% for m in r.moves %}
       <tr class="muted">
         <td></td>
-        <td colspan="2">{% if m.doc_id %}<a href="/admin/shop/store-docs/{{ m.doc_id }}">документ № {{ m.doc_id }}</a>{% elif m.order_id %}<a href="/admin/shop/orders/{{ m.order_id }}">заказ № {{ m.order_id }}</a>{% else %}—{% endif %}</td>
+        <td colspan="2">{% if m.doc_id %}<a href="/admin/shop/store-docs/{{ m.doc_id }}">документ № {{ m.doc_id }}</a>{% elif m.order_id %}<a href="/admin/shop/orders/{{ m.order_id }}">заказ № {{ m.order_number or m.order_id }}</a>{% else %}—{% endif %}</td>
         <td colspan="2">{{ m.amount }}</td>
         <td>{{ m.price }}</td>
       </tr>

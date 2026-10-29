@@ -301,6 +301,22 @@ pub(crate) async fn card(
     notice: Option<String>,
     fragment: bool,
 ) -> AppResult<Response> {
+    card_typed(state, user, id, tab, error, notice, fragment, None).await
+}
+
+/// [`card`] с введёнными, но не сохранёнными значениями формы отгрузки: они показываются
+/// вместо данных из БД (после отказа в сохранении ничего не нужно вводить заново).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn card_typed(
+    state: &AppState,
+    user: Access,
+    id: i64,
+    tab: &str,
+    error: Option<String>,
+    notice: Option<String>,
+    fragment: bool,
+    typed: Option<&HashMap<String, String>>,
+) -> AppResult<Response> {
     let active_tab = ORDER_TABS
         .iter()
         .map(|(code, _)| *code)
@@ -487,6 +503,25 @@ pub(crate) async fn card(
     .into_iter()
     .map(|(line, codes)| (line.to_string(), codes))
     .collect();
+    let (mut ship_stores, mut ship_barcodes) = (ship_stores, ship_barcodes);
+    if let Some(form) = typed {
+        for (line, store) in self::ship_stores(form) {
+            match store {
+                Some(store) => ship_stores.insert(line.to_string(), store),
+                None => ship_stores.remove(&line.to_string()),
+            };
+        }
+        for (line, _, codes) in self::ship_barcodes(form) {
+            ship_barcodes.insert(line.to_string(), codes.join("\n"));
+        }
+    }
+    let typed_form = typed.map(|f| {
+        context! {
+            tracking_number => f.get("tracking_number").cloned().unwrap_or_default(),
+            allow_delivery => f.contains_key("allow_delivery"),
+            deducted => f.contains_key("deducted"),
+        }
+    });
     let ship_barcode_n: HashMap<String, usize> = ship_barcodes
         .iter()
         .map(|(line, codes)| (line.clone(), codes.lines().count()))
@@ -521,7 +556,7 @@ pub(crate) async fn card(
         context! { user, order, reserves, active_stores, fields, file_fields, extra, stores, statuses, person_type, error, notice,
         store_list, deliveries, pay_systems, version, onec, onec_payments, onec_shipments, discounts,
         shipment_base, shipped, ship_stores, active_tab, tab_items, title, fragment, discount_total,
-        show_cost, costs, order_margin, multi, ship_barcodes, ship_barcode_n },
+        show_cost, costs, order_margin, multi, ship_barcodes, ship_barcode_n, typed_form },
     )?
     .into_response())
 }
@@ -1005,7 +1040,7 @@ pub async fn save_shipment(
         }
         Err(StockError::Rejected(m)) => {
             drop(tx);
-            card(
+            card_typed(
                 &state,
                 user,
                 id,
@@ -1013,6 +1048,7 @@ pub async fn save_shipment(
                 Some(m.join("; ")),
                 None,
                 false,
+                Some(&form),
             )
             .await
         }
@@ -2036,6 +2072,40 @@ mod tests {
                 .await
                 .unwrap();
         assert!(!deducted);
+    }
+
+    #[sqlx::test]
+    async fn shipment_error_keeps_typed_codes(db: sqlx::PgPool) {
+        let (_, order, line) = multi_order(&db, &["A1"], 2.0).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (s, _, html) = crate::test_support::post_form_raw(
+            &app,
+            &format!("/admin/shop/orders/{order}/shipment"),
+            &cookie,
+            &format!(
+                "deducted=Y&allow_delivery=Y&tracking_number=TR-9&store_{line}=1&barcodes_{line}_1=A1%0D%0AZZ"
+            ),
+        )
+        .await;
+        assert!(s.is_success(), "{s}");
+        assert!(html.contains("не найден штрихкод"), "{html}");
+        assert!(
+            html.contains(&format!("name=\"barcodes_{line}_1\"")),
+            "{html}"
+        );
+        assert!(html.contains(">A1\nZZ</textarea>"), "{html}");
+        assert!(html.contains("2/2"), "{html}");
+        assert!(html.contains("<option value=\"1\" selected>"), "{html}");
+        assert!(html.contains("value=\"TR-9\""), "{html}");
+        assert!(
+            html.contains("name=\"deducted\" value=\"Y\" checked"),
+            "{html}"
+        );
+        assert!(
+            html.contains("name=\"allow_delivery\" value=\"Y\" checked"),
+            "{html}"
+        );
     }
 
     async fn costed_order(db: &sqlx::PgPool) -> i64 {

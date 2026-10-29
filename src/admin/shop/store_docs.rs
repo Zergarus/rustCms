@@ -714,7 +714,10 @@ pub async fn scan(
     Extension(user): Extension<Access>,
     Query(q): Query<ScanQuery>,
 ) -> AppResult<Response> {
-    require_shop(&user)?;
+    // Поле сканирования есть и в документах склада, и в отгрузке заказа
+    if !user.can(crate::access::ORDERS_MANAGE) {
+        require_shop(&user)?;
+    }
     let found = stock::barcodes::find_item(&mut *state.db.acquire().await?, &q.code).await?;
     let row: Option<(i64, String, bool)> = match found {
         Some(id) => {
@@ -876,6 +879,26 @@ mod tests {
             crate::test_support::get_raw(&app, "/admin/shop/store-docs/scan?code=nope", &cookie)
                 .await;
         assert_eq!(s, 404);
+    }
+
+    #[sqlx::test]
+    async fn shipment_scan_with_orders_right(db: PgPool) {
+        let f = order_fixture(&db).await;
+        sqlx::query("INSERT INTO catalog_barcodes (item_id, barcode) VALUES ($1, '4600000000011')")
+            .bind(f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let url = "/admin/shop/store-docs/scan?code=4600000000011";
+        let orders = crate::test_support::permitted_cookie(&db, "ord", &["orders.manage"]).await;
+        let (s, _, body) = crate::test_support::get_raw(&app, url, &orders).await;
+        assert_eq!(s, 200);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["item_id"], f.product_id);
+        let none = crate::test_support::permitted_cookie(&db, "none", &[]).await;
+        let (s, _, _) = crate::test_support::get_raw(&app, url, &none).await;
+        assert_eq!(s, 403);
     }
 
     #[sqlx::test]

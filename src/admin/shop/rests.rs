@@ -205,6 +205,7 @@ struct BatchMove {
     price: String,
     doc_id: Option<i64>,
     order_id: Option<i64>,
+    order_number: Option<String>,
 }
 
 /// Партии товара и их движения (`catalog.purchase_info`).
@@ -237,11 +238,12 @@ pub async fn batches(
     let ids: Vec<i64> = batches.iter().map(|b| b.id).collect();
     let moves: Vec<BatchMove> = sqlx::query_as(
         "SELECT m.batch_id, m.amount::float8::text AS amount, m.price::float8::text AS price,
-                COALESCE(di.doc_id, NULL) AS doc_id, sh.order_id
+                di.doc_id, o.account_number AS order_number, sh.order_id
          FROM store_batch_moves m
          LEFT JOIN store_document_items di ON di.id = m.doc_item_id
          LEFT JOIN shipment_item_stores sis ON sis.id = m.shipment_store_id
          LEFT JOIN shipments sh ON sh.id = sis.shipment_id
+         LEFT JOIN orders o ON o.id = sh.order_id
          WHERE m.batch_id = ANY($1) ORDER BY m.id",
     )
     .bind(&ids)
