@@ -681,4 +681,30 @@ mod tests {
         assert!(html.contains("class=\"alert\""));
         assert!(crate::apikeys::list(&db, uid).await.unwrap().is_empty());
     }
+
+    #[sqlx::test]
+    async fn issue_key_with_several_scopes(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (uid, _) = user_cookie(&db, "worker", false).await;
+        let path = format!("/admin/users/{uid}/api-keys");
+        post_form_raw(
+            &app,
+            &path,
+            &cookie,
+            "name=K&scopes=stock.read&scopes=stock.write&scopes=stock.conduct",
+        )
+        .await;
+        post_form_raw(
+            &app,
+            &path,
+            &cookie,
+            "name=D&scopes=stock.read&scopes=stock.read",
+        )
+        .await;
+        let keys = crate::apikeys::list(&db, uid).await.unwrap();
+        let by = |n: &str| keys.iter().find(|k| k.name == n).unwrap().scopes.clone();
+        assert_eq!(by("K"), vec!["stock.read", "stock.write", "stock.conduct"]);
+        assert_eq!(by("D"), vec!["stock.read"]);
+    }
 }
