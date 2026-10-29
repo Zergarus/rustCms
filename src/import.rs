@@ -169,6 +169,50 @@ struct Data {
     store_docs: Vec<StoreDocRow>,
     /// Строки документов `b_catalog_docs_element`.
     store_doc_items: Vec<StoreDocItemRow>,
+    /// Штрихкоды товаров `b_catalog_store_barcode`.
+    barcodes: Vec<BarcodeRow>,
+    /// Штрихкоды строк документов `b_catalog_docs_barcode`: (`DOC_ELEMENT_ID`, штрихкод).
+    doc_barcodes: Vec<(i64, String)>,
+    /// Партии `b_catalog_store_batch`.
+    batches: Vec<BatchRow>,
+    /// Движения партий `b_catalog_store_batch_docs_element`.
+    batch_moves: Vec<BatchMoveRow>,
+}
+
+/// Штрихкод товара `b_catalog_store_barcode`; пользователи — id Битрикса.
+struct BarcodeRow {
+    id: i64,
+    item_id: i64,
+    barcode: String,
+    /// `STORE_ID` = 0 — склада нет.
+    store_id: Option<i64>,
+    created_by: Option<i64>,
+    modified_by: Option<i64>,
+    created_at: Option<DateTime<Utc>>,
+    updated_at: Option<DateTime<Utc>>,
+}
+
+/// Партия `b_catalog_store_batch`; числа — десятичные строки как в базе.
+struct BatchRow {
+    id: i64,
+    item_id: i64,
+    store_id: i64,
+    available: String,
+    price: String,
+    currency: String,
+}
+
+/// Движение партии `b_catalog_store_batch_docs_element`; числа — десятичные строки.
+struct BatchMoveRow {
+    id: i64,
+    batch_id: i64,
+    /// `DOCUMENT_ELEMENT_ID` — строка документа складского учёта.
+    doc_element_id: Option<i64>,
+    /// `SHIPMENT_ITEM_STORE_ID` — позиция отгрузки (не переносится).
+    shipment_item_store_id: Option<i64>,
+    amount: String,
+    price: String,
+    currency: String,
 }
 
 /// Поставщик `b_catalog_contractor`.
@@ -414,6 +458,8 @@ struct ProductRow {
     /// Десятичная строка как в базе.
     purchasing_price: Option<String>,
     purchasing_currency: Option<String>,
+    /// `BARCODE_MULTI` = `Y` — поштучный учёт штрихкодов.
+    barcode_multi: bool,
 }
 
 /// Склад как в `b_catalog_store`.
@@ -474,6 +520,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("catalog", "store_document_numbers_M"),
     ("catalog", "store_document_numbers_R"),
     ("catalog", "store_document_numbers_D"),
+    ("catalog", "cost_price_calculation_method"),
     ("sale", "product_reserve_condition"),
     ("sale", "product_reserve_clear_period"),
     ("sale", "allow_deduction_on_delivery"),
@@ -2543,6 +2590,201 @@ async fn write_store_docs(
     Ok(warnings)
 }
 
+/// Штрихкоды товаров и документов, партии и их движения; возвращает предупреждения.
+/// Повторный перенос заменяет всё, что было (в том числе заведённое в CMS).
+async fn write_barcodes_batches(
+    tx: &mut sqlx::PgConnection,
+    data: &Data,
+    users: &HashMap<i64, i64>,
+) -> anyhow::Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    // Движения удаляются каскадом вместе с партиями
+    for table in [
+        "catalog_barcodes",
+        "store_document_barcodes",
+        "catalog_store_batches",
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM {table}")))
+            .execute(&mut *tx)
+            .await?;
+    }
+    let user = |id: Option<i64>| id.and_then(|id| users.get(&id).copied());
+    let elements: HashSet<i64> = data.elements.iter().map(|e| e.id).collect();
+    let stores: HashSet<i64> = data.catalog.stores.iter().map(|st| st.id).collect();
+
+    // Штрихкоды: дубль — первый по ID, остальные пропускаются
+    let mut codes: Vec<&BarcodeRow> = data.barcodes.iter().collect();
+    codes.sort_by_key(|b| b.id);
+    let mut seen = HashSet::new();
+    let mut barcodes = Vec::new();
+    for b in codes {
+        let code = b.barcode.trim();
+        if code.is_empty() {
+            continue;
+        }
+        if !elements.contains(&b.item_id) {
+            warnings.push(format!(
+                "штрихкод {code} (#{}) пропущен: товар {} не найден",
+                b.id, b.item_id
+            ));
+        } else if let Some(store) = b.store_id.filter(|id| !stores.contains(id)) {
+            warnings.push(format!(
+                "штрихкод {code} (#{}) пропущен: склад {store} не найден",
+                b.id
+            ));
+        } else if !seen.insert(code.to_string()) {
+            warnings.push(format!(
+                "штрихкод {code} (#{}) пропущен: такой штрихкод уже перенесён",
+                b.id
+            ));
+        } else {
+            barcodes.push((b, code));
+        }
+    }
+    let now = Utc::now();
+    for chunk in barcodes.chunks(BATCH) {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO catalog_barcodes (id, item_id, barcode, store_id, created_by,
+                                           modified_by, created_at, updated_at) ",
+        );
+        qb.push_values(chunk, |mut q, (b, code)| {
+            let created = b.created_at.unwrap_or(now);
+            q.push_bind(b.id)
+                .push_bind(b.item_id)
+                .push_bind(*code)
+                .push_bind(b.store_id)
+                .push_bind(user(b.created_by))
+                .push_bind(user(b.modified_by))
+                .push_bind(created)
+                .push_bind(b.updated_at.unwrap_or(created));
+        });
+        qb.build().execute(&mut *tx).await?;
+    }
+
+    // Строки документов уже перенесены с теми же id
+    let doc_items: HashSet<i64> = sqlx::query_scalar("SELECT id FROM store_document_items")
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+    let doc_barcodes: Vec<&(i64, String)> = data
+        .doc_barcodes
+        .iter()
+        .filter(|(el, code)| doc_items.contains(el) && !code.trim().is_empty())
+        .collect();
+    let lost = data.doc_barcodes.len() - doc_barcodes.len();
+    if lost > 0 {
+        warnings.push(format!(
+            "штрихкодов строк документов не перенесено: {lost} (строки документа нет, b_catalog_docs_barcode)"
+        ));
+    }
+    for chunk in doc_barcodes.chunks(BATCH) {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO store_document_barcodes (doc_item_id, barcode) ",
+        );
+        qb.push_values(chunk, |mut q, (el, code)| {
+            q.push_bind(*el).push_bind(code.trim());
+        });
+        qb.build().execute(&mut *tx).await?;
+    }
+
+    // Партии с сохранением id; без товара или склада пропускаются вместе с движениями
+    let site_currency = crate::currency::site_currency(&mut *tx).await?;
+    let number = |v: &str| {
+        let v = v.trim();
+        if v.is_empty() {
+            "0".to_string()
+        } else {
+            v.to_string()
+        }
+    };
+    let currency = |v: &str| {
+        if v.trim().is_empty() {
+            site_currency.clone()
+        } else {
+            v.trim().to_string()
+        }
+    };
+    let mut batches = Vec::new();
+    for b in &data.batches {
+        if !elements.contains(&b.item_id) {
+            warnings.push(format!(
+                "партия #{} пропущена: товар {} не найден",
+                b.id, b.item_id
+            ));
+        } else if !stores.contains(&b.store_id) {
+            warnings.push(format!(
+                "партия #{} пропущена: склад {} не найден",
+                b.id, b.store_id
+            ));
+        } else {
+            batches.push(b);
+        }
+    }
+    for chunk in batches.chunks(BATCH) {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO catalog_store_batches (id, item_id, store_id, available, price, currency) ",
+        );
+        qb.push_values(chunk, |mut q, b| {
+            q.push_bind(b.id)
+                .push_bind(b.item_id)
+                .push_bind(b.store_id)
+                .push_bind(number(&b.available))
+                .push_unseparated("::numeric")
+                .push_bind(number(&b.price))
+                .push_unseparated("::numeric")
+                .push_bind(currency(&b.currency));
+        });
+        qb.build().execute(&mut *tx).await?;
+    }
+    let batch_ids: HashSet<i64> = batches.iter().map(|b| b.id).collect();
+    let mut moves = Vec::new();
+    let mut shipments = 0;
+    let mut orphans = 0;
+    for m in &data.batch_moves {
+        match m.doc_element_id {
+            // Отгрузки Битрикса не переносятся — расход партий по ним не восстановить
+            None if m.shipment_item_store_id.is_some() => shipments += 1,
+            Some(el) if batch_ids.contains(&m.batch_id) && doc_items.contains(&el) => {
+                moves.push((m, el));
+            }
+            _ => orphans += 1,
+        }
+    }
+    if shipments > 0 {
+        warnings.push(format!(
+            "движений партий по отгрузкам не перенесено: {shipments} (отгрузки не переносятся)"
+        ));
+    }
+    if orphans > 0 {
+        warnings.push(format!(
+            "движений партий не перенесено: {orphans} (партии или строки документа нет)"
+        ));
+    }
+    for chunk in moves.chunks(BATCH) {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "INSERT INTO store_batch_moves (id, batch_id, doc_item_id, amount, price, currency) ",
+        );
+        qb.push_values(chunk, |mut q, (m, el)| {
+            q.push_bind(m.id)
+                .push_bind(m.batch_id)
+                .push_bind(*el)
+                .push_bind(number(&m.amount))
+                .push_unseparated("::numeric")
+                .push_bind(number(&m.price))
+                .push_unseparated("::numeric")
+                .push_bind(currency(&m.currency));
+        });
+        qb.build().execute(&mut *tx).await?;
+    }
+
+    // Метод выбран, а партий нет — перестройка по истории документов
+    if batches.is_empty() {
+        crate::stock::rebuild::start(&mut *tx).await?;
+    }
+    Ok(warnings)
+}
+
 async fn put_option(
     tx: &mut sqlx::PgConnection,
     module: &str,
@@ -2888,7 +3130,8 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
                 CAST(IFNULL(AVAILABLE, 'Y') AS CHAR), CAST(IFNULL(QUANTITY_TRACE, 'D') AS CHAR),
                 CAST(IFNULL(CAN_BUY_ZERO, 'D') AS CHAR), CAST(IFNULL(TYPE, 1) AS SIGNED),
                 CAST(IFNULL(WEIGHT, 0) AS CHAR), CAST(IFNULL(QUANTITY_RESERVED, 0) AS CHAR),
-                CAST(PURCHASING_PRICE AS CHAR), CAST(PURCHASING_CURRENCY AS CHAR)
+                CAST(PURCHASING_PRICE AS CHAR), CAST(PURCHASING_CURRENCY AS CHAR),
+                CAST(IFNULL(BARCODE_MULTI, 'N') AS CHAR)
          FROM b_catalog_product",
     )
     .fetch_all(my)
@@ -2907,6 +3150,7 @@ async fn read_catalog(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
                 quantity_reserved: str_col(&row, 7).parse().unwrap_or(0.0),
                 purchasing_price: Some(str_col(&row, 8)).filter(|v| !v.trim().is_empty()),
                 purchasing_currency: Some(str_col(&row, 9)).filter(|v| !v.trim().is_empty()),
+                barcode_multi: str_col(&row, 10) == "Y",
             });
         }
     }
@@ -3128,6 +3372,90 @@ async fn read_store_docs(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> 
             base_price: optional(&row, 7),
             comment: str_col(&row, 8),
         });
+    }
+    read_barcodes_batches(my, data).await
+}
+
+/// Штрихкоды и партии; таблиц может не быть в старых версиях Битрикса.
+async fn read_barcodes_batches(my: &MySqlPool, data: &mut Data) -> anyhow::Result<()> {
+    let date = |row: &sqlx::mysql::MySqlRow, i| bitrix_date(&str_col(row, i));
+    if mysql_table_exists(my, "b_catalog_store_barcode").await? {
+        for row in sqlx::query(
+            "SELECT CAST(ID AS SIGNED), CAST(PRODUCT_ID AS SIGNED), CAST(BARCODE AS CHAR),
+                    CAST(IFNULL(STORE_ID, 0) AS SIGNED), CAST(DATE_CREATE AS CHAR),
+                    CAST(DATE_MODIFY AS CHAR), CAST(CREATED_BY AS SIGNED),
+                    CAST(MODIFIED_BY AS SIGNED)
+             FROM b_catalog_store_barcode ORDER BY ID",
+        )
+        .fetch_all(my)
+        .await?
+        {
+            data.barcodes.push(BarcodeRow {
+                id: int_col(&row, 0).context("b_catalog_store_barcode.ID")?,
+                item_id: int_col(&row, 1).unwrap_or_default(),
+                barcode: str_col(&row, 2),
+                store_id: id_col(&row, 3),
+                created_at: date(&row, 4),
+                updated_at: date(&row, 5),
+                created_by: id_col(&row, 6),
+                modified_by: id_col(&row, 7),
+            });
+        }
+    }
+    if mysql_table_exists(my, "b_catalog_docs_barcode").await? {
+        for row in sqlx::query(
+            "SELECT CAST(DOC_ELEMENT_ID AS SIGNED), CAST(BARCODE AS CHAR)
+             FROM b_catalog_docs_barcode ORDER BY ID",
+        )
+        .fetch_all(my)
+        .await?
+        {
+            data.doc_barcodes
+                .push((int_col(&row, 0).unwrap_or_default(), str_col(&row, 1)));
+        }
+    }
+    if mysql_table_exists(my, "b_catalog_store_batch").await? {
+        for row in sqlx::query(
+            "SELECT CAST(ID AS SIGNED), CAST(ELEMENT_ID AS SIGNED), CAST(STORE_ID AS SIGNED),
+                    CAST(IFNULL(AVAILABLE_AMOUNT, 0) AS CHAR),
+                    CAST(IFNULL(PURCHASING_PRICE, 0) AS CHAR),
+                    CAST(IFNULL(PURCHASING_CURRENCY, '') AS CHAR)
+             FROM b_catalog_store_batch ORDER BY ID",
+        )
+        .fetch_all(my)
+        .await?
+        {
+            data.batches.push(BatchRow {
+                id: int_col(&row, 0).context("b_catalog_store_batch.ID")?,
+                item_id: int_col(&row, 1).unwrap_or_default(),
+                store_id: int_col(&row, 2).unwrap_or_default(),
+                available: str_col(&row, 3),
+                price: str_col(&row, 4),
+                currency: str_col(&row, 5),
+            });
+        }
+    }
+    if mysql_table_exists(my, "b_catalog_store_batch_docs_element").await? {
+        for row in sqlx::query(
+            "SELECT CAST(ID AS SIGNED), CAST(PRODUCT_BATCH_ID AS SIGNED),
+                    CAST(DOCUMENT_ELEMENT_ID AS SIGNED), CAST(SHIPMENT_ITEM_STORE_ID AS SIGNED),
+                    CAST(IFNULL(AMOUNT, 0) AS CHAR), CAST(IFNULL(BATCH_PRICE, 0) AS CHAR),
+                    CAST(IFNULL(BATCH_CURRENCY, '') AS CHAR)
+             FROM b_catalog_store_batch_docs_element ORDER BY ID",
+        )
+        .fetch_all(my)
+        .await?
+        {
+            data.batch_moves.push(BatchMoveRow {
+                id: int_col(&row, 0).context("b_catalog_store_batch_docs_element.ID")?,
+                batch_id: int_col(&row, 1).unwrap_or_default(),
+                doc_element_id: id_col(&row, 2),
+                shipment_item_store_id: id_col(&row, 3),
+                amount: str_col(&row, 4),
+                price: str_col(&row, 5),
+                currency: str_col(&row, 6),
+            });
+        }
     }
     Ok(())
 }
@@ -3510,6 +3838,9 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
     for w in write_store_docs(&mut *tx, data, &users).await? {
         tracing::warn!("перенос из Битрикса: {w}");
     }
+    for w in write_barcodes_batches(&mut *tx, data, &users).await? {
+        tracing::warn!("перенос из Битрикса: {w}");
+    }
     // Со складским учётом доступное — по остаткам складов за вычетом резерва
     crate::stock::recalc_all(&mut *tx).await?;
 
@@ -3538,6 +3869,9 @@ async fn write_all(tx: &mut sqlx::PgConnection, data: &Data, props: &Props) -> a
         ("contractors", "contractors_id_seq"),
         ("store_documents", "store_documents_id_seq"),
         ("store_document_items", "store_document_items_id_seq"),
+        ("catalog_barcodes", "catalog_barcodes_id_seq"),
+        ("catalog_store_batches", "catalog_store_batches_id_seq"),
+        ("store_batch_moves", "store_batch_moves_id_seq"),
     ] {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT setval('{seq}', GREATEST((SELECT MAX(id) FROM {table}), 1))"
@@ -4512,7 +4846,7 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
         let mut qb = QueryBuilder::<Postgres>::new(
             "INSERT INTO catalog_products
                 (item_id, quantity, available, quantity_trace, can_buy_zero, type, weight,
-                 purchasing_price, purchasing_currency) ",
+                 purchasing_price, purchasing_currency, barcode_multi) ",
         );
         // Резервы Битрикса относятся к заказам, которые не переносятся: резерв 0, количество
         // возвращается в доступное (со складским учётом доступное затем пересчитывается)
@@ -4526,7 +4860,8 @@ async fn write_catalog(tx: &mut sqlx::PgConnection, c: &Catalog) -> anyhow::Resu
                 .push_bind(p.weight)
                 .push_bind(p.purchasing_price.as_deref().map(str::trim))
                 .push_unseparated("::numeric")
-                .push_bind(p.purchasing_currency.as_deref().map(str::trim));
+                .push_bind(p.purchasing_currency.as_deref().map(str::trim))
+                .push_bind(p.barcode_multi);
         });
         qb.build().execute(&mut *tx).await?;
     }
@@ -4800,6 +5135,7 @@ mod tests {
             quantity_reserved: 0.0,
             purchasing_price: None,
             purchasing_currency: None,
+            barcode_multi: false,
         };
         let mut data = Data {
             iblocks: vec![sku_iblock(1, "goods"), sku_iblock(2, "offers")],
@@ -4896,6 +5232,7 @@ mod tests {
             quantity_reserved: 0.0,
             purchasing_price: None,
             purchasing_currency: None,
+            barcode_multi: false,
         };
         let mut data = Data {
             iblocks: vec![
@@ -6202,6 +6539,7 @@ mod tests {
             quantity_reserved: reserved,
             purchasing_price: None,
             purchasing_currency: None,
+            barcode_multi: false,
         }
     }
 
@@ -6640,6 +6978,283 @@ mod tests {
             assert!(joined.contains(needle), "{needle}: {joined}");
         }
         assert_eq!(count(&db, "store_documents").await, 2);
+    }
+
+    fn barcode_row(id: i64, item_id: i64, barcode: &str, store_id: Option<i64>) -> BarcodeRow {
+        BarcodeRow {
+            id,
+            item_id,
+            barcode: barcode.into(),
+            store_id,
+            created_by: None,
+            modified_by: None,
+            created_at: bx_date("2026-03-01 12:00:00"),
+            updated_at: bx_date("2026-03-02 12:00:00"),
+        }
+    }
+
+    fn batch_move(id: i64, batch_id: i64, doc: Option<i64>, ship: Option<i64>) -> BatchMoveRow {
+        BatchMoveRow {
+            id,
+            batch_id,
+            doc_element_id: doc,
+            shipment_item_store_id: ship,
+            amount: "5.000".into(),
+            price: "150.00".into(),
+            currency: "RUB".into(),
+        }
+    }
+
+    #[sqlx::test]
+    async fn import_barcodes_and_multi(db: PgPool) {
+        let mut data = stock_docs_data();
+        data.catalog.products[0].barcode_multi = true;
+        let mut a = barcode_row(7, 100, "2000001", Some(1));
+        a.created_by = Some(15);
+        a.modified_by = Some(999);
+        data.barcodes = vec![a, barcode_row(8, 100, "2000002", None)];
+        run_write_all(&db, &mut data).await;
+        let user: i64 = sqlx::query_scalar("SELECT id FROM users WHERE login = 'manager'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let multi: bool =
+            sqlx::query_scalar("SELECT barcode_multi FROM catalog_products WHERE item_id = 100")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(multi);
+        type Row = (
+            i64,
+            i64,
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+        );
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT id, item_id, barcode, store_id, order_id, created_by, modified_by
+             FROM catalog_barcodes ORDER BY id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (7, 100, "2000001".into(), Some(1), None, Some(user), None),
+                (8, 100, "2000002".into(), None, None, None, None),
+            ]
+        );
+        let got: i64 = sqlx::query_scalar("SELECT nextval('catalog_barcodes_id_seq')")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(got, 9);
+    }
+
+    #[sqlx::test]
+    async fn import_barcode_duplicate_warns(db: PgPool) {
+        let mut data = stock_docs_data();
+        data.barcodes = vec![
+            barcode_row(2, 100, "DUP", Some(1)),
+            barcode_row(1, 100, "DUP", Some(2)),
+            // Товара 999 и склада 55 нет
+            barcode_row(3, 999, "NOITEM", None),
+            barcode_row(4, 100, "NOSTORE", Some(55)),
+        ];
+        run_write_all(&db, &mut data).await;
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, barcode FROM catalog_barcodes ORDER BY id")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        // Дубль — первый по ID
+        assert_eq!(rows, vec![(1, "DUP".to_string())]);
+        let users = HashMap::new();
+        let mut tx = db.begin().await.unwrap();
+        let warnings = write_barcodes_batches(&mut tx, &data, &users)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let joined = warnings.join("\n");
+        for needle in ["DUP", "товар 999", "склад 55"] {
+            assert!(joined.contains(needle), "{needle}: {joined}");
+        }
+        assert_eq!(count(&db, "catalog_barcodes").await, 1);
+    }
+
+    #[sqlx::test]
+    async fn import_doc_barcodes_linked(db: PgPool) {
+        let mut data = stock_docs_data();
+        data.doc_barcodes = vec![
+            (20, "A1".into()),
+            (20, "A2".into()),
+            // Строки 23 пропущенного документа и 500 нет
+            (23, "A3".into()),
+            (500, "A4".into()),
+        ];
+        run_write_all(&db, &mut data).await;
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT doc_item_id, barcode FROM store_document_barcodes ORDER BY id")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![(20, "A1".to_string()), (20, "A2".to_string())]);
+    }
+
+    #[sqlx::test]
+    async fn import_batches_skip_shipment_moves(db: PgPool) {
+        let mut data = stock_docs_data();
+        data.batches = vec![
+            BatchRow {
+                id: 5,
+                item_id: 100,
+                store_id: 1,
+                available: "5".into(),
+                price: "150".into(),
+                currency: "RUB".into(),
+            },
+            // Товара 999 нет
+            BatchRow {
+                id: 6,
+                item_id: 999,
+                store_id: 1,
+                available: "1".into(),
+                price: "1".into(),
+                currency: "RUB".into(),
+            },
+        ];
+        data.batch_moves = vec![
+            batch_move(1, 5, Some(20), None),
+            batch_move(2, 5, None, Some(300)),
+            batch_move(3, 5, None, Some(301)),
+            batch_move(4, 6, Some(20), None),
+        ];
+        run_write_all(&db, &mut data).await;
+        let batches: Vec<(i64, i64, i64, String, String, String)> = sqlx::query_as(
+            "SELECT id, item_id, store_id, available::text, price::text, currency
+             FROM catalog_store_batches ORDER BY id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            batches,
+            vec![(5, 100, 1, "5.000".into(), "150.00".into(), "RUB".into())]
+        );
+        type Move = (i64, Option<i64>, Option<i64>, String, String, String);
+        let moves: Vec<Move> = sqlx::query_as(
+            "SELECT batch_id, doc_item_id, shipment_store_id, amount::text, price::text, currency
+             FROM store_batch_moves ORDER BY id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            moves,
+            vec![(
+                5,
+                Some(20),
+                None,
+                "5.000".into(),
+                "150.00".into(),
+                "RUB".into()
+            )]
+        );
+        let users = HashMap::new();
+        let mut tx = db.begin().await.unwrap();
+        let warnings = write_barcodes_batches(&mut tx, &data, &users)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let joined = warnings.join("\n");
+        assert!(
+            joined.contains("отгрузк") && joined.contains('2'),
+            "{joined}"
+        );
+        assert!(joined.contains("товар 999"), "{joined}");
+    }
+
+    #[sqlx::test]
+    async fn import_method_starts_rebuild_without_batches(db: PgPool) {
+        let mut data = stock_docs_data();
+        data.options.push((
+            "catalog".into(),
+            "cost_price_calculation_method".into(),
+            "fifo".into(),
+        ));
+        run_write_all(&db, &mut data).await;
+        let opt = |name: &'static str| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT value FROM options WHERE module = 'catalog' AND name = $1",
+                )
+                .bind(name)
+                .fetch_optional(&db)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(opt("batch_rebuild_last").await.as_deref(), Some("0"));
+        assert_eq!(opt("batch_rebuild_total").await.as_deref(), Some("1"));
+
+        // С перенесёнными партиями перестройка не ставится
+        sqlx::query("DELETE FROM options WHERE name LIKE 'batch_rebuild_%'")
+            .execute(&db)
+            .await
+            .unwrap();
+        data.batches = vec![BatchRow {
+            id: 5,
+            item_id: 100,
+            store_id: 1,
+            available: "5".into(),
+            price: "150".into(),
+            currency: "RUB".into(),
+        }];
+        reimport(&db, &mut data).await;
+        assert_eq!(count(&db, "catalog_store_batches").await, 1);
+        assert_eq!(opt("batch_rebuild_last").await, None);
+    }
+
+    #[sqlx::test]
+    async fn import_twice_replaces(db: PgPool) {
+        let mut data = stock_docs_data();
+        data.barcodes = vec![barcode_row(7, 100, "B1", Some(1))];
+        data.doc_barcodes = vec![(20, "A1".into())];
+        data.batches = vec![BatchRow {
+            id: 5,
+            item_id: 100,
+            store_id: 1,
+            available: "5".into(),
+            price: "150".into(),
+            currency: "RUB".into(),
+        }];
+        data.batch_moves = vec![batch_move(1, 5, Some(20), None)];
+        run_write_all(&db, &mut data).await;
+        // Записанное в CMS между переносами заменяется
+        sqlx::query("INSERT INTO catalog_barcodes (item_id, barcode) VALUES (100, 'OWN')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO catalog_store_batches (item_id, store_id, currency) VALUES (100, 1, 'RUB')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        data.barcodes = vec![barcode_row(8, 100, "B2", None)];
+        reimport(&db, &mut data).await;
+        let codes: Vec<String> = sqlx::query_scalar("SELECT barcode FROM catalog_barcodes")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(codes, vec!["B2".to_string()]);
+        assert_eq!(count(&db, "catalog_store_batches").await, 1);
+        assert_eq!(count(&db, "store_batch_moves").await, 1);
+        assert_eq!(count(&db, "store_document_barcodes").await, 1);
     }
 
     #[sqlx::test]
