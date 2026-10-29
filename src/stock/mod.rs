@@ -3,6 +3,7 @@
 //! Счётчики резервов (`quantity_reserved` товара и склада, `quantity` товара) ведёт триггер
 //! `basket_reservations_counters`; здесь — пересчёт доступного по остаткам складов.
 
+pub mod barcodes;
 pub mod cleaner;
 pub mod documents;
 pub mod reserve;
