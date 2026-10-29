@@ -21,6 +21,7 @@ pub const ORDERS_MANAGE: &str = "orders.manage";
 pub const EXCHANGE_1C: &str = "exchange.1c";
 pub const EXCHANGE_1C_SALE: &str = "exchange.1c.sale";
 pub const DISCOUNTS_MANAGE: &str = "discounts.manage";
+pub const PURCHASE_INFO: &str = "catalog.purchase_info";
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct PermissionDef {
@@ -69,6 +70,11 @@ pub const PERMISSIONS: &[PermissionDef] = &[
         code: DISCOUNTS_MANAGE,
         name: "Скидки",
         description: "Правила работы с корзиной и купоны",
+    },
+    PermissionDef {
+        code: PURCHASE_INFO,
+        name: "Видеть закупочные цены и себестоимость",
+        description: "Закупочные цены товаров, партии и маржа заказов",
     },
 ];
 
@@ -275,5 +281,15 @@ mod tests {
     fn no_admin_access_no_entry() {
         let a = access(false, &[USERS_MANAGE], &[]);
         assert!(!a.can_enter_admin());
+    }
+
+    #[test]
+    fn purchase_info_listed() {
+        let def = PERMISSIONS
+            .iter()
+            .find(|p| p.code == PURCHASE_INFO)
+            .expect("право catalog.purchase_info в списке");
+        assert_eq!(def.name, "Видеть закупочные цены и себестоимость");
+        assert!(is_known_permission(PURCHASE_INFO));
     }
 }

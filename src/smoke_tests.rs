@@ -315,12 +315,14 @@ async fn migration_0014_keeps_rows(db: PgPool) {
             .await
             .unwrap();
     assert_eq!(values, json!({"color": 1}));
-    let perms: Vec<String> =
-        sqlx::query_scalar("SELECT permission FROM group_permissions WHERE group_id = 50")
-            .fetch_all(&db)
-            .await
-            .unwrap();
-    assert_eq!(perms, ["collections.manage"]);
+    let perms: Vec<String> = sqlx::query_scalar(
+        "SELECT permission FROM group_permissions WHERE group_id = 50 ORDER BY permission",
+    )
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    // 0025 добавляет право на закупочные цены группам с collections.manage
+    assert_eq!(perms, ["catalog.purchase_info", "collections.manage"]);
     sqlx::query("SELECT setval('collections_id_seq', 1)")
         .execute(&db)
         .await

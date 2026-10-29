@@ -535,4 +535,73 @@ mod tests {
             .unwrap();
         assert_eq!(total, 1);
     }
+
+    /// Миграция 0025 выдаёт `catalog.purchase_info` группам с управлением каталогом или магазином.
+    #[sqlx::test(migrations = false)]
+    async fn migration_grants_purchase_info(db: PgPool) {
+        let full = sqlx::migrate!();
+        let mut before = sqlx::migrate!();
+        before.migrations = full
+            .migrations
+            .iter()
+            .filter(|m| m.version <= 24)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        before.run(&db).await.unwrap();
+        for sql in [
+            "INSERT INTO groups (code, name) VALUES ('cm', 'Каталог'), ('sm', 'Магазин'), ('om', 'Заказы')",
+            "INSERT INTO group_permissions (group_id, permission)
+             SELECT id, 'collections.manage' FROM groups WHERE code = 'cm'
+             UNION ALL SELECT id, 'shop.manage' FROM groups WHERE code = 'sm'
+             UNION ALL SELECT id, 'orders.manage' FROM groups WHERE code = 'om'",
+        ] {
+            sqlx::query(sql).execute(&db).await.unwrap();
+        }
+        full.run(&db).await.unwrap();
+        let granted: Vec<String> = sqlx::query_scalar(
+            "SELECT g.code FROM group_permissions p JOIN groups g ON g.id = p.group_id
+             WHERE p.permission = 'catalog.purchase_info' ORDER BY g.code",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(granted, ["cm", "sm"]);
+    }
+
+    /// Суррогатный `shipment_item_stores.id` заполняется сам и уникален.
+    #[sqlx::test]
+    async fn shipment_item_stores_surrogate_id(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let order = place_order(&db, &f, None).await;
+        let shipment: i64 = sqlx::query_scalar(
+            "INSERT INTO shipments (order_id, base_price, store_id) VALUES ($1, 0, 1) RETURNING id",
+        )
+        .bind(order)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        for store in [1_i64, 2] {
+            sqlx::query(
+                "INSERT INTO shipment_item_stores (shipment_id, cart_item_id, store_id, quantity)
+                 VALUES ($1, $2, $3, 1)",
+            )
+            .bind(shipment)
+            .bind(f.item_id)
+            .bind(store)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        let ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM shipment_item_stores WHERE shipment_id = $1 ORDER BY store_id",
+        )
+        .bind(shipment)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        assert!(ids.iter().all(|id| *id > 0));
+    }
 }
