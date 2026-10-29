@@ -232,7 +232,7 @@ async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
         templates: Arc::new(env),
         config: Arc::new(config),
         registry: Arc::default(),
-        project: bxapi::project::Project::from_env(),
+        project: bxapi::project::Project::load(),
     };
 
     currency::auto::spawn(state.clone());

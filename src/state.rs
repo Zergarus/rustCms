@@ -15,6 +15,6 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Снимок схемы коллекций для API bxapi.
     pub registry: Arc<Registry>,
-    /// Проектные настройки bxapi (`BXAPI_PROJECT`).
+    /// Проектные настройки bxapi (модуль `project/`).
     pub project: Arc<Project>,
 }

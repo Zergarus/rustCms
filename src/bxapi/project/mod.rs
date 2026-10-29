@@ -1,9 +1,9 @@
 //! Проектные настройки bxapi — аналог `bxapi.*` в `/bitrix/.settings_extra.php`
 //! и регистрации декораторов в `init.php`.
 //!
-//! Код конкретных проектов в репозиторий CMS не входит: модули проектов лежат в
-//! каталоге `projects/` (`projects/<имя>.rs` с функцией `pub fn project() -> Project`),
-//! подключаются при сборке (см. `build.rs`) и выбираются переменной `BXAPI_PROJECT`.
+//! Код конкретного проекта в репозиторий CMS не входит: модуль проекта лежит в
+//! `project/mod.rs` (с функцией `pub fn project() -> Project`) и подключается при сборке
+//! (см. `build.rs`). Одна установка CMS — один проект.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -17,9 +17,9 @@ use serde_json::{Map, Value};
 use super::BxError;
 use crate::{cart::CartItem, catalog::PurchaseInfo, sale::Delivery, state::AppState};
 
-/// Модули проектов из `projects/`, найденные при сборке.
+/// Модуль проекта из `project/`, если он найден при сборке.
 mod installed {
-    include!(concat!(env!("OUT_DIR"), "/projects.rs"));
+    include!(concat!(env!("OUT_DIR"), "/project.rs"));
 }
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -319,20 +319,9 @@ pub struct Project {
 }
 
 impl Project {
-    pub fn from_env() -> Arc<Project> {
-        let name = std::env::var("BXAPI_PROJECT").unwrap_or_default();
-        let project = match name.trim() {
-            "" => Project::default(),
-            name => installed::by_name(name).unwrap_or_else(|| {
-                tracing::warn!(
-                    project = name,
-                    available = ?installed::NAMES,
-                    "BXAPI_PROJECT: модуль проекта не найден в projects/, настройки по умолчанию"
-                );
-                Project::default()
-            }),
-        };
-        Arc::new(project)
+    /// Настройки модуля проекта; без модуля — по умолчанию.
+    pub fn load() -> Arc<Project> {
+        Arc::new(installed::project().unwrap_or_default())
     }
 
     fn find<'a, T>(list: &'a [(&'static str, T)], iblock: &str) -> Option<&'a T> {

@@ -3,6 +3,6 @@
 .claude/
 /upload
 /mail
-# Модули конкретных проектов (см. projects/README.md)
-/projects/*
-!/projects/README.md
+# Модуль конкретного проекта (см. project/README.md)
+/project/*
+!/project/README.md
