@@ -1,6 +1,7 @@
 mod access;
 mod admin;
 mod api;
+mod apikeys;
 mod auth;
 mod bxapi;
 mod cart;
