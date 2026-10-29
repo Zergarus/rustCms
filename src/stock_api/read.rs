@@ -2,7 +2,7 @@
 
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Query, State},
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use sqlx::{FromRow, PgPool};
 
 use super::{
-    ApiAccess, Page,
+    ApiAccess, Id, Page,
     error::{ApiError, ApiResult},
 };
 use crate::{
@@ -167,7 +167,9 @@ pub async fn lookup(
         barcodes::find_item(&mut conn, code).await?
     } else if let Some(xml) = &q.xml_id {
         sqlx::query_scalar(
-            "SELECT min(id) FROM collection_items WHERE xml_id = $1 AND xml_id <> ''",
+            "SELECT min(i.id) FROM collection_items i
+             JOIN catalog_products p ON p.item_id = i.id
+             WHERE i.xml_id = $1 AND i.xml_id <> ''",
         )
         .bind(xml)
         .fetch_one(&state.db)
@@ -405,7 +407,7 @@ pub async fn documents(
 pub async fn document(
     State(state): State<AppState>,
     api: ApiAccess,
-    Path(id): Path<i64>,
+    Id(id): Id,
 ) -> ApiResult<Json<DocumentView>> {
     api.require("stock.read", SHOP_MANAGE)?;
     require_store_control(&state.db).await?;
@@ -455,7 +457,7 @@ pub async fn contractors(
 pub async fn contractor(
     State(state): State<AppState>,
     api: ApiAccess,
-    Path(id): Path<i64>,
+    Id(id): Id,
 ) -> ApiResult<Json<Value>> {
     api.require("stock.read", SHOP_MANAGE)?;
     Ok(Json(contractor_json(&state.db, id).await?))

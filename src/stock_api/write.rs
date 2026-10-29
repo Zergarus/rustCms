@@ -1,18 +1,13 @@
 //! Методы записи API склада: черновики документов, поставщики (`stock.write`),
 //! проведение и отмена (`stock.conduct`).
 
-use axum::{
-    Json,
-    body::Bytes,
-    extract::{Path, State},
-    http::StatusCode,
-};
+use axum::{Json, body::Bytes, extract::State, http::StatusCode};
 use chrono::NaiveDate;
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 
 use super::{
-    ApiAccess,
+    ApiAccess, Id,
     error::{ApiError, ApiResult},
     read::{self, load_document},
 };
@@ -45,6 +40,14 @@ fn opt_string(map: &Map<String, Value>, key: &str) -> ApiResult<String> {
     }
 }
 
+/// Строковое поле поставщика: число принимается как строка, `null` и отсутствие — пусто.
+fn lenient_string(map: &Map<String, Value>, key: &str) -> ApiResult<String> {
+    match map.get(key) {
+        Some(Value::Number(n)) => Ok(n.to_string()),
+        _ => opt_string(map, key),
+    }
+}
+
 fn opt_date(map: &Map<String, Value>, key: &str) -> ApiResult<Option<NaiveDate>> {
     let raw = opt_string(map, key)?;
     if raw.is_empty() {
@@ -72,6 +75,7 @@ async fn parse_document(
     body: &Bytes,
     user_id: i64,
     require_type: bool,
+    keep_xml_id_of: Option<i64>,
 ) -> ApiResult<DocInput> {
     let map = json_object(body)?;
     let doc_type = opt_string(&map, "type")?;
@@ -180,10 +184,37 @@ async fn parse_document(
             messages.push(format!("Не найден поставщик #{c}"));
         }
     }
+    let currency = opt_string(&map, "currency")?;
+    if !currency.is_empty() {
+        let known: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM currencies WHERE code = $1)
+                 OR $1 = (SELECT COALESCE(
+                        (SELECT value FROM options
+                         WHERE module = 'sale' AND name = 'default_currency' AND value <> ''),
+                        (SELECT code FROM currencies WHERE base), 'RUB'))",
+        )
+        .bind(&currency)
+        .fetch_one(db)
+        .await?;
+        if !known {
+            messages.push(format!("Неизвестная валюта {currency}"));
+        }
+    }
     if !messages.is_empty() {
         return Err(ApiError::Rejected(messages));
     }
-    let xml_id = opt_string(&map, "xml_id")?;
+    // При замене отсутствующий `xml_id` сохраняет прежний; `""`/`null` очищают.
+    let xml_id = match (map.contains_key("xml_id"), keep_xml_id_of) {
+        (false, Some(id)) => sqlx::query_scalar::<_, Option<String>>(
+            "SELECT xml_id FROM store_documents WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(db)
+        .await?
+        .flatten()
+        .unwrap_or_default(),
+        _ => opt_string(&map, "xml_id")?,
+    };
     if xml_id.chars().count() > documents::XML_ID_MAX {
         return Err(bad(format!(
             "xml_id не длиннее {} символов",
@@ -195,7 +226,7 @@ async fn parse_document(
         doc_number: opt_string(&map, "number")?,
         date_document: opt_date(&map, "date")?,
         contractor_id,
-        currency: opt_string(&map, "currency")?,
+        currency,
         items_order_date: opt_date(&map, "items_order_date")?,
         items_received_date: opt_date(&map, "items_received_date")?,
         responsible_id: Some(user_id),
@@ -244,7 +275,7 @@ pub async fn create_document(
     api.require("stock.write", SHOP_MANAGE)?;
     read::require_store_control(&state.db).await?;
     let user_id = api.access.user.id;
-    let input = parse_document(&state.db, &body, user_id, true).await?;
+    let input = parse_document(&state.db, &body, user_id, true, None).await?;
     let mut tx = state.db.begin().await?;
     match documents::create(&mut tx, &input, Some(user_id)).await {
         Ok(id) => {
@@ -274,14 +305,14 @@ async fn require_exists(db: &PgPool, id: i64) -> ApiResult<()> {
 pub async fn replace_document(
     State(state): State<AppState>,
     api: ApiAccess,
-    Path(id): Path<i64>,
+    Id(id): Id,
     body: Bytes,
 ) -> ApiResult<Json<read::DocumentView>> {
     api.require("stock.write", SHOP_MANAGE)?;
     read::require_store_control(&state.db).await?;
     require_exists(&state.db, id).await?;
     let user_id = api.access.user.id;
-    let input = parse_document(&state.db, &body, user_id, false).await?;
+    let input = parse_document(&state.db, &body, user_id, false, Some(id)).await?;
     let mut tx = state.db.begin().await?;
     match documents::update(&mut tx, id, &input, Some(user_id)).await {
         Ok(()) => {
@@ -299,7 +330,7 @@ pub async fn replace_document(
 pub async fn delete_document(
     State(state): State<AppState>,
     api: ApiAccess,
-    Path(id): Path<i64>,
+    Id(id): Id,
 ) -> ApiResult<StatusCode> {
     api.require("stock.write", SHOP_MANAGE)?;
     read::require_store_control(&state.db).await?;
@@ -349,7 +380,7 @@ async fn run_conduct(
 pub async fn conduct_document(
     State(state): State<AppState>,
     api: ApiAccess,
-    Path(id): Path<i64>,
+    Id(id): Id,
 ) -> ApiResult<Json<read::DocumentView>> {
     run_conduct(&state, &api, id, false).await
 }
@@ -357,7 +388,7 @@ pub async fn conduct_document(
 pub async fn cancel_document(
     State(state): State<AppState>,
     api: ApiAccess,
-    Path(id): Path<i64>,
+    Id(id): Id,
 ) -> ApiResult<Json<read::DocumentView>> {
     run_conduct(&state, &api, id, true).await
 }
@@ -369,7 +400,18 @@ pub async fn create_contractor(
     body: Bytes,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     api.require("stock.write", SHOP_MANAGE)?;
-    let form: ContractorForm = serde_json::from_slice(&body).map_err(|_| bad("Неверный JSON"))?;
+    let map = json_object(&body).map_err(|_| bad("Неверный JSON"))?;
+    let form = ContractorForm {
+        person_type: lenient_string(&map, "person_type")?,
+        person_name: lenient_string(&map, "person_name")?,
+        company: lenient_string(&map, "company")?,
+        inn: lenient_string(&map, "inn")?,
+        kpp: lenient_string(&map, "kpp")?,
+        address: lenient_string(&map, "address")?,
+        phone: lenient_string(&map, "phone")?,
+        email: lenient_string(&map, "email")?,
+        post_index: lenient_string(&map, "post_index")?,
+    };
     form.validate().map_err(ApiError::BadRequest)?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO contractors (person_type, person_name, company, inn, kpp, address, phone,

@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 
 use axum::{
     Router,
-    extract::{ConnectInfo, FromRequestParts, Query},
+    extract::{ConnectInfo, FromRequestParts, Path, Query},
     http::{header, request::Parts},
     routing::{get, post},
 };
@@ -39,6 +39,22 @@ pub fn router() -> Router<AppState> {
             get(read::contractors).post(write::create_contractor),
         )
         .route("/contractors/{id}", get(read::contractor))
+        .fallback(|| async { ApiError::NotFound })
+        .method_not_allowed_fallback(|| async { ApiError::MethodNotAllowed })
+}
+
+/// Числовой `{id}` из пути; неверный — JSON 400 вместо текстового ответа axum.
+pub struct Id(pub i64);
+
+impl<S: Send + Sync> FromRequestParts<S> for Id {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Path::<i64>::from_request_parts(parts, state)
+            .await
+            .map(|Path(id)| Id(id))
+            .map_err(|_| ApiError::BadRequest("Некорректный id в адресе".into()))
+    }
 }
 
 /// Вызывающий API: ключ, его scope и права пользователя ключа.
@@ -1309,5 +1325,145 @@ mod tests {
             assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
             assert_eq!(body["message"], "Нужен scope stock.conduct");
         }
+    }
+
+    #[sqlx::test]
+    async fn unknown_currency_rejected(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        control_on(&db).await;
+        let (_, auth) = write_key(&db).await;
+        let mut req = arrival(serde_json::json!({"item_id": a}));
+        req["currency"] = "XXX".into();
+        req["lines"].as_array_mut().unwrap().push(serde_json::json!(
+            {"item_xml_id": "NOPE", "store_to": 1, "amount": 1}
+        ));
+        let (status, body) =
+            send(&db, "POST", &format!("{BASE}/documents"), &auth, Some(req)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2, "{body}");
+        assert!(messages.iter().any(|m| m == "Неизвестная валюта XXX"));
+        assert_eq!(doc_count(&db).await, 0);
+        // валюта из справочника принимается
+        sqlx::query("INSERT INTO currencies (code) VALUES ('USD')")
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut req = arrival(serde_json::json!({"item_id": a}));
+        req["currency"] = "USD".into();
+        let (status, body) =
+            send(&db, "POST", &format!("{BASE}/documents"), &auth, Some(req)).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["currency"], "USD");
+    }
+
+    #[sqlx::test]
+    async fn bad_path_json_400(db: PgPool) {
+        let (_, auth) = write_key(&db).await;
+        for path in ["documents/abc", "contractors/abc", "documents/abc/conduct"] {
+            let method = if path.ends_with("conduct") {
+                "POST"
+            } else {
+                "GET"
+            };
+            let (status, body) = send(&db, method, &format!("{BASE}/{path}"), &auth, None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(body["error"], "bad_request", "{path}");
+        }
+    }
+
+    #[sqlx::test]
+    async fn unknown_route_json_404(db: PgPool) {
+        let (_, auth) = write_key(&db).await;
+        let (status, body) = send(&db, "GET", &format!("{BASE}/nope"), &auth, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "not_found");
+        assert_eq!(body["message"], "Не найдено");
+    }
+
+    #[sqlx::test]
+    async fn wrong_method_json_405(db: PgPool) {
+        let (_, auth) = write_key(&db).await;
+        let (status, body) = send(&db, "PATCH", &format!("{BASE}/documents"), &auth, None).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(body["error"], "method_not_allowed");
+        assert!(body["message"].is_string());
+    }
+
+    #[sqlx::test]
+    async fn lookup_xml_id_ignores_non_catalog(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        // не товар каталога с тем же внешним кодом и меньшим id
+        let plain: i64 = sqlx::query_scalar(
+            "INSERT INTO collection_items (collection_id, code, name, xml_id)
+             SELECT collection_id, 'news', 'Новость', 'SAME' FROM collection_items WHERE id = $1
+             RETURNING id",
+        )
+        .bind(a)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let product = simple_item(&db, a, "SAME").await;
+        assert!(plain < product);
+        let auth = read_key(&db, &["shop.manage"]).await;
+        let (status, _, body) = get(
+            &db,
+            &format!("{BASE}/products/lookup?xml_id=SAME"),
+            Some(&auth),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["id"], product);
+    }
+
+    #[sqlx::test]
+    async fn put_without_xml_id_keeps_it(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        control_on(&db).await;
+        let (_, auth) = write_key(&db).await;
+        let (_, created) = send(
+            &db,
+            "POST",
+            &format!("{BASE}/documents"),
+            &auth,
+            Some(arrival(serde_json::json!({"item_id": a}))),
+        )
+        .await;
+        let id = created["id"].as_i64().unwrap();
+        let url = format!("{BASE}/documents/{id}");
+        let mut req = arrival(serde_json::json!({"item_id": a}));
+        req.as_object_mut().unwrap().remove("xml_id");
+        let (status, body) = send(&db, "PUT", &url, &auth, Some(req.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["xml_id"], "WMS-1042");
+        for clear in [serde_json::json!(""), Value::Null] {
+            let mut req = req.clone();
+            req["xml_id"] = clear;
+            let (status, body) = send(&db, "PUT", &url, &auth, Some(req)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["xml_id"], "");
+            // вернуть код для следующего круга
+            let mut back = arrival(serde_json::json!({"item_id": a}));
+            back["xml_id"] = "WMS-1042".into();
+            send(&db, "PUT", &url, &auth, Some(back)).await;
+        }
+    }
+
+    #[sqlx::test]
+    async fn contractor_accepts_number_and_null(db: PgPool) {
+        let (_, auth) = write_key(&db).await;
+        let (status, body) = send(
+            &db,
+            "POST",
+            &format!("{BASE}/contractors"),
+            &auth,
+            Some(serde_json::json!({
+                "person_type": "C", "company": "ООО", "inn": 7700000000_i64, "kpp": null
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["inn"], "7700000000");
+        assert_eq!(body["kpp"], "");
     }
 }

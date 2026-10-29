@@ -16,6 +16,7 @@ pub enum ApiError {
     Unauthorized,
     Forbidden(String),
     NotFound,
+    MethodNotAllowed,
     BadRequest(String),
     Conflict { message: String, id: Option<i64> },
     Rejected(Vec<String>),
@@ -60,6 +61,11 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => (
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": "not_found", "message": "Не найдено"})),
+            )
+                .into_response(),
+            ApiError::MethodNotAllowed => (
+                StatusCode::METHOD_NOT_ALLOWED,
+                Json(json!({"error": "method_not_allowed", "message": "Метод не поддерживается"})),
             )
                 .into_response(),
             ApiError::BadRequest(message) => (
