@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use sqlx::PgConnection;
 
+use super::barcodes;
 use super::reserve::{self, Event};
 use super::{Condition, Settings, StockError, recalc_quantity, settings, store_name};
 use crate::{catalog, sale::repo::traced_locked, sale::stock::StockLine};
@@ -305,6 +306,20 @@ async fn ship(
     .collect();
     let chosen: HashMap<i64, i64> = chosen.iter().copied().collect();
 
+    // Поштучные товары: их штрихкоды проверяются и привязываются к заказу
+    let multi: HashSet<i64> = if s.store_control {
+        sqlx::query_scalar(
+            "SELECT item_id FROM catalog_products WHERE item_id = ANY($1) AND barcode_multi",
+        )
+        .bind(&items)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect()
+    } else {
+        HashSet::new()
+    };
+    let mut barcode_lines: Vec<(i64, i64, String, i64)> = Vec::new();
     let mut errors = Vec::new();
     let mut moves = Vec::new();
     for line in &lines {
@@ -322,6 +337,9 @@ async fn ship(
                 ));
                 continue;
             };
+            if multi.contains(&line.item_id) {
+                barcode_lines.push((line.id, line.item_id, line.name.clone(), store));
+            }
             Some(store)
         } else {
             None
@@ -366,6 +384,15 @@ async fn ship(
                 "Недостаточное количество товара {} (#{}) для отгрузки",
                 line.name, line.item_id
             )),
+        }
+    }
+    // Ошибки штрихкодов — в тот же отказ: отгрузка отменяется целиком
+    if !barcode_lines.is_empty()
+        && let Err(e) = barcodes::ship_out(tx, shipment_id, &barcode_lines).await
+    {
+        match e {
+            StockError::Rejected(m) => errors.extend(m),
+            other => return Err(other),
         }
     }
     if !errors.is_empty() {
@@ -438,6 +465,9 @@ async fn unship(
     .bind(shipment_id)
     .fetch_all(&mut *tx)
     .await?;
+    if s.store_control {
+        barcodes::ship_back(tx, shipment_id).await?;
+    }
     let mut items = Vec::new();
     for line in lines.iter().filter(|l| traced.contains(&l.item_id)) {
         items.push(line.item_id);
@@ -520,7 +550,7 @@ mod tests {
 
     // --- БД ---
 
-    use crate::stock::StockError;
+    use crate::stock::{StockError, barcodes};
     use crate::test_support::{Fixture, order_fixture, place_order_with};
     use sqlx::PgPool;
 
@@ -945,5 +975,149 @@ mod tests {
             ["Невозможно отгрузить отмененный заказ"]
         );
         assert_eq!(deducted(&db, sh).await, (false, false));
+    }
+
+    async fn make_multi(db: &PgPool, item: i64, codes: &[&str]) {
+        sqlx::query("UPDATE catalog_products SET barcode_multi = TRUE WHERE item_id = $1")
+            .bind(item)
+            .execute(db)
+            .await
+            .unwrap();
+        for c in codes {
+            sqlx::query(
+                "INSERT INTO catalog_barcodes (item_id, barcode, store_id) VALUES ($1, $2, 1)",
+            )
+            .bind(item)
+            .bind(c)
+            .execute(db)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn choose_codes(db: &PgPool, shipment: i64, line: i64, codes: &[&str]) {
+        let mut tx = db.begin().await.unwrap();
+        let list = codes.iter().map(|c| c.to_string()).collect();
+        barcodes::choose_barcodes(&mut tx, shipment, &[(line, 1, list)])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    async fn code_state(db: &PgPool, code: &str) -> (Option<i64>, Option<i64>) {
+        sqlx::query_as("SELECT store_id, order_id FROM catalog_barcodes WHERE barcode = $1")
+            .bind(code)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn multi_ship_requires_barcodes(db: PgPool) {
+        let f = setup(&db, true).await;
+        make_multi(&db, f.product_id, &["A1", "A2"]).await;
+        let order = place_order_with(&db, &f, None, Some(1), 2.0).await;
+        let (sh, line) = parts(&db, order).await;
+        choose_codes(&db, sh, line, &["A1"]).await;
+        let msgs = rejected(ship(&db, sh, true, &[]).await);
+        assert_eq!(msgs, ["У товара \"Товар\" не указан штрихкод."]);
+        assert_eq!(deducted(&db, sh).await, (false, false));
+        assert_eq!(code_state(&db, "A1").await, (Some(1), None));
+        assert_eq!(amount(&db, f.product_id, 1).await, 5.0);
+    }
+
+    #[sqlx::test]
+    async fn multi_ship_unknown_barcode_rejected(db: PgPool) {
+        let f = setup(&db, true).await;
+        make_multi(&db, f.product_id, &["A1"]).await;
+        let order = place_order_with(&db, &f, None, Some(1), 2.0).await;
+        let (sh, line) = parts(&db, order).await;
+        choose_codes(&db, sh, line, &["A1", "ZZ"]).await;
+        let msgs = rejected(ship(&db, sh, true, &[]).await);
+        assert_eq!(
+            msgs,
+            [format!(
+                "Для товара Товар (#{}) не найден штрихкод \"ZZ\".",
+                f.product_id
+            )]
+        );
+        assert_eq!(code_state(&db, "A1").await, (Some(1), None));
+    }
+
+    #[sqlx::test]
+    async fn multi_ship_binds_order_and_unship_returns(db: PgPool) {
+        let f = setup(&db, true).await;
+        make_multi(&db, f.product_id, &["A1", "A2", "A3"]).await;
+        let order = place_order_with(&db, &f, None, Some(1), 2.0).await;
+        let (sh, line) = parts(&db, order).await;
+        choose_codes(&db, sh, line, &["A1", "A2"]).await;
+        assert!(ship(&db, sh, true, &[]).await.unwrap());
+        assert_eq!(code_state(&db, "A1").await, (None, Some(order)));
+        assert_eq!(code_state(&db, "A2").await, (None, Some(order)));
+        assert_eq!(code_state(&db, "A3").await, (Some(1), None));
+        assert_eq!(amount(&db, f.product_id, 1).await, 3.0);
+
+        assert!(ship(&db, sh, false, &[]).await.unwrap());
+        assert_eq!(code_state(&db, "A1").await, (Some(1), None));
+        assert_eq!(code_state(&db, "A2").await, (Some(1), None));
+        assert_eq!(amount(&db, f.product_id, 1).await, 5.0);
+    }
+
+    #[sqlx::test]
+    async fn ordinary_ship_unchanged(db: PgPool) {
+        let f = setup(&db, true).await;
+        let order = place_order_with(&db, &f, None, Some(1), 2.0).await;
+        let (sh, line) = parts(&db, order).await;
+        assert!(ship(&db, sh, true, &[]).await.unwrap());
+        assert_eq!(counters(&db, f.product_id).await, (3.0, 0.0, 3.0, 0.0));
+        assert_eq!(ship_rows(&db, sh).await, [(line, 1, 2.0)]);
+        assert!(ship(&db, sh, false, &[]).await.unwrap());
+        assert_eq!(counters(&db, f.product_id).await, (3.0, 2.0, 5.0, 2.0));
+    }
+
+    #[sqlx::test]
+    async fn barcode_error_cancels_whole_shipment(db: PgPool) {
+        let f = setup(&db, true).await;
+        // Вторая позиция — поштучный товар без кодов; первая — обычный товар
+        let other: i64 = sqlx::query_scalar(
+            "INSERT INTO collection_items (collection_id, code, name)
+             SELECT collection_id, 'multi', 'Поштучный' FROM collection_items WHERE id = $1
+             RETURNING id",
+        )
+        .bind(f.product_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO catalog_products (item_id, quantity, quantity_trace, can_buy_zero, barcode_multi)
+             VALUES ($1, 10, TRUE, FALSE, TRUE)",
+        )
+        .bind(other)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO catalog_store_amounts (item_id, store_id, amount) VALUES ($1, 1, 5)",
+        )
+        .bind(other)
+        .execute(&db)
+        .await
+        .unwrap();
+        let order = place_order_with(&db, &f, None, Some(1), 1.0).await;
+        let (sh, _) = parts(&db, order).await;
+        sqlx::query(
+            "INSERT INTO cart_items (order_id, item_id, store_id, quantity, name)
+             VALUES ($1, $2, 1, 1, 'Поштучный')",
+        )
+        .bind(order)
+        .bind(other)
+        .execute(&db)
+        .await
+        .unwrap();
+        let msgs = rejected(ship(&db, sh, true, &[]).await);
+        assert_eq!(msgs, ["У товара \"Поштучный\" не указан штрихкод."]);
+        assert_eq!(deducted(&db, sh).await, (false, false));
+        assert_eq!(amount(&db, f.product_id, 1).await, 5.0);
+        assert_eq!(amount(&db, other, 1).await, 5.0);
     }
 }

@@ -361,6 +361,165 @@ pub(super) async fn apply_document(
     Ok(())
 }
 
+/// Сохраняет штрихкоды позиций отгрузки `(позиция, склад, коды)`: прежние коды позиции
+/// заменяются. Коды отгруженной отгрузки не меняются; позиции чужого заказа пропускаются.
+pub async fn choose_barcodes(
+    tx: &mut PgConnection,
+    shipment_id: i64,
+    codes: &[(i64, i64, Vec<String>)],
+) -> sqlx::Result<()> {
+    let Some(order_id): Option<i64> =
+        sqlx::query_scalar("SELECT order_id FROM shipments WHERE id = $1")
+            .bind(shipment_id)
+            .fetch_optional(&mut *tx)
+            .await?
+    else {
+        return Ok(());
+    };
+    sqlx::query("SELECT id FROM orders WHERE id = $1 FOR UPDATE")
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    let deducted: bool =
+        sqlx::query_scalar("SELECT deducted FROM shipments WHERE id = $1 FOR UPDATE")
+            .bind(shipment_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if deducted {
+        return Ok(());
+    }
+    for (line, store, list) in codes {
+        let foreign: bool = sqlx::query_scalar(
+            "SELECT NOT EXISTS (SELECT 1 FROM cart_items WHERE id = $1 AND order_id = $2)",
+        )
+        .bind(line)
+        .bind(order_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if foreign {
+            continue;
+        }
+        sqlx::query(
+            "DELETE FROM shipment_item_barcodes WHERE shipment_id = $1 AND cart_item_id = $2",
+        )
+        .bind(shipment_id)
+        .bind(line)
+        .execute(&mut *tx)
+        .await?;
+        let mut seen: Vec<&str> = Vec::new();
+        for code in list.iter().map(|c| c.trim()).filter(|c| !c.is_empty()) {
+            if seen.contains(&code) {
+                continue;
+            }
+            seen.push(code);
+            sqlx::query(
+                "INSERT INTO shipment_item_barcodes (shipment_id, cart_item_id, store_id, barcode)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (shipment_id, barcode) DO UPDATE
+                 SET cart_item_id = EXCLUDED.cart_item_id, store_id = EXCLUDED.store_id",
+            )
+            .bind(shipment_id)
+            .bind(line)
+            .bind(store)
+            .bind(code)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Отгрузка штрихкодов поштучных позиций `(позиция, товар, название, склад)`: коды должны лежать
+/// на складе позиции; сначала проверка (ошибки списком), затем коды снимаются со склада и
+/// привязываются к заказу. Лишние коды сверх количества отбрасываются.
+pub(super) async fn ship_out(
+    tx: &mut PgConnection,
+    shipment_id: i64,
+    lines: &[(i64, i64, String, i64)],
+) -> Result<(), StockError> {
+    let order_id: i64 = sqlx::query_scalar("SELECT order_id FROM shipments WHERE id = $1")
+        .bind(shipment_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let mut errors: Vec<String> = Vec::new();
+    // Коды к отгрузке и лишние
+    let mut taken: Vec<String> = Vec::new();
+    let mut spare: Vec<String> = Vec::new();
+    for (line, item, name, store) in lines {
+        let quantity: f64 =
+            sqlx::query_scalar("SELECT quantity::float8 FROM cart_items WHERE id = $1")
+                .bind(line)
+                .fetch_one(&mut *tx)
+                .await?;
+        let need = (quantity - 1e-9).ceil().max(1.0) as usize;
+        let have: Vec<String> = sqlx::query_scalar(
+            "SELECT barcode FROM shipment_item_barcodes
+             WHERE shipment_id = $1 AND cart_item_id = $2 AND store_id = $3 ORDER BY id",
+        )
+        .bind(shipment_id)
+        .bind(line)
+        .bind(store)
+        .fetch_all(&mut *tx)
+        .await?;
+        if have.len() < need {
+            errors.push(format!("У товара \"{name}\" не указан штрихкод."));
+            continue;
+        }
+        let mut ok = true;
+        for code in &have[..need] {
+            let found: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM catalog_barcodes
+                 WHERE barcode = $1 AND item_id = $2 AND store_id = $3)",
+            )
+            .bind(code)
+            .bind(item)
+            .bind(store)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !found {
+                ok = false;
+                errors.push(format!(
+                    "Для товара {name} (#{item}) не найден штрихкод \"{code}\"."
+                ));
+            }
+        }
+        if ok {
+            taken.extend(have[..need].iter().cloned());
+        }
+        spare.extend(have[need..].iter().cloned());
+    }
+    if !errors.is_empty() {
+        return Err(StockError::Rejected(errors));
+    }
+    sqlx::query(
+        "UPDATE catalog_barcodes SET store_id = NULL, order_id = $2, updated_at = now()
+         WHERE barcode = ANY($1)",
+    )
+    .bind(&taken)
+    .bind(order_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM shipment_item_barcodes WHERE shipment_id = $1 AND barcode = ANY($2)")
+        .bind(shipment_id)
+        .bind(&spare)
+        .execute(&mut *tx)
+        .await?;
+    Ok(())
+}
+
+/// Снятие «Отгружено»: коды отгрузки возвращаются на склад, заказ отвязывается.
+pub(super) async fn ship_back(tx: &mut PgConnection, shipment_id: i64) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE catalog_barcodes b SET store_id = sb.store_id, order_id = NULL, updated_at = now()
+         FROM shipment_item_barcodes sb
+         WHERE sb.shipment_id = $1 AND b.barcode = sb.barcode AND b.order_id IS NOT NULL",
+    )
+    .bind(shipment_id)
+    .execute(tx)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
