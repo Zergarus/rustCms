@@ -848,6 +848,53 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn unknown_item_id_rejected(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        control_on(&db).await;
+        let (_, auth) = write_key(&db).await;
+        let plain: i64 = sqlx::query_scalar(
+            "INSERT INTO collection_items (collection_id, code, name)
+             SELECT collection_id, 'news', 'Новость' FROM collection_items WHERE id = $1
+             RETURNING id",
+        )
+        .bind(a)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let mut req = arrival(serde_json::json!({"item_id": 999999}));
+        req["lines"].as_array_mut().unwrap().push(serde_json::json!(
+            {"item_id": plain, "store_to": 1, "amount": 1}
+        ));
+        let (status, body) =
+            send(&db, "POST", &format!("{BASE}/documents"), &auth, Some(req)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        let messages = body["messages"].as_array().unwrap();
+        assert!(
+            messages.iter().any(|m| m == "Не найден товар #999999"),
+            "{body}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| *m == format!("Не найден товар #{plain}")),
+            "{body}"
+        );
+        assert_eq!(doc_count(&db).await, 0);
+    }
+
+    #[sqlx::test]
+    async fn xml_id_too_long_400(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        control_on(&db).await;
+        let (_, auth) = write_key(&db).await;
+        let mut req = arrival(serde_json::json!({"item_id": a}));
+        req["xml_id"] = "x".repeat(101).into();
+        let (status, _) = send(&db, "POST", &format!("{BASE}/documents"), &auth, Some(req)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(doc_count(&db).await, 0);
+    }
+
+    #[sqlx::test]
     async fn duplicate_xml_id_conflict(db: PgPool) {
         let (a, _) = stock_fixture(&db).await;
         control_on(&db).await;

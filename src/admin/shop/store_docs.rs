@@ -238,6 +238,12 @@ impl DocForm {
                 barcodes: split_codes(Self::cell(&self.line_barcodes, i)),
             });
         }
+        if self.xml_id.trim().chars().count() > documents::XML_ID_MAX {
+            return Err(format!(
+                "Внешний код не длиннее {} символов",
+                documents::XML_ID_MAX
+            ));
+        }
         Ok(DocInput {
             doc_type: self.doc_type.clone(),
             doc_number: self.doc_number.trim().to_string(),

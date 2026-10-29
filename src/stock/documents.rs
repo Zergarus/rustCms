@@ -172,10 +172,13 @@ fn xml_id_error(e: sqlx::Error, xml_id: &str) -> StockError {
     }
 }
 
+pub const NOT_FOUND_PREFIX: &str = "Не найден документ складского учета";
+
+/// Максимальная длина внешнего кода документа.
+pub const XML_ID_MAX: usize = 100;
+
 fn not_found(id: i64) -> StockError {
-    reject(format!(
-        "Не найден документ складского учета с идентификатором #{id}"
-    ))
+    reject(format!("{NOT_FOUND_PREFIX} с идентификатором #{id}"))
 }
 
 /// Сумма документа: Σ количество × закупочная цена.

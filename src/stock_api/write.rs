@@ -98,7 +98,19 @@ async fn parse_document(
             )));
         }
         let item_id = match item_id {
-            Some(id) => Some(id),
+            Some(id) => {
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM collection_items i
+                     JOIN catalog_products p ON p.item_id = i.id WHERE i.id = $1)",
+                )
+                .bind(id)
+                .fetch_one(db)
+                .await?;
+                if !exists {
+                    messages.push(format!("Не найден товар #{id}"));
+                }
+                Some(id)
+            }
             None => {
                 let found: Option<i64> = sqlx::query_scalar(
                     "SELECT min(i.id) FROM collection_items i
@@ -170,6 +182,13 @@ async fn parse_document(
     if !messages.is_empty() {
         return Err(ApiError::Rejected(messages));
     }
+    let xml_id = opt_string(&map, "xml_id")?;
+    if xml_id.chars().count() > documents::XML_ID_MAX {
+        return Err(bad(format!(
+            "xml_id не длиннее {} символов",
+            documents::XML_ID_MAX
+        )));
+    }
     Ok(DocInput {
         doc_type,
         doc_number: opt_string(&map, "number")?,
@@ -180,7 +199,7 @@ async fn parse_document(
         items_received_date: opt_date(&map, "items_received_date")?,
         responsible_id: Some(user_id),
         commentary: opt_string(&map, "comment")?,
-        xml_id: opt_string(&map, "xml_id")?,
+        xml_id,
         lines,
     })
 }
@@ -201,6 +220,9 @@ async fn map_stock_error(db: &PgPool, e: StockError, xml_id: &str) -> ApiError {
                 message: message.clone(),
                 id,
             };
+        }
+        if message.starts_with(documents::NOT_FOUND_PREFIX) {
+            return ApiError::NotFound;
         }
         if message == NOT_EDITABLE || message == NOT_DELETABLE {
             return ApiError::Conflict {
