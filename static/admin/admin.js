@@ -395,6 +395,13 @@
           return id && id.value === String(hit.item_id);
         })[0];
         var amount;
+        if (row && hit.multi) {
+          var listed = $('textarea.bc-text', row);
+          if (listed && bcLines(listed.value).indexOf(code) >= 0) {
+            toast('Штрихкод уже добавлен', 'error');
+            return;
+          }
+        }
         if (row) {
           amount = $('input[name="line_amount[]"]', row);
           amount.value = (parseFloat(String(amount.value).replace(',', '.')) || 0) + 1;

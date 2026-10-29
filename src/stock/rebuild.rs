@@ -127,7 +127,9 @@ pub async fn step(db: &PgPool, limit: i64) -> anyhow::Result<bool> {
     };
     drop(c);
     for item in items {
-        rebuild_item(db, method, item).await?;
+        rebuild_item(db, method, item)
+            .await
+            .map_err(|e| e.context(format!("товар #{item}")))?;
     }
     Ok(true)
 }

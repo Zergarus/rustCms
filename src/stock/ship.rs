@@ -1071,6 +1071,31 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn unship_does_not_return_resold_unit(db: PgPool) {
+        let f = setup(&db, true).await;
+        make_multi(&db, f.product_id, &["A1", "A2"]).await;
+        let order1 = place_order_with(&db, &f, None, Some(1), 1.0).await;
+        let (sh1, line1) = parts(&db, order1).await;
+        choose_codes(&db, sh1, line1, &["A1"]).await;
+        assert!(ship(&db, sh1, true, &[]).await.unwrap());
+        // Возврат: единица снова на складе, ни за каким заказом
+        sqlx::query(
+            "UPDATE catalog_barcodes SET store_id = 1, order_id = NULL WHERE barcode = 'A1'",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let order2 = place_order_with(&db, &f, None, Some(1), 1.0).await;
+        let (sh2, line2) = parts(&db, order2).await;
+        choose_codes(&db, sh2, line2, &["A1"]).await;
+        assert!(ship(&db, sh2, true, &[]).await.unwrap());
+        assert_eq!(code_state(&db, "A1").await, (None, Some(order2)));
+        // Снятие «Отгружено» с первого заказа не должно забрать единицу у второго
+        assert!(ship(&db, sh1, false, &[]).await.unwrap());
+        assert_eq!(code_state(&db, "A1").await, (None, Some(order2)));
+    }
+
+    #[sqlx::test]
     async fn ordinary_ship_unchanged(db: PgPool) {
         let f = setup(&db, true).await;
         let order = place_order_with(&db, &f, None, Some(1), 2.0).await;

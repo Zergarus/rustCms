@@ -231,6 +231,8 @@ pub(super) async fn apply_document(
     }
 
     let mut seen: Vec<&str> = Vec::new();
+    // Коды поштучных товаров, уже встретившиеся в документе: код -> товар
+    let mut seen_owner: HashMap<&str, i64> = HashMap::new();
     let mut plan: Vec<(i64, &str, Action)> = Vec::new();
     for line in lines {
         let Some(id) = line.item_id else { continue };
@@ -248,7 +250,9 @@ pub(super) async fn apply_document(
                         .bind(code)
                         .fetch_optional(&mut *tx)
                         .await?;
-                let owner = owner.or(claimed.get(code).copied());
+                let owner = owner
+                    .or(claimed.get(code).copied())
+                    .or(seen_owner.get(code).copied());
                 match owner {
                     Some(o) if o != id => errors.push(bound_msg(code, id, o)),
                     Some(_) => {}
@@ -264,6 +268,12 @@ pub(super) async fn apply_document(
             continue;
         };
         for code in codes {
+            if let Some(&other) = claimed.get(code)
+                && other != id
+            {
+                errors.push(bound_msg(code, id, other));
+                continue;
+            }
             if seen.contains(&code) {
                 errors.push(format!(
                     "Штрихкод {code}, введенный для товара {}, уже существует.",
@@ -272,6 +282,7 @@ pub(super) async fn apply_document(
                 continue;
             }
             seen.push(code);
+            seen_owner.insert(code, id);
             let row: Option<(i64, Option<i64>)> =
                 sqlx::query_as("SELECT item_id, store_id FROM catalog_barcodes WHERE barcode = $1")
                     .bind(code)
@@ -512,7 +523,8 @@ pub(super) async fn ship_back(tx: &mut PgConnection, shipment_id: i64) -> sqlx::
     sqlx::query(
         "UPDATE catalog_barcodes b SET store_id = sb.store_id, order_id = NULL, updated_at = now()
          FROM shipment_item_barcodes sb
-         WHERE sb.shipment_id = $1 AND b.barcode = sb.barcode AND b.order_id IS NOT NULL",
+         WHERE sb.shipment_id = $1 AND b.barcode = sb.barcode
+           AND b.order_id = (SELECT order_id FROM shipments WHERE id = $1)",
     )
     .bind(shipment_id)
     .execute(tx)

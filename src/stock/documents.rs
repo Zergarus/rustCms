@@ -1500,6 +1500,59 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn same_code_ordinary_and_multi_rejected(db: PgPool) {
+        let item = setup(&db).await;
+        make_multi(&db, item).await;
+        let other: i64 = sqlx::query_scalar(
+            "INSERT INTO collection_items (collection_id, code, name)
+             SELECT collection_id, 'drugoy', 'Другой' FROM collection_items WHERE id = $1
+             RETURNING id",
+        )
+        .bind(item)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        // Сначала обычный товар, потом поштучный
+        let id = create_doc(
+            &db,
+            &input(
+                "A",
+                vec![
+                    lnb(other, None, Some(1), &["X"]),
+                    lnb(item, None, Some(1), &["X"]),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(
+            rejected(run(&db, id, false, None).await),
+            [format!(
+                "Штрихкод X товара #{item} (Товар) привязан к товару {other}"
+            )]
+        );
+        // Сначала поштучный, потом обычный
+        let id = create_doc(
+            &db,
+            &input(
+                "A",
+                vec![
+                    lnb(item, None, Some(1), &["X"]),
+                    lnb(other, None, Some(1), &["X"]),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(
+            rejected(run(&db, id, false, None).await),
+            [format!(
+                "Штрихкод X товара #{other} (Другой) привязан к товару {item}"
+            )]
+        );
+        assert!(codes_of(&db, item).await.is_empty());
+        assert!(codes_of(&db, other).await.is_empty());
+    }
+
+    #[sqlx::test]
     async fn duplicate_barcode_in_document_rejected(db: PgPool) {
         let item = setup(&db).await;
         make_multi(&db, item).await;
