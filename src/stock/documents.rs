@@ -184,7 +184,10 @@ async fn next_number(tx: &mut PgConnection, doc_type: DocType) -> sqlx::Result<i
     Ok(value.parse().unwrap_or(0))
 }
 
-async fn currency_or_site(tx: &mut PgConnection, currency: &str) -> sqlx::Result<String> {
+pub(super) async fn currency_or_site(
+    tx: &mut PgConnection,
+    currency: &str,
+) -> sqlx::Result<String> {
     if currency.is_empty() {
         crate::currency::site_currency(tx).await
     } else {

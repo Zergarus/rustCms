@@ -672,7 +672,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod db_tests {
+pub(crate) mod db_tests {
     use super::*;
     use crate::stock::documents::{self, DocInput};
     use crate::stock::{set_store_control, settings, ship};
@@ -681,7 +681,7 @@ mod db_tests {
 
     /// Учёт включён, склад 2, поставщик 1, позиция фикстуры убрана; метод — если задан.
     /// Товар фикстуры: на складе 1 — 5 шт. без партий (как остаток, заведённый мимо документов).
-    async fn setup(db: &PgPool, method: Option<Method>) -> Fixture {
+    pub(crate) async fn setup(db: &PgPool, method: Option<Method>) -> Fixture {
         let f = order_fixture(db).await;
         for sql in [
             "INSERT INTO catalog_stores (id, name) VALUES (2, 'Склад 2')",
@@ -703,7 +703,13 @@ mod db_tests {
         f
     }
 
-    fn line(item: i64, from: Option<i64>, to: Option<i64>, amount: f64, price: f64) -> Line {
+    pub(crate) fn line(
+        item: i64,
+        from: Option<i64>,
+        to: Option<i64>,
+        amount: f64,
+        price: f64,
+    ) -> Line {
         Line {
             row_id: 0,
             item_id: Some(item),
@@ -717,7 +723,7 @@ mod db_tests {
     }
 
     /// Создаёт и проводит документ.
-    async fn doc(db: &PgPool, doc_type: &str, currency: &str, lines: Vec<Line>) -> i64 {
+    pub(crate) async fn doc(db: &PgPool, doc_type: &str, currency: &str, lines: Vec<Line>) -> i64 {
         let input = DocInput {
             doc_type: doc_type.into(),
             contractor_id: Some(1),
@@ -732,7 +738,13 @@ mod db_tests {
         id
     }
 
-    async fn arrival(db: &PgPool, item: i64, store: i64, amount: f64, price: f64) -> i64 {
+    pub(crate) async fn arrival(
+        db: &PgPool,
+        item: i64,
+        store: i64,
+        amount: f64,
+        price: f64,
+    ) -> i64 {
         doc(
             db,
             "A",
@@ -749,7 +761,7 @@ mod db_tests {
     }
 
     /// Заказ на `quantity` со склада 1; возвращает основную отгрузку.
-    async fn order(db: &PgPool, f: &Fixture, quantity: f64) -> i64 {
+    pub(crate) async fn order(db: &PgPool, f: &Fixture, quantity: f64) -> i64 {
         let order = place_order_with(db, f, None, Some(1), quantity).await;
         sqlx::query_scalar("SELECT min(id) FROM shipments WHERE order_id = $1")
             .bind(order)
@@ -758,7 +770,7 @@ mod db_tests {
             .unwrap()
     }
 
-    async fn set_shipped(db: &PgPool, shipment: i64, on: bool) {
+    pub(crate) async fn set_shipped(db: &PgPool, shipment: i64, on: bool) {
         let mut tx = db.begin().await.unwrap();
         assert!(
             ship::set_deducted(&mut tx, shipment, on, &[], None)
@@ -769,7 +781,7 @@ mod db_tests {
     }
 
     /// Партии товара: `(склад, остаток, цена, валюта)` по `id`.
-    async fn batches(db: &PgPool, item: i64) -> Vec<(i64, f64, f64, String)> {
+    pub(crate) async fn batches(db: &PgPool, item: i64) -> Vec<(i64, f64, f64, String)> {
         sqlx::query_as(
             "SELECT store_id, available::float8, price::float8, currency
              FROM catalog_store_batches WHERE item_id = $1 ORDER BY id",
@@ -780,12 +792,12 @@ mod db_tests {
         .unwrap()
     }
 
-    fn b(store: i64, available: f64, price: f64) -> (i64, f64, f64, String) {
+    pub(crate) fn b(store: i64, available: f64, price: f64) -> (i64, f64, f64, String) {
         (store, available, price, "RUB".into())
     }
 
     /// Движения отгрузки: `(количество, цена)` по `id`.
-    async fn ship_moves(db: &PgPool, shipment: i64) -> Vec<(f64, f64)> {
+    pub(crate) async fn ship_moves(db: &PgPool, shipment: i64) -> Vec<(f64, f64)> {
         sqlx::query_as(
             "SELECT m.amount::float8, m.price::float8
              FROM store_batch_moves m JOIN shipment_item_stores s ON s.id = m.shipment_store_id
@@ -798,7 +810,7 @@ mod db_tests {
     }
 
     /// Движения строк документа: `(количество, цена)` по `id`.
-    async fn doc_moves(db: &PgPool, doc: i64) -> Vec<(f64, f64)> {
+    pub(crate) async fn doc_moves(db: &PgPool, doc: i64) -> Vec<(f64, f64)> {
         sqlx::query_as(
             "SELECT m.amount::float8, m.price::float8
              FROM store_batch_moves m JOIN store_document_items i ON i.id = m.doc_item_id
@@ -810,7 +822,7 @@ mod db_tests {
         .unwrap()
     }
 
-    async fn count(db: &PgPool, table: &str) -> i64 {
+    pub(crate) async fn count(db: &PgPool, table: &str) -> i64 {
         sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
             .fetch_one(db)
             .await
