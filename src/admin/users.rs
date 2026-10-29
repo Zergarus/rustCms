@@ -232,6 +232,9 @@ impl KeyForm {
                 scopes.push(s.clone());
             }
         }
+        if name.chars().count() > 100 {
+            return Err("Название ключа: не длиннее 100 символов".into());
+        }
         if scopes.is_empty() {
             return Err("Выберите хотя бы один scope".into());
         }
@@ -294,6 +297,15 @@ pub async fn issue_key(
         .into_response())
 }
 
+/// GET на адреса POST-форм (reload, «Назад») — обратно в карточку.
+pub async fn keys_redirect(Path(id): Path<i64>) -> Redirect {
+    Redirect::to(&format!("/admin/users/{id}"))
+}
+
+pub async fn revoke_redirect(Path((id, _)): Path<(i64, i64)>) -> Redirect {
+    Redirect::to(&format!("/admin/users/{id}"))
+}
+
 #[derive(Default, Deserialize)]
 pub struct RevokeForm {
     /// Второй шаг отзыва.
@@ -309,7 +321,9 @@ pub async fn revoke_key(
 ) -> AppResult<Response> {
     let target = key_target(&state, &user, id).await?;
     if form.confirm == "1" {
-        apikeys::revoke(&state.db, id, key_id).await?;
+        if !apikeys::revoke(&state.db, id, key_id).await? {
+            return Err(AppError::NotFound);
+        }
         return Ok(Redirect::to(&format!("/admin/users/{id}")).into_response());
     }
     let key: KeyRow = apikeys::list(&state.db, id)
@@ -583,5 +597,88 @@ mod tests {
         let admin = admin_cookie(&db).await;
         let (_, page) = get(&app, &format!("/admin/users/{uid}"), &admin).await;
         assert!(page.contains("API-ключи"));
+    }
+
+    #[sqlx::test]
+    async fn issued_key_not_cached_in_history(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (uid, _) = user_cookie(&db, "worker", false).await;
+        let (_, _, html) = post_form_raw(
+            &app,
+            &format!("/admin/users/{uid}/api-keys"),
+            &cookie,
+            "name=K&scopes=stock.read",
+        )
+        .await;
+        let at = html.find("id=\"new-key\"").expect("ключ на странице");
+        let block_start = html[..at].rfind("<div").unwrap();
+        assert!(
+            html[block_start..at].contains("hx-history=\"false\""),
+            "блок с ключом без hx-history"
+        );
+        assert!(html.contains(&format!(
+            "action=\"/admin/users/{uid}/api-keys\" hx-push-url=\"false\""
+        )));
+        assert!(html.contains("/revoke\" hx-push-url=\"false\""));
+        // GET на служебные адреса — редирект на карточку
+        let (s, h, _) =
+            crate::test_support::get_raw(&app, &format!("/admin/users/{uid}/api-keys"), &cookie)
+                .await;
+        assert_eq!(s, 303);
+        assert_eq!(h["location"], format!("/admin/users/{uid}").as_str());
+        let (s, _, _) = crate::test_support::get_raw(
+            &app,
+            &format!("/admin/users/{uid}/api-keys/1/revoke"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(s, 303);
+    }
+
+    #[sqlx::test]
+    async fn revoke_foreign_key_noop(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (a, _) = user_cookie(&db, "usera", false).await;
+        let (b, _) = user_cookie(&db, "userb", false).await;
+        post_form_raw(
+            &app,
+            &format!("/admin/users/{b}/api-keys"),
+            &cookie,
+            "name=K&scopes=stock.read",
+        )
+        .await;
+        let kid = crate::apikeys::list(&db, b).await.unwrap()[0].id;
+        let (s, _, _) = post_form_raw(
+            &app,
+            &format!("/admin/users/{a}/api-keys/{kid}/revoke"),
+            &cookie,
+            "confirm=1",
+        )
+        .await;
+        assert_eq!(s, 404);
+        assert!(
+            crate::apikeys::list(&db, b).await.unwrap()[0]
+                .revoked_at
+                .is_none()
+        );
+    }
+
+    #[sqlx::test]
+    async fn long_key_name_rejected(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (uid, _) = user_cookie(&db, "worker", false).await;
+        let body = format!("name={}&scopes=stock.read", "a".repeat(101));
+        let (_, _, html) = post_form_raw(
+            &app,
+            &format!("/admin/users/{uid}/api-keys"),
+            &cookie,
+            &body,
+        )
+        .await;
+        assert!(html.contains("class=\"alert\""));
+        assert!(crate::apikeys::list(&db, uid).await.unwrap().is_empty());
     }
 }

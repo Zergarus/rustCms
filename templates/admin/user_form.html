@@ -83,7 +83,7 @@
   <p class="muted hint">Ключи для внешних систем (API склада). Действуют с правами этого пользователя.</p>
 
   {% if new_key %}
-  <div class="alert">
+  <div class="alert" hx-history="false">
     <p><strong>Сохраните ключ — потом его не показать.</strong></p>
     <p><code id="new-key">{{ new_key }}</code>
       <button class="btn" type="button" data-copy="#new-key">Копировать</button></p>
@@ -91,7 +91,7 @@
   {% endif %}
 
   {% if confirm_key %}
-  <form method="post" action="/admin/users/{{ target.id }}/api-keys/{{ confirm_key.id }}/revoke">
+  <form method="post" action="/admin/users/{{ target.id }}/api-keys/{{ confirm_key.id }}/revoke" hx-push-url="false">
     <div class="alert">Отозвать ключ «{{ confirm_key.name }}» (cms_{{ confirm_key.prefix }}_…)? Внешние системы с этим ключом потеряют доступ, действие необратимо.</div>
     <input type="hidden" name="confirm" value="1">
     <div class="form-actions"><button class="btn danger" type="submit">Отозвать</button>
@@ -114,7 +114,7 @@
         <td>
           {% if k.revoked_at %}<span class="badge">отозван</span>
           {% else %}
-          <form method="post" action="/admin/users/{{ target.id }}/api-keys/{{ k.id }}/revoke">
+          <form method="post" action="/admin/users/{{ target.id }}/api-keys/{{ k.id }}/revoke" hx-push-url="false">
             <button class="btn danger" type="submit">Отозвать</button>
           </form>
           {% endif %}
@@ -127,7 +127,7 @@
   <p class="muted">Ключей пока нет.</p>
   {% endif %}
 
-  <form method="post" action="/admin/users/{{ target.id }}/api-keys" autocomplete="off">
+  <form method="post" action="/admin/users/{{ target.id }}/api-keys" hx-push-url="false" autocomplete="off">
     <h3>Выпустить ключ</h3>
     {% if key_error %}<div class="alert">{{ key_error }}</div>{% endif %}
     <div class="grid-2">

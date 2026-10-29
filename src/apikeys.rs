@@ -36,9 +36,6 @@ pub struct KeyRow {
 }
 
 pub struct KeyOwner {
-    // читается API склада (следующие задачи подпроекта)
-    #[allow(dead_code)]
-    pub key_id: i64,
     pub user_id: i64,
     pub scopes: Vec<String>,
 }
@@ -190,11 +187,7 @@ pub async fn authenticate(
     .bind(ip)
     .execute(db)
     .await?;
-    Ok(Some(KeyOwner {
-        key_id,
-        user_id,
-        scopes,
-    }))
+    Ok(Some(KeyOwner { user_id, scopes }))
 }
 
 #[cfg(test)]
@@ -268,12 +261,12 @@ mod tests {
     #[sqlx::test]
     async fn authenticate_ok_and_wrong_secret(db: PgPool) {
         let (uid, _) = user_cookie(&db, "k3", false).await;
-        let (id, full) = issue(&db, &new_key(uid), uid).await.unwrap();
+        let (_, full) = issue(&db, &new_key(uid), uid).await.unwrap();
         let o = authenticate(&db, &full, Some("1.2.3.4"))
             .await
             .unwrap()
             .unwrap();
-        assert_eq!((o.key_id, o.user_id), (id, uid));
+        assert_eq!(o.user_id, uid);
         assert_eq!(o.scopes, vec!["stock.read".to_string()]);
         let bad = format!("{}{}", &full[..13], "x".repeat(32));
         assert!(authenticate(&db, &bad, None).await.unwrap().is_none());
