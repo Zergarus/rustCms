@@ -8,19 +8,32 @@
     <label class="check"><input type="checkbox" name="deducted" value="Y" {% if shipped %}checked{% endif %}> Отгружено</label>
   </div>
   {% if active_stores %}
-  <table>
-    <thead><tr><th>Товар</th><th>Количество</th><th>Склад отгрузки</th></tr></thead>
+  <table id="ship-lines">
+    <thead><tr><th>Товар</th><th>Количество</th><th>Склад отгрузки</th><th>Штрихкоды</th></tr></thead>
     <tbody>
     {% for i in order.items %}
       {% set chosen = ship_stores[i.id|string] if (i.id|string) in ship_stores else i.store_id %}
-      <tr>
+      <tr class="line" data-item="{{ i.product_id }}" data-amount="{{ i.quantity }}"{% if i.product_id in multi %} data-multi="1"{% endif %}>
         <td>{{ i.name }}</td>
         <td>{{ i.quantity }}</td>
         <td><select name="store_{{ i.id }}" {% if shipped %}disabled{% endif %}><option value="">—</option>{% for st in active_stores %}<option value="{{ st[0] }}" {% if chosen == st[0] %}selected{% endif %}>{{ st[1] }}</option>{% endfor %}</select></td>
+        <td>
+          {% if i.product_id in multi %}
+            {% if chosen %}
+            <textarea class="bc-text" name="barcodes_{{ i.id }}_{{ chosen }}" rows="3" {% if shipped %}readonly{% endif %}>{{ ship_barcodes[i.id|string] }}</textarea>
+            <span class="bc-count muted">{{ ship_barcode_n[i.id|string] or 0 }}/{{ i.quantity|round|int if i.quantity == i.quantity|round else i.quantity }}</span>
+            {% else %}
+            <span class="muted">выберите склад и сохраните</span>
+            {% endif %}
+          {% endif %}
+        </td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
+  {% if not shipped and multi %}
+  <label>Сканировать штрихкод<input id="ship-scan" type="text" autocomplete="off" placeholder="код и Enter"></label>
+  {% endif %}
   {% endif %}
   <div class="form-actions"><button class="btn primary" type="submit">Сохранить отгрузку</button></div>
 </form>

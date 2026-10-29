@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "rests" %}
+{% block title %}Партии товара{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/admin/shop/rests">Остатки</a> /</div>
+<h1>Партии: {{ name }}</h1>
+{% if rows %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>Склад</th><th>Дата</th><th>Документ-источник</th><th>Было</th><th>Осталось</th><th>Цена</th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.batch.store_name }}</td>
+        <td>{{ r.batch.date }}</td>
+        <td>{% if r.batch.source_doc %}<a href="/admin/shop/store-docs/{{ r.batch.source_doc }}">№ {{ r.batch.source_doc }}</a>{% else %}—{% endif %}</td>
+        <td>{{ r.batch.was }}</td>
+        <td>{{ r.batch.available }}</td>
+        <td>{{ r.batch.price }} {{ r.batch.currency }}</td>
+      </tr>
+      {% for m in r.moves %}
+      <tr class="muted">
+        <td></td>
+        <td colspan="2">{% if m.doc_id %}<a href="/admin/shop/store-docs/{{ m.doc_id }}">документ № {{ m.doc_id }}</a>{% elif m.order_id %}<a href="/admin/shop/orders/{{ m.order_id }}">заказ № {{ m.order_id }}</a>{% else %}—{% endif %}</td>
+        <td colspan="2">{{ m.amount }}</td>
+        <td>{{ m.price }}</td>
+      </tr>
+      {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card empty"><p>Партий нет.</p></div>
+{% endif %}
+{% endblock %}

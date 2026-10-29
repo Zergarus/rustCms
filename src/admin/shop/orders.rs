@@ -462,6 +462,35 @@ pub(crate) async fn card(
             .fetch_all(&state.db)
             .await?;
     let discount_total = (discounts.iter().map(|d| d.sum).sum::<f64>() * 100.0).round() / 100.0;
+    // Себестоимость и маржа — только с правом на закупочные цены
+    let show_cost = user.can(crate::access::PURCHASE_INFO);
+    let (costs, order_margin) = if show_cost {
+        line_costs(&state.db, &order).await?
+    } else {
+        (HashMap::new(), None)
+    };
+    // Поштучные позиции отгрузки: код товара → признак; коды и число штрихкодов позиции
+    let multi: Vec<i64> = sqlx::query_scalar(
+        "SELECT item_id FROM catalog_products WHERE item_id = ANY($1) AND barcode_multi",
+    )
+    .bind(order.items.iter().map(|i| i.product_id).collect::<Vec<_>>())
+    .fetch_all(&state.db)
+    .await?;
+    let ship_barcodes: HashMap<String, String> = sqlx::query_as::<_, (i64, String)>(
+        "SELECT cart_item_id, string_agg(barcode, E'\\n' ORDER BY id) FROM shipment_item_barcodes
+         WHERE shipment_id = (SELECT min(id) FROM shipments WHERE order_id = $1)
+         GROUP BY cart_item_id",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?
+    .into_iter()
+    .map(|(line, codes)| (line.to_string(), codes))
+    .collect();
+    let ship_barcode_n: HashMap<String, usize> = ship_barcodes
+        .iter()
+        .map(|(line, codes)| (line.clone(), codes.lines().count()))
+        .collect();
     let tab_items: Vec<(&str, &str, String)> = ORDER_TABS
         .iter()
         .map(|(code, label)| (*code, *label, tab_url(id, code)))
@@ -491,9 +520,47 @@ pub(crate) async fn card(
         template,
         context! { user, order, reserves, active_stores, fields, file_fields, extra, stores, statuses, person_type, error, notice,
         store_list, deliveries, pay_systems, version, onec, onec_payments, onec_shipments, discounts,
-        shipment_base, shipped, ship_stores, active_tab, tab_items, title, fragment, discount_total },
+        shipment_base, shipped, ship_stores, active_tab, tab_items, title, fragment, discount_total,
+        show_cost, costs, order_margin, multi, ship_barcodes, ship_barcode_n },
     )?
     .into_response())
+}
+
+/// Себестоимость и маржа позиций: `(позиция → показ, «Маржа заказа»)`.
+async fn line_costs(
+    db: &sqlx::PgPool,
+    order: &repo::OrderView,
+) -> AppResult<(HashMap<String, minijinja::Value>, Option<String>)> {
+    let list = stock::cost::order_costs(&mut *db.acquire().await?, order.id).await?;
+    let mut costs = HashMap::new();
+    let mut lines = Vec::new();
+    for item in &order.items {
+        let unit = list
+            .iter()
+            .find(|c| c.cart_item_id == item.id)
+            .map(|c| (c.unit_cost, c.kind.clone()));
+        lines.push((item.quantity, item.price, unit.as_ref().and_then(|u| u.0)));
+        let Some((unit_cost, kind)) = unit else {
+            continue;
+        };
+        let note = match kind {
+            stock::cost::CostKind::Actual => "",
+            stock::cost::CostKind::Estimate => "оценка",
+            stock::cost::CostKind::ByPurchasePrice => "по закупочной цене",
+        };
+        let cost = unit_cost.map(|u| round2(u).to_string());
+        let margin = unit_cost.map(|u| round2((item.price - u) * item.quantity).to_string());
+        costs.insert(item.id.to_string(), context! { cost, margin, note });
+    }
+    let order_margin = stock::cost::margin(&lines).map(|m| match m.percent {
+        Some(p) => format!("{} ({p}%)", m.sum),
+        None => m.sum.to_string(),
+    });
+    Ok((costs, order_margin))
+}
+
+fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
 }
 
 /// «Обзор»: `/admin/shop/orders/{id}`.
@@ -876,6 +943,20 @@ fn ship_stores(form: &HashMap<String, String>) -> Vec<(i64, Option<i64>)> {
     out
 }
 
+/// Штрихкоды позиций из формы отгрузки: `barcodes_<позиция>_<склад>` = коды по строкам.
+fn ship_barcodes(form: &HashMap<String, String>) -> Vec<(i64, i64, Vec<String>)> {
+    let mut out: Vec<(i64, i64, Vec<String>)> = form
+        .iter()
+        .filter_map(|(k, v)| {
+            let (line, store) = k.strip_prefix("barcodes_")?.split_once('_')?;
+            let codes = v.lines().map(|c| c.trim().to_string()).collect();
+            Some((line.parse().ok()?, store.parse().ok()?, codes))
+        })
+        .collect();
+    out.sort_unstable();
+    out
+}
+
 /// Трек-номер, разрешение доставки и «Отгружено» с выбором складов позиций.
 pub async fn save_shipment(
     State(state): State<AppState>,
@@ -899,6 +980,7 @@ pub async fn save_shipment(
     let result = async {
         // Выбор складов хранится независимо от отгрузки (шаг 1 выбора склада)
         stock::ship::choose_stores(&mut tx, shipment, &ship_stores(&form)).await?;
+        stock::barcodes::choose_barcodes(&mut tx, shipment, &ship_barcodes(&form)).await?;
         stock::ship::set_deducted(
             &mut tx,
             shipment,
@@ -1854,5 +1936,152 @@ mod tests {
         assert!(body.contains("Все разделы"), "{body}");
         assert!(body.contains("data-palette-open"), "{body}");
         assert!(!body.contains("hx-post=\"/admin/tabs\""), "{body}");
+    }
+
+    // ---- Штрихкоды отгрузки, себестоимость и маржа ----
+
+    use crate::stock::batches::{
+        Method,
+        db_tests::{arrival, setup},
+    };
+
+    async fn multi_order(db: &sqlx::PgPool, codes: &[&str], qty: f64) -> (i64, i64, i64) {
+        let f = setup(db, Some(Method::Fifo)).await;
+        sqlx::query("UPDATE catalog_products SET barcode_multi = TRUE WHERE item_id = $1")
+            .bind(f.product_id)
+            .execute(db)
+            .await
+            .unwrap();
+        for c in codes {
+            sqlx::query(
+                "INSERT INTO catalog_barcodes (item_id, barcode, store_id) VALUES ($1, $2, 1)",
+            )
+            .bind(f.product_id)
+            .bind(c)
+            .execute(db)
+            .await
+            .unwrap();
+        }
+        let order = crate::test_support::place_order_with(db, &f, None, Some(1), qty).await;
+        let line: i64 =
+            sqlx::query_scalar("SELECT id FROM cart_items WHERE order_id = $1 AND item_id = $2")
+                .bind(order)
+                .bind(f.product_id)
+                .fetch_one(db)
+                .await
+                .unwrap();
+        (f.product_id, order, line)
+    }
+
+    #[sqlx::test]
+    async fn shipment_saves_barcodes_and_ships(db: sqlx::PgPool) {
+        let (_, order, line) = multi_order(&db, &["A1", "A2"], 2.0).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (s, _, html) = crate::test_support::get_raw(
+            &app,
+            &format!("/admin/shop/orders/{order}/shipment"),
+            &cookie,
+        )
+        .await;
+        let html = String::from_utf8_lossy(&html).into_owned();
+        assert!(s.is_success());
+        assert!(
+            html.contains(&format!("name=\"barcodes_{line}_1\"")),
+            "{html}"
+        );
+        assert!(html.contains("0/2"), "{html}");
+        let (s, _, _) = crate::test_support::post_form_raw(
+            &app,
+            &format!("/admin/shop/orders/{order}/shipment"),
+            &cookie,
+            &format!("deducted=Y&store_{line}=1&barcodes_{line}_1=A1%0D%0AA2"),
+        )
+        .await;
+        assert!(s.is_redirection(), "{s}");
+        let deducted: bool =
+            sqlx::query_scalar("SELECT deducted FROM shipments WHERE order_id = $1")
+                .bind(order)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(deducted);
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM shipment_item_barcodes")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[sqlx::test]
+    async fn shipment_barcode_error_shown(db: sqlx::PgPool) {
+        let (_, order, line) = multi_order(&db, &["A1"], 2.0).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (s, _, html) = crate::test_support::post_form_raw(
+            &app,
+            &format!("/admin/shop/orders/{order}/shipment"),
+            &cookie,
+            &format!("deducted=Y&store_{line}=1&barcodes_{line}_1=A1%0AZZ%3Cb%3E"),
+        )
+        .await;
+        assert!(s.is_success(), "{s}");
+        assert!(html.contains("не найден штрихкод"), "{html}");
+        assert!(html.contains("ZZ&lt;b&gt;"), "{html}");
+        assert!(!html.contains("ZZ<b>"), "{html}");
+        let deducted: bool =
+            sqlx::query_scalar("SELECT deducted FROM shipments WHERE order_id = $1")
+                .bind(order)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(!deducted);
+    }
+
+    async fn costed_order(db: &sqlx::PgPool) -> i64 {
+        let f = setup(db, Some(Method::Fifo)).await;
+        arrival(db, f.product_id, 1, 5.0, 60.0).await;
+        crate::test_support::place_order_with(db, &f, None, Some(1), 2.0).await
+    }
+
+    #[sqlx::test]
+    async fn order_items_show_cost_and_margin(db: sqlx::PgPool) {
+        let order = costed_order(&db).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (_, _, html) = crate::test_support::get_raw(
+            &app,
+            &format!("/admin/shop/orders/{order}/items"),
+            &cookie,
+        )
+        .await;
+        let html = String::from_utf8_lossy(&html).into_owned();
+        for want in [
+            "Себестоимость",
+            "Маржа",
+            "оценка",
+            "60",
+            "Маржа заказа: 80 (40%)",
+        ] {
+            assert!(html.contains(want), "{want}: {html}");
+        }
+    }
+
+    #[sqlx::test]
+    async fn order_cost_hidden_without_right(db: sqlx::PgPool) {
+        let order = costed_order(&db).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = permitted_cookie(&db, "mgr", &["orders.manage"]).await;
+        let (s, _, html) = crate::test_support::get_raw(
+            &app,
+            &format!("/admin/shop/orders/{order}/items"),
+            &cookie,
+        )
+        .await;
+        let html = String::from_utf8_lossy(&html).into_owned();
+        assert!(s.is_success());
+        for no in ["Себестоимость", "Маржа", "оценка"] {
+            assert!(!html.contains(no), "{no}: {html}");
+        }
     }
 }

@@ -4,7 +4,7 @@
   <input type="hidden" name="version" value="{{ version }}">
   <fieldset {% if shipped %}disabled{% endif %} style="border:0;padding:0;margin:0;min-width:0">
   <table>
-    <thead><tr><th>Товар</th><th>Склад</th><th>Кол-во</th><th>Цена</th><th>Сумма</th><th>Удалить</th></tr></thead>
+    <thead><tr><th>Товар</th><th>Склад</th><th>Кол-во</th><th>Цена</th><th>Сумма</th>{% if show_cost %}<th>Себестоимость</th><th>Маржа</th>{% endif %}<th>Удалить</th></tr></thead>
     <tbody>
       {% for i in order.items %}
       <tr>
@@ -13,6 +13,10 @@
         <td><input name="item_{{ i.id }}_quantity" value="{{ i.quantity }}" inputmode="decimal" size="5"></td>
         <td><input name="item_{{ i.id }}_price" value="{{ i.price }}" inputmode="decimal" size="8">{% if i.discount_price %}<br><span class="muted">без скидки {{ i.base_price }}</span>{% endif %}</td>
         <td>{{ (i.price * i.quantity)|round(2) }}</td>
+        {% if show_cost %}{% set c = costs[i.id|string] %}
+        <td>{% if c and c.cost is not none %}{{ c.cost }}{% if c.note %} <span class="muted">{{ c.note }}</span>{% endif %}{% else %}—{% endif %}</td>
+        <td>{% if c and c.margin is not none %}{{ c.margin }}{% else %}—{% endif %}</td>
+        {% endif %}
         <td><input type="checkbox" name="item_{{ i.id }}_remove"></td>
       </tr>
       {% endfor %}
@@ -24,9 +28,9 @@
       </tr>
     </tbody>
     <tfoot>
-      <tr><td colspan="4">Товары</td><td colspan="2">{{ order.goods_price }} {{ order.currency }}</td></tr>
-      <tr><td colspan="4">Доставка</td><td colspan="2">{{ order.delivery_price }} {{ order.currency }}</td></tr>
-      <tr><td colspan="4"><b>Итого</b></td><td colspan="2"><b>{{ order.price }} {{ order.currency }}</b></td></tr>
+      <tr><td colspan="4">Товары</td><td colspan="{{ 4 if show_cost else 2 }}">{{ order.goods_price }} {{ order.currency }}</td></tr>
+      <tr><td colspan="4">Доставка</td><td colspan="{{ 4 if show_cost else 2 }}">{{ order.delivery_price }} {{ order.currency }}</td></tr>
+      <tr><td colspan="4"><b>Итого</b></td><td colspan="{{ 4 if show_cost else 2 }}"><b>{{ order.price }} {{ order.currency }}</b></td></tr>
     </tfoot>
   </table>
   <div class="grid-3">

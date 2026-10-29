@@ -7,6 +7,7 @@
   {% call ui.prop("Товары") %}{{ order.goods_price }} {{ order.currency }}{% endcall %}
   {% call ui.prop("Скидка") %}{% if discount_total %}{{ discount_total }} {{ order.currency }}{% else %}—{% endif %}{% endcall %}
   {% call ui.prop("Доставка") %}{{ order.delivery_price }} {{ order.currency }}{% endcall %}
+  {% if show_cost and order_margin %}<div class="prop"><div class="prop-val">Маржа заказа: {{ order_margin }}</div></div>{% endif %}
 </section>
 <section class="card">
   {% call ui.prop("Статус") %}{{ order.status_name or order.status }}{% if order.canceled %} <span class="badge">отменён</span>{% endif %}{% endcall %}

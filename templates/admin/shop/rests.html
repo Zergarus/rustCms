@@ -24,7 +24,7 @@
 {% if items %}
 <div class="card table-wrap">
   <table>
-    <thead><tr><th>Товар</th><th>Склад</th><th>Остаток</th><th>Резерв</th><th>Доступно</th></tr></thead>
+    <thead><tr><th>Товар</th><th>Склад</th><th>Остаток</th><th>Резерв</th><th>Доступно</th>{% if show_value %}<th>Стоимость</th>{% endif %}</tr></thead>
     <tbody>
       {% for r in items %}
       <tr>
@@ -33,9 +33,11 @@
         <td>{{ r.amount }}</td>
         <td><a href="/admin/shop/rests/{{ r.item_id }}">{{ r.reserved }}</a></td>
         <td>{{ r.available }}</td>
+        {% if show_value %}<td>{{ r.value }}{% if r.covered_note %} <span class="muted">{{ r.covered_note }}</span>{% endif %} <a href="/admin/shop/rests/{{ r.item_id }}/batches">партии</a></td>{% endif %}
       </tr>
       {% endfor %}
     </tbody>
+    {% if show_value %}<tfoot><tr><td colspan="5">Итого по фильтру</td><td>{{ value_total }}</td></tr></tfoot>{% endif %}
   </table>
 </div>
 {% if pages > 1 %}

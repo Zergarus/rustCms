@@ -93,6 +93,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         )
         .route("/shop/rests", get(shop::rests::list))
         .route("/shop/rests/{item_id}", get(shop::rests::reserves))
+        .route("/shop/rests/{item_id}/batches", get(shop::rests::batches))
         .route("/shop/locations", get(shop::locations))
         .route(
             "/shop/store-docs",

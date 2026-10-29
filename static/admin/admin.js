@@ -329,7 +329,7 @@
     var out = $('.bc-count', row);
     if (!area || !out) return;
     var n = bcLines(area.value).length;
-    var m = amount ? parseFloat(String(amount.value).replace(',', '.')) : NaN;
+    var m = amount ? parseFloat(String(amount.value).replace(',', '.')) : parseFloat(row.dataset.amount);
     out.textContent = n + '/' + (isNaN(m) ? 0 : m);
     out.classList.toggle('bc-bad', row.dataset.multi === '1' && n !== m);
   }
@@ -346,9 +346,40 @@
     if (area) area.hidden = !area.hidden;
   });
 
+  // Отгрузка заказа: найденный код только добавляется в поле позиции, количество не меняется
+  function bcScanShip(input, code) {
+    fetch('/admin/shop/store-docs/scan?code=' + encodeURIComponent(code), { credentials: 'same-origin' })
+      .then(function (r) {
+        if (r.status === 404) { toast('Штрихкод не найден', 'error'); return null; }
+        if (!r.ok) throw new Error(String(r.status));
+        return r.json();
+      })
+      .then(function (hit) {
+        if (!hit) return;
+        if (!hit.multi) { toast('Товар не поштучный', 'error'); return; }
+        var rows = $$('#ship-lines tr.line').filter(function (tr) {
+          return tr.dataset.item === String(hit.item_id) && $('textarea.bc-text', tr);
+        });
+        // Первая позиция товара, где число кодов ещё не набрано
+        var row = rows.filter(function (tr) {
+          return bcLines($('textarea.bc-text', tr).value).length < parseFloat(tr.dataset.amount);
+        })[0] || rows[0];
+        if (!row) { toast('Для товара не выбран склад отгрузки', 'error'); return; }
+        var area = $('textarea.bc-text', row);
+        if (area.readOnly) return;
+        if (bcLines(area.value).indexOf(code) < 0) area.value = bcLines(area.value).concat(code).join('\n');
+        bcRefresh(row);
+        var form = input.closest('form');
+        if (form && dirtyForm !== form) setDirty(form);
+      })
+      .catch(function () { toast('Не удалось найти штрихкод', 'error'); })
+      .then(function () { input.value = ''; input.focus(); });
+  }
+
   function bcScan(input) {
     var code = input.value.trim();
     if (!code) return;
+    if (input.id === 'ship-scan') return bcScanShip(input, code);
     var table = $('#lines');
     var tpl = $('#line-template');
     fetch('/admin/shop/store-docs/scan?code=' + encodeURIComponent(code), { credentials: 'same-origin' })
@@ -387,7 +418,7 @@
   }
 
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' && e.target.id === 'doc-scan') {
+    if (e.key === 'Enter' && (e.target.id === 'doc-scan' || e.target.id === 'ship-scan')) {
       e.preventDefault();
       bcScan(e.target);
     }
@@ -396,7 +427,7 @@
   /* ---------- Инициализация страницы ---------- */
 
   function init() {
-    $$('#lines tr.line').forEach(bcRefresh);
+    $$('#lines tr.line, #ship-lines tr.line').forEach(bcRefresh);
     $$('#toasts .toast').forEach(armToast);
     initNav();
     if (!isDirty()) clearDirty();
