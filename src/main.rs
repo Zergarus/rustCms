@@ -24,6 +24,8 @@ mod smoke_tests;
 mod state;
 #[allow(dead_code)] // документы, резервы и отгрузка подключают модуль в следующих задачах
 mod stock;
+#[allow(dead_code)] // методы записи и ошибки 404/409/422 подключаются в следующих задачах
+mod stock_api;
 #[cfg(test)]
 mod test_support;
 mod uploads;
@@ -212,6 +214,10 @@ pub(crate) fn app(state: AppState) -> Router {
         .route("/", get(|| async { Redirect::to("/admin") }))
         .nest("/api", api::router().layer(cors_layer(&state.config)))
         .nest("/api/v1", bxapi::router().layer(cors_layer(&state.config)))
+        .nest(
+            "/api/stock/v1",
+            stock_api::router().layer(cors_layer(&state.config)),
+        )
         .nest("/admin", admin::router(state.clone()))
         .nest(
             "/upload",
@@ -245,10 +251,13 @@ async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("не удалось занять адрес {}", state.config.bind_addr))?;
     tracing::info!("CMS запущена: http://{}/admin", state.config.bind_addr);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            tokio::signal::ctrl_c().await.ok();
-        })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        tokio::signal::ctrl_c().await.ok();
+    })
+    .await?;
     Ok(())
 }
