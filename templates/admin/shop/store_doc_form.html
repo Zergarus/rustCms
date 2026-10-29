@@ -43,17 +43,22 @@
     </label>
   </div>
   {% endif %}
+  {% if not done %}
+  <label>Сканировать штрихкод<input id="doc-scan" type="text" autocomplete="off" placeholder="введите код и нажмите Enter"></label>
+  {% endif %}
   <div class="table-wrap">
     <table id="lines">
-      <thead><tr><th>Товар</th>{% if uses_source %}<th>Со склада</th>{% endif %}{% if uses_destination %}<th>На склад</th>{% endif %}<th>Количество</th><th>Закупочная цена</th><th></th></tr></thead>
+      <thead><tr><th>Товар</th>{% if uses_source %}<th>Со склада</th>{% endif %}{% if uses_destination %}<th>На склад</th>{% endif %}<th>Количество</th><th>Закупочная цена</th><th>Штрихкоды</th><th></th></tr></thead>
       <tbody>
         {% for l in lines %}
-        <tr class="line">
+        <tr class="line"{% if l.multi %} data-multi="1"{% endif %}>
           <td><input type="hidden" name="line_item[]" value="{{ l.item_id or '' }}">{{ l.item_name }} <span class="muted">#{{ l.item_id }}</span></td>
           {% if uses_source %}<td><select name="line_store_from[]"><option value="">—</option>{% for s in stores %}<option value="{{ s.id }}" {% if l.store_from == s.id %}selected{% endif %}>{{ s.name }}</option>{% endfor %}</select></td>{% else %}<input type="hidden" name="line_store_from[]" value="">{% endif %}
           {% if uses_destination %}<td><select name="line_store_to[]"><option value="">—</option>{% for s in stores %}<option value="{{ s.id }}" {% if l.store_to == s.id %}selected{% endif %}>{{ s.name }}</option>{% endfor %}</select></td>{% else %}<input type="hidden" name="line_store_to[]" value="">{% endif %}
           <td><input name="line_amount[]" value="{{ l.amount }}" size="8"></td>
           <td><input name="line_purchasing_price[]" value="{{ l.purchasing_price if l.purchasing_price is not none else '' }}" size="10"></td>
+          <td>{% if not done %}<button class="btn" type="button" data-bc-toggle>Штрихкоды <span class="bc-count"></span></button>{% else %}<span class="bc-count"></span>{% endif %}
+            <textarea class="bc-text" name="line_barcodes[]" rows="3" {% if not done %}{% if not l.barcodes %}hidden{% endif %}{% else %}readonly{% endif %}>{{ l.barcodes }}</textarea></td>
           <td>{% if not done %}<button class="btn" type="button" onclick="this.closest('tr').remove()">Убрать</button>{% endif %}</td>
         </tr>
         {% endfor %}
@@ -85,6 +90,8 @@
     {% if uses_destination %}<td><select name="line_store_to[]"><option value="">—</option>{% for s in stores %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select></td>{% else %}<input type="hidden" name="line_store_to[]" value="">{% endif %}
     <td><input name="line_amount[]" value="1" size="8"></td>
     <td><input name="line_purchasing_price[]" value="" size="10"></td>
+    <td><button class="btn" type="button" data-bc-toggle>Штрихкоды <span class="bc-count"></span></button>
+      <textarea class="bc-text" name="line_barcodes[]" rows="3" hidden></textarea></td>
     <td><button class="btn" type="button" onclick="this.closest('tr').remove()">Убрать</button></td>
   </tr>
 </template>
@@ -96,6 +103,8 @@ document.getElementById('add-line').addEventListener('click', function () {
   row.querySelector('input[name="line_item[]"]').value = pick.value;
   row.querySelector('.name').textContent = pick.options[pick.selectedIndex].text;
   document.querySelector('#lines tbody').appendChild(row);
+  var amount = row.querySelector('input[name="line_amount[]"]');
+  if (amount) amount.dispatchEvent(new Event('input', { bubbles: true }));
 });
 </script>
 {% endif %}

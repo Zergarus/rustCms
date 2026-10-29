@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% set section = "shop" %}
+{% set tab = "rests" %}
+{% block title %}Штрихкоды: {{ name }}{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/admin/items/{{ item_id }}">{{ name }}</a> /</div>
+<h1>Штрихкоды <span class="muted count">{{ rows|length }}</span></h1>
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>Штрихкод</th><th>Где</th><th>Заказ</th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr><td><code>{{ r.barcode }}</code></td><td>{{ r.store }}</td><td>{% if r.order_id %}<a href="/admin/shop/orders/{{ r.order_id }}">#{{ r.order_id }}</a>{% endif %}</td></tr>
+      {% else %}
+      <tr><td colspan="3" class="muted">Штрихкодов нет</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

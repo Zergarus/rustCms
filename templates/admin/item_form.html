@@ -168,7 +168,7 @@
         <label>Доступное количество<input name="quantity" inputmode="decimal" value="{{ form.quantity }}" placeholder="сумма остатков по складам" {% if store_control %}disabled{% endif %}></label>
         {% if store_control %}
         <small class="muted">Остатки меняются складскими документами</small>
-        <label>Закупочная цена<input value="{{ form.purchasing_price }}" placeholder="нет" readonly></label>
+        {% if can_purchase_info %}<label>Закупочная цена<input value="{{ form.purchasing_price }}" placeholder="нет" readonly></label>{% endif %}
         {% endif %}
         <span class="field-label">Остатки по складам</span>
         {% for st in catalog.stores %}
@@ -176,6 +176,17 @@
         {% endfor %}
       </div>
     </div>
+    <input type="hidden" name="barcode_form" value="1">
+    <label class="check"><input type="checkbox" name="barcode_multi" {% if form.barcode_multi %}checked{% endif %}> Поштучный учёт (уникальный штрихкод у каждой единицы)</label>
+    {% if form.barcode_multi %}
+    <div class="field">
+      <span class="field-label">Штрихкоды единиц по складам</span>
+      {% for b in barcode_stores %}<div>{{ b[0] }}: {{ b[1] }}</div>{% else %}<div class="muted">Штрихкодов единиц нет</div>{% endfor %}
+      {% if can_shop and item_id %}<a href="/admin/shop/barcodes?item={{ item_id }}">Полный список штрихкодов</a>{% endif %}
+    </div>
+    {% else %}
+    <label>Штрихкоды (по одному в строке)<textarea name="barcodes" rows="3">{{ form.barcodes }}</textarea></label>
+    {% endif %}
   </fieldset>
   {% endif %}
 

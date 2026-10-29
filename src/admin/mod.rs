@@ -100,6 +100,8 @@ pub fn router(state: AppState) -> Router<AppState> {
         )
         .route("/shop/store-docs/new", get(shop::store_docs::new_form))
         .route("/shop/store-docs/products", get(shop::store_docs::products))
+        .route("/shop/store-docs/scan", get(shop::store_docs::scan))
+        .route("/shop/barcodes", get(shop::barcodes::list))
         .route(
             "/shop/store-docs/{id}",
             get(shop::store_docs::view).post(shop::store_docs::update),

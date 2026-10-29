@@ -21,6 +21,7 @@ use crate::{
     error::{AppError, AppResult, is_unique_violation},
     files::{self, FileRecord},
     state::AppState,
+    stock::{self, StockError},
 };
 
 const PER_PAGE: i64 = 50;
@@ -385,7 +386,9 @@ async fn save_catalog_tab(
     db: &sqlx::PgPool,
     item_id: i64,
     input: &catalog::PurchaseInput,
-) -> sqlx::Result<()> {
+    barcodes: Option<&BarcodeInput>,
+    user_id: i64,
+) -> Result<(), StockError> {
     let mut tx = db.begin().await?;
     if crate::stock::settings(&mut tx).await?.store_control {
         // Строка товара заблокирована, пока читаем и возвращаем прежнее количество
@@ -402,11 +405,99 @@ async fn save_catalog_tab(
     } else {
         catalog::save_purchase_in(&mut tx, item_id, input).await?;
     }
-    tx.commit().await
+    // Штрихкоды — в той же транзакции, что и вкладка: отказ откатывает обе части
+    if let Some(b) = barcodes {
+        stock::barcodes::set_multi(&mut tx, item_id, b.multi).await?;
+        if let Some(codes) = b.common.as_ref().filter(|_| !b.multi) {
+            stock::barcodes::set_common(&mut tx, item_id, codes, Some(user_id)).await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Штрихкоды из формы: флажок поштучного учёта и общие коды (`None` — поле не отправлялось).
+struct BarcodeInput {
+    multi: bool,
+    common: Option<Vec<String>>,
+}
+
+fn barcodes_from_form(form: &FormValues) -> Option<BarcodeInput> {
+    // Скрытое поле-маркер: формы без блока штрихкодов (предложения, старые клиенты) не затрагиваются
+    form.0.contains_key("barcode_form").then(|| BarcodeInput {
+        multi: form.0.contains_key("barcode_multi"),
+        common: form.0.get("barcodes").map(|v| {
+            v.iter()
+                .flat_map(|t| t.lines())
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .map(str::to_string)
+                .collect()
+        }),
+    })
+}
+
+/// Проверка штрихкодов до записи товара: чужой код и снятие флажка при кодах на складах.
+async fn check_barcodes(
+    db: &sqlx::PgPool,
+    item_id: Option<i64>,
+    name: &str,
+    b: &BarcodeInput,
+) -> sqlx::Result<Result<(), String>> {
+    if let Some(id) = item_id
+        && !b.multi
+    {
+        let has: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM catalog_barcodes WHERE item_id = $1 AND store_id IS NOT NULL)",
+        )
+        .bind(id)
+        .fetch_one(db)
+        .await?;
+        if has {
+            return Ok(Err("У товара есть штрихкоды единиц на складах".into()));
+        }
+    }
+    if let Some(codes) = b.common.as_ref().filter(|_| !b.multi) {
+        for code in codes {
+            let other: Option<i64> = sqlx::query_scalar(
+                "SELECT item_id FROM catalog_barcodes WHERE barcode = $1 AND item_id IS DISTINCT FROM $2 LIMIT 1",
+            )
+            .bind(code)
+            .bind(item_id)
+            .fetch_optional(db)
+            .await?;
+            if other.is_some() {
+                return Ok(Err(format!(
+                    "Штрихкод {code}, введенный для товара {name}, уже существует."
+                )));
+            }
+        }
+    }
+    Ok(Ok(()))
 }
 
 /// Текущие цены, остатки и флаги товара — в поля формы.
-async fn purchase_to_form(state: &AppState, item_id: i64, form: &mut FormValues) -> AppResult<()> {
+async fn purchase_to_form(
+    state: &AppState,
+    item_id: i64,
+    form: &mut FormValues,
+    can_purchase_info: bool,
+) -> AppResult<()> {
+    let multi: Option<bool> =
+        sqlx::query_scalar("SELECT barcode_multi FROM catalog_products WHERE item_id = $1")
+            .bind(item_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if multi == Some(true) {
+        form.set("barcode_multi", "on");
+    }
+    let common: Vec<String> = stock::barcodes::list(&mut *state.db.acquire().await?, item_id)
+        .await?
+        .into_iter()
+        .filter(|b| b.store_id.is_none() && b.order_id.is_none())
+        .map(|b| b.barcode)
+        .collect();
+    form.set("barcodes", common.join("\n"));
     let flag = |v: Option<bool>| match v {
         Some(true) => "Y",
         Some(false) => "N",
@@ -480,7 +571,7 @@ async fn purchase_to_form(state: &AppState, item_id: i64, form: &mut FormValues)
         };
         form.set(&format!("amount_{store}"), amount.to_string());
     }
-    if stock.store_control {
+    if stock.store_control && can_purchase_info {
         let price: Option<(String, Option<String>)> = sqlx::query_as(
             "SELECT purchasing_price::text, purchasing_currency FROM catalog_products
              WHERE item_id = $1 AND purchasing_price IS NOT NULL",
@@ -645,12 +736,29 @@ async fn render_form(
             .as_ref()
             .is_some_and(|o| user.collection_level(o.id) >= Level::Write);
     let offer_product = product_collection.as_ref().map(|c| c.name.clone());
+    let can_purchase_info = user.can(crate::access::PURCHASE_INFO);
+    let can_shop = user.can(crate::access::SHOP_MANAGE);
+    // У поштучного товара: склад → число штрихкодов (только чтение)
+    let barcode_stores: Vec<(String, i64)> = match item_id {
+        Some(id) if catalog.is_some() => {
+            sqlx::query_as(
+                "SELECT s.name, count(*) FROM catalog_barcodes b
+                 JOIN catalog_stores s ON s.id = b.store_id
+                 WHERE b.item_id = $1 GROUP BY s.id, s.name ORDER BY s.sort, s.id",
+            )
+            .bind(id)
+            .fetch_all(&state.db)
+            .await?
+        }
+        _ => Vec::new(),
+    };
     render(
         state,
         "item_form.html",
         context! {
             user, collection, properties, item_id, error, can_write, sections, enums, files, linked,
             multi, catalog, store_control, offers_priced, offers, offers_tab, can_write_offers, offer_product, notice,
+            can_purchase_info, can_shop, barcode_stores,
             form => form.first_values(),
         },
     )
@@ -928,6 +1036,13 @@ async fn save(
         }
         None => None,
     };
+    let barcodes = purchase.as_ref().and_then(|_| barcodes_from_form(&form));
+    let mut purchase = purchase;
+    if let (Some(Ok(_)), Some(b)) = (&purchase, &barcodes)
+        && let Err(e) = check_barcodes(&state.db, item_id, form.get("name"), b).await?
+    {
+        purchase = Some(Err(e));
+    }
     let purchase_error = purchase.as_ref().and_then(|p| p.as_ref().err().cloned());
     // Поле связи с товаром проверяется отдельно (build_input не знает про «Укажите товар»)
     let sku_field = ctx.collection.sku_field_id;
@@ -968,8 +1083,33 @@ async fn save(
             };
             match saved {
                 Ok(saved_id) => {
-                    if let Some(Ok(p)) = &purchase {
-                        save_catalog_tab(&state.db, saved_id, p).await?;
+                    if let Some(Ok(p)) = &purchase
+                        && let Err(e) = save_catalog_tab(
+                            &state.db,
+                            saved_id,
+                            p,
+                            barcodes.as_ref(),
+                            user.user.id,
+                        )
+                        .await
+                    {
+                        match e {
+                            // Запись уже сохранена: форма показывает отказ и ведёт на её правку
+                            StockError::Rejected(m) => {
+                                let page = render_form(
+                                    state,
+                                    user,
+                                    ctx,
+                                    Some(saved_id),
+                                    form,
+                                    Some(m.join("; ")),
+                                    None,
+                                )
+                                .await?;
+                                return Ok(page.into_response());
+                            }
+                            StockError::Db(e) => return Err(e.into()),
+                        }
                     }
                     let url = match input.product_id {
                         // Предложение: назад в карточку товара, на вкладку предложений
@@ -1058,7 +1198,13 @@ pub async fn edit_form(
     let ctx = load_collection(&state, element.collection_id).await?;
     let mut form = element_to_form(&element, &ctx.properties);
     if ctx.catalog.is_some() {
-        purchase_to_form(&state, id, &mut form).await?;
+        purchase_to_form(
+            &state,
+            id,
+            &mut form,
+            user.can(crate::access::PURCHASE_INFO),
+        )
+        .await?;
     }
     let notice = q.generated.map(|n| {
         format!(
@@ -1327,6 +1473,147 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(price, 11.0);
+    }
+
+    mod barcode_tab {
+        use sqlx::PgPool;
+
+        use crate::{
+            smoke_tests::{get, post_multipart},
+            stock::set_store_control,
+            test_support::{admin_cookie, order_fixture, permitted_cookie, test_state},
+        };
+
+        async fn post(
+            app: &axum::Router,
+            cookie: &str,
+            id: i64,
+            extra: &[(&str, &str)],
+        ) -> (axum::http::StatusCode, String) {
+            let mut fields = vec![
+                ("name", "Товар"),
+                ("code", "tovar"),
+                ("sort", "500"),
+                ("available", "on"),
+                ("quantity_trace", "default"),
+                ("can_buy_zero", "default"),
+                ("barcode_form", "1"),
+            ];
+            fields.extend_from_slice(extra);
+            post_multipart(app, &format!("/admin/items/{id}"), cookie, &fields).await
+        }
+
+        async fn codes(db: &PgPool, id: i64) -> Vec<String> {
+            sqlx::query_scalar(
+                "SELECT barcode FROM catalog_barcodes WHERE item_id = $1 ORDER BY barcode",
+            )
+            .bind(id)
+            .fetch_all(db)
+            .await
+            .unwrap()
+        }
+
+        #[sqlx::test]
+        async fn item_saves_barcodes(db: PgPool) {
+            let f = order_fixture(&db).await;
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let (s, _) = post(
+                &app,
+                &cookie,
+                f.product_id,
+                &[("barcodes", "111\n 222 \n\n111")],
+            )
+            .await;
+            assert!(s.is_redirection(), "{s}");
+            assert_eq!(codes(&db, f.product_id).await, ["111", "222"]);
+            let (_, html) = get(&app, &format!("/admin/items/{}", f.product_id), &cookie).await;
+            assert!(html.contains("111\n222"), "{html}");
+            // поштучный учёт включается флажком
+            let (s, _) = post(&app, &cookie, f.product_id, &[("barcode_multi", "on")]).await;
+            assert!(s.is_redirection(), "{s}");
+            let multi: bool =
+                sqlx::query_scalar("SELECT barcode_multi FROM catalog_products WHERE item_id = $1")
+                    .bind(f.product_id)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert!(multi);
+            assert_eq!(codes(&db, f.product_id).await, ["111", "222"]);
+        }
+
+        #[sqlx::test]
+        async fn item_barcode_conflict_shows_error(db: PgPool) {
+            let f = order_fixture(&db).await;
+            let other: i64 = sqlx::query_scalar(
+                "INSERT INTO collection_items (collection_id, code, name)
+                 SELECT collection_id, 'drugoy', 'Другой' FROM collection_items WHERE id = $1
+                 RETURNING id",
+            )
+            .bind(f.product_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO catalog_barcodes (item_id, barcode) VALUES ($1, 'BUSY')")
+                .bind(other)
+                .execute(&db)
+                .await
+                .unwrap();
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let (s, html) = post(&app, &cookie, f.product_id, &[("barcodes", "OK1\nBUSY")]).await;
+            assert_eq!(s, axum::http::StatusCode::OK);
+            assert!(
+                html.contains("Штрихкод BUSY, введенный для товара Товар, уже существует."),
+                "{html}"
+            );
+            assert!(codes(&db, f.product_id).await.is_empty());
+        }
+
+        #[sqlx::test]
+        async fn item_purchase_price_hidden_without_right(db: PgPool) {
+            let f = order_fixture(&db).await;
+            sqlx::query(
+                "UPDATE catalog_products SET purchasing_price = 12.5, purchasing_currency = 'RUB'
+                 WHERE item_id = $1",
+            )
+            .bind(f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+            let mut tx = db.begin().await.unwrap();
+            set_store_control(&mut tx, true).await.unwrap();
+            tx.commit().await.unwrap();
+            let app = crate::app(test_state(db.clone()));
+            let url = format!("/admin/items/{}", f.product_id);
+            let cookie = permitted_cookie(&db, "editor", &["collections.manage"]).await;
+            let (_, html) = get(&app, &url, &cookie).await;
+            assert!(
+                html.contains("Остатки меняются складскими документами"),
+                "{html}"
+            );
+            assert!(
+                !html.contains("Закупочная цена") && !html.contains("12.50 RUB"),
+                "{html}"
+            );
+            let (s, _) = post(&app, &cookie, f.product_id, &[]).await;
+            assert!(s.is_redirection(), "{s}");
+            let price: f64 = sqlx::query_scalar(
+                "SELECT purchasing_price::float8 FROM catalog_products WHERE item_id = $1",
+            )
+            .bind(f.product_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            assert_eq!(price, 12.5);
+            // с правом поле видно
+            let cookie = admin_cookie(&db).await;
+            let (_, html) = get(&app, &url, &cookie).await;
+            assert!(
+                html.contains("Закупочная цена") && html.contains("12.50 RUB"),
+                "{html}"
+            );
+        }
     }
 
     mod store_control_tab {

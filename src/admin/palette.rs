@@ -168,6 +168,26 @@ pub(crate) async fn search(
         .bind(&pattern)
         .fetch_all(db)
         .await?;
+        // Ввод, похожий на штрихкод, ищет товар точным совпадением — он идёт первым
+        let mut rows = rows;
+        if crate::stock::barcodes::looks_like_barcode(&q)
+            && let Some(found) =
+                crate::stock::barcodes::find_item(&mut *db.acquire().await?, &q).await?
+        {
+            let hit: Option<(i64, String, i64)> = sqlx::query_as(
+                "SELECT id, name, collection_id FROM collection_items
+                 WHERE id = $1 AND collection_id = ANY($2)",
+            )
+            .bind(found)
+            .bind(&ids)
+            .fetch_optional(db)
+            .await?;
+            if let Some(hit) = hit {
+                rows.retain(|r| r.0 != hit.0);
+                rows.insert(0, hit);
+                rows.truncate(PER_GROUP);
+            }
+        }
         push_group(
             &mut out,
             "Записи",
@@ -386,6 +406,38 @@ mod tests {
         assert!(body.contains("Недавние"), "{body}");
         let (a, b) = (body.find("Вторая"), body.find("Первая"));
         assert!(a.is_some() && b.is_some() && a < b, "{body}");
+    }
+
+    #[sqlx::test]
+    async fn palette_barcode_first(db: PgPool) {
+        let f = order_fixture(&db).await;
+        // другая запись с кодом в названии — идёт после найденной по штрихкоду
+        let target: i64 = sqlx::query_scalar(
+            "INSERT INTO collection_items (collection_id, code, name)
+             SELECT collection_id, 'cel', 'Цель 4600000000011' FROM collection_items WHERE id = $1
+             RETURNING id",
+        )
+        .bind(f.product_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO catalog_barcodes (item_id, barcode) VALUES ($1, '4600000000011')")
+            .bind(f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (status, body) = pal(&app, &cookie, "4600000000011").await;
+        assert_eq!(status, 200);
+        let (first, second) = (
+            body.find(&format!("items&#x2f;{}\"", f.product_id)),
+            body.find(&format!("items&#x2f;{target}\"")),
+        );
+        assert!(
+            first.is_some() && second.is_some() && first < second,
+            "{body}"
+        );
     }
 
     #[sqlx::test]

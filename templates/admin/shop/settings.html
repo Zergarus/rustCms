@@ -4,6 +4,7 @@
 {% block title %}Настройки каталога{% endblock %}
 {% block content %}
 <h1>Настройки каталога</h1>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <form class="card form" method="post" action="/admin/shop/settings">
   <p class="muted">Значения по умолчанию для товаров, у которых флаг стоит «по умолчанию».</p>
   <label class="check"><input type="checkbox" name="quantity_trace" {% if quantity_trace %}checked{% endif %}> Учитывать количество (нельзя купить больше остатка)</label>
@@ -19,6 +20,29 @@
   </label>
   <label>Снимать резерв через, дней<input name="clear_period" type="number" min="0" value="{{ clear_period }}"><small>0 — не снимать</small></label>
   <label class="check"><input type="checkbox" name="deduct_on_delivery" {% if deduct_on_delivery %}checked{% endif %}> Списывать товар при разрешении доставки</label>
+  <h2>Себестоимость</h2>
+  {% if method_label %}
+  <p>Метод расчёта себестоимости: <strong>{{ method_label }}</strong></p>
+  {% else %}
+  <label>Метод расчёта себестоимости
+    <select name="cost_method">
+      <option value="">не выбран</option>
+      <option value="fifo" {% if confirm_code == "fifo" %}selected{% endif %}>FIFO</option>
+      <option value="average" {% if confirm_code == "average" %}selected{% endif %}>Средняя</option>
+    </select>
+    <small>Выбирается один раз, при включённом складском учёте</small>
+  </label>
+  {% endif %}
+  {% if rebuilding %}<p class="muted">Партии перестраиваются: {{ rebuilding[0] }} из {{ rebuilding[1] }}</p>{% endif %}
   <div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
 </form>
+{% if confirm_code %}
+<form class="card form" method="post" action="/admin/shop/settings">
+  <div class="alert">Метод выбирается один раз, сменить его потом будет нельзя. Выбранный метод: {{ confirm_label }}.</div>
+  <input type="hidden" name="cost_method" value="{{ confirm_code }}">
+  <input type="hidden" name="confirm" value="1">
+  <div class="form-actions"><button class="btn primary" type="submit">Выбрать</button>
+    <a class="btn" href="/admin/shop/settings">Отмена</a></div>
+</form>
+{% endif %}
 {% endblock %}

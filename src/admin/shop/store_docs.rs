@@ -167,6 +167,18 @@ pub struct DocForm {
     pub line_amount: Vec<String>,
     #[serde(default, rename = "line_purchasing_price[]")]
     pub line_purchasing_price: Vec<String>,
+    /// Штрихкоды строки, по одному в строке текста.
+    #[serde(default, rename = "line_barcodes[]")]
+    pub line_barcodes: Vec<String>,
+}
+
+/// Штрихкоды из текстового поля: по одному в строке, пустые отбрасываются.
+fn split_codes(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn parse_id(raw: &str) -> Option<i64> {
@@ -220,7 +232,7 @@ impl DocForm {
                     "Закупочная цена",
                 )?,
                 base_price: None,
-                barcodes: Vec::new(),
+                barcodes: split_codes(Self::cell(&self.line_barcodes, i)),
             });
         }
         Ok(DocInput {
@@ -255,12 +267,19 @@ struct DocHead {
 
 #[derive(FromRow, Serialize)]
 struct LineRow {
+    #[serde(skip)]
+    row_id: i64,
     item_id: Option<i64>,
     item_name: String,
     store_from: Option<i64>,
     store_to: Option<i64>,
     amount: f64,
     purchasing_price: Option<f64>,
+    /// Поштучный ли товар (счётчик штрихкодов красный при несовпадении с количеством).
+    multi: bool,
+    /// Штрихкоды строки через перевод строки.
+    #[sqlx(skip)]
+    barcodes: String,
 }
 
 const HEAD_SQL: &str = "SELECT doc_type::text, title, doc_number,
@@ -272,15 +291,34 @@ const HEAD_SQL: &str = "SELECT doc_type::text, title, doc_number,
 
 /// Строки документа для формы: названия товаров подтягиваются из каталога.
 async fn load_lines(state: &AppState, id: i64) -> sqlx::Result<Vec<LineRow>> {
-    sqlx::query_as(
-        "SELECT i.item_id, COALESCE(ci.name, '') AS item_name, i.store_from, i.store_to,
-                i.amount::float8 AS amount, i.purchasing_price::float8 AS purchasing_price
+    let mut rows: Vec<LineRow> = sqlx::query_as(
+        "SELECT i.id AS row_id, i.item_id, COALESCE(ci.name, '') AS item_name, i.store_from, i.store_to,
+                i.amount::float8 AS amount, i.purchasing_price::float8 AS purchasing_price,
+                COALESCE(cp.barcode_multi, FALSE) AS multi
          FROM store_document_items i LEFT JOIN collection_items ci ON ci.id = i.item_id
+         LEFT JOIN catalog_products cp ON cp.item_id = i.item_id
          WHERE i.doc_id = $1 ORDER BY i.id",
     )
     .bind(id)
     .fetch_all(&state.db)
-    .await
+    .await?;
+    let codes: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT i.id, b.barcode FROM store_document_barcodes b
+         JOIN store_document_items i ON i.id = b.doc_item_id
+         WHERE i.doc_id = $1 ORDER BY b.id",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    for row in &mut rows {
+        row.barcodes = codes
+            .iter()
+            .filter(|(r, _)| *r == row.row_id)
+            .map(|(_, c)| c.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    Ok(rows)
 }
 
 /// Строки из отправленной формы (при ошибке) с названиями товаров.
@@ -302,7 +340,19 @@ async fn form_lines(state: &AppState, form: &DocForm) -> sqlx::Result<Vec<LineRo
             }
             None => None,
         };
+        let multi: bool = match item_id {
+            Some(id) => sqlx::query_scalar(
+                "SELECT COALESCE((SELECT barcode_multi FROM catalog_products WHERE item_id = $1), FALSE)",
+            )
+            .bind(id)
+            .fetch_one(&state.db)
+            .await?,
+            None => false,
+        };
         rows.push(LineRow {
+            row_id: 0,
+            multi,
+            barcodes: split_codes(DocForm::cell(&form.line_barcodes, i)).join("\n"),
             item_id,
             item_name: item_name.unwrap_or_default(),
             store_from: parse_id(DocForm::cell(&form.line_store_from, i)),
@@ -652,6 +702,42 @@ pub async fn products(
     Ok(Html(html))
 }
 
+#[derive(Deserialize)]
+pub struct ScanQuery {
+    #[serde(default)]
+    code: String,
+}
+
+/// Товар по штрихкоду для поля «Сканировать штрихкод»: JSON или 404.
+pub async fn scan(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Query(q): Query<ScanQuery>,
+) -> AppResult<Response> {
+    require_shop(&user)?;
+    let found = stock::barcodes::find_item(&mut *state.db.acquire().await?, &q.code).await?;
+    let row: Option<(i64, String, bool)> = match found {
+        Some(id) => {
+            sqlx::query_as(
+                "SELECT ci.id, ci.name, COALESCE(cp.barcode_multi, FALSE)
+                 FROM collection_items ci LEFT JOIN catalog_products cp ON cp.item_id = ci.id
+                 WHERE ci.id = $1",
+            )
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+        }
+        None => None,
+    };
+    Ok(match row {
+        Some((item_id, name, multi)) => {
+            axum::Json(serde_json::json!({ "item_id": item_id, "name": name, "multi": multi }))
+                .into_response()
+        }
+        None => axum::http::StatusCode::NOT_FOUND.into_response(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -735,6 +821,61 @@ mod tests {
         let (_, html) = get(&app, "/admin/shop/store-docs?status=Y", &cookie).await;
         assert!(html.contains("Приходная накладная #1"), "{html}");
         assert!(!html.contains("Списание #1"), "{html}");
+    }
+
+    #[sqlx::test]
+    async fn doc_form_saves_line_barcodes(db: PgPool) {
+        let f = order_fixture(&db).await;
+        control(&db, true).await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let body = format!(
+            "{}&line_barcodes%5B%5D=A1%0D%0AA2%0A",
+            arrival_body(f.product_id, None)
+        );
+        let (s, _) = post_form(&app, "/admin/shop/store-docs", &cookie, &body).await;
+        assert!(s.is_redirection(), "{s}");
+        let doc = first_doc(&db).await;
+        let saved: Vec<String> = sqlx::query_scalar(
+            "SELECT b.barcode FROM store_document_barcodes b
+             JOIN store_document_items i ON i.id = b.doc_item_id WHERE i.doc_id = $1
+             ORDER BY b.id",
+        )
+        .bind(doc)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(saved, ["A1", "A2"]);
+        let (_, html) = get(&app, &format!("/admin/shop/store-docs/{doc}"), &cookie).await;
+        assert!(html.contains("A1\nA2"), "{html}");
+        assert!(html.contains("Сканировать штрихкод"), "{html}");
+    }
+
+    #[sqlx::test]
+    async fn doc_scan_finds_item(db: PgPool) {
+        let f = order_fixture(&db).await;
+        sqlx::query("INSERT INTO catalog_barcodes (item_id, barcode) VALUES ($1, '4600000000011')")
+            .bind(f.product_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (s, _, body) = crate::test_support::get_raw(
+            &app,
+            "/admin/shop/store-docs/scan?code=4600000000011",
+            &cookie,
+        )
+        .await;
+        assert_eq!(s, 200);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["item_id"], f.product_id);
+        assert_eq!(json["name"], "Товар");
+        assert_eq!(json["multi"], false);
+        let (s, _, _) =
+            crate::test_support::get_raw(&app, "/admin/shop/store-docs/scan?code=nope", &cookie)
+                .await;
+        assert_eq!(s, 404);
     }
 
     #[sqlx::test]

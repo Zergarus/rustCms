@@ -415,3 +415,7 @@ select[multiple] { min-height: 6em; }
 .dt-head input.dt-datetime { width: 190px; }
 .range-table td { padding: 4px 6px 4px 0; }
 .range-table input { width: 140px; }
+
+.bc-bad { color: var(--danger); font-weight: 600; }
+textarea.bc-text { display: block; min-width: 180px; margin-top: 4px; }
+textarea.bc-text[hidden] { display: none; }

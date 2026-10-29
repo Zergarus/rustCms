@@ -316,9 +316,87 @@
     }
   });
 
+  /* ---------- Штрихкоды в документе склада ---------- */
+
+  function bcLines(text) {
+    return text.split('\n').map(function (c) { return c.trim(); }).filter(Boolean);
+  }
+
+  // Счётчик «N/M»; у поштучного товара красный, пока N ≠ M
+  function bcRefresh(row) {
+    var area = $('textarea.bc-text', row);
+    var amount = $('input[name="line_amount[]"]', row);
+    var out = $('.bc-count', row);
+    if (!area || !out) return;
+    var n = bcLines(area.value).length;
+    var m = amount ? parseFloat(String(amount.value).replace(',', '.')) : NaN;
+    out.textContent = n + '/' + (isNaN(m) ? 0 : m);
+    out.classList.toggle('bc-bad', row.dataset.multi === '1' && n !== m);
+  }
+
+  document.addEventListener('input', function (e) {
+    var row = e.target.closest && e.target.closest('tr.line');
+    if (row && e.target.matches('textarea.bc-text, input[name="line_amount[]"]')) bcRefresh(row);
+  });
+
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest('[data-bc-toggle]');
+    if (!btn) return;
+    var area = $('textarea.bc-text', btn.closest('tr.line'));
+    if (area) area.hidden = !area.hidden;
+  });
+
+  function bcScan(input) {
+    var code = input.value.trim();
+    if (!code) return;
+    var table = $('#lines');
+    var tpl = $('#line-template');
+    fetch('/admin/shop/store-docs/scan?code=' + encodeURIComponent(code), { credentials: 'same-origin' })
+      .then(function (r) {
+        if (r.status === 404) { toast('Штрихкод не найден', 'error'); return null; }
+        if (!r.ok) throw new Error(String(r.status));
+        return r.json();
+      })
+      .then(function (hit) {
+        if (!hit || !table) return;
+        var row = $$('tr.line', table).filter(function (tr) {
+          var id = $('input[name="line_item[]"]', tr);
+          return id && id.value === String(hit.item_id);
+        })[0];
+        var amount;
+        if (row) {
+          amount = $('input[name="line_amount[]"]', row);
+          amount.value = (parseFloat(String(amount.value).replace(',', '.')) || 0) + 1;
+        } else {
+          if (!tpl) return;
+          row = tpl.content.firstElementChild.cloneNode(true);
+          $('input[name="line_item[]"]', row).value = hit.item_id;
+          $('.name', row).textContent = hit.name + ' (#' + hit.item_id + ')';
+          $('tbody', table).appendChild(row);
+        }
+        if (hit.multi) {
+          row.dataset.multi = '1';
+          var area = $('textarea.bc-text', row);
+          if (bcLines(area.value).indexOf(code) < 0) area.value = bcLines(area.value).concat(code).join('\n');
+        }
+        bcRefresh(row);
+        if (dirtyForm !== table.closest('form')) setDirty(table.closest('form'));
+      })
+      .catch(function () { toast('Не удалось найти штрихкод', 'error'); })
+      .then(function () { input.value = ''; input.focus(); });
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && e.target.id === 'doc-scan') {
+      e.preventDefault();
+      bcScan(e.target);
+    }
+  });
+
   /* ---------- Инициализация страницы ---------- */
 
   function init() {
+    $$('#lines tr.line').forEach(bcRefresh);
     $$('#toasts .toast').forEach(armToast);
     initNav();
     if (!isDirty()) clearDirty();
