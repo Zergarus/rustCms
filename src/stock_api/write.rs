@@ -1,4 +1,5 @@
-//! Методы записи API склада (`stock.write`): черновики документов и поставщики.
+//! Методы записи API склада: черновики документов, поставщики (`stock.write`),
+//! проведение и отмена (`stock.conduct`).
 
 use axum::{
     Json,
@@ -314,6 +315,51 @@ pub async fn delete_document(
             Err(map_stock_error(&state.db, e, "").await)
         }
     }
+}
+
+/// `POST /documents/{id}/conduct` и `/cancel`: проведение и отмена проведения.
+async fn run_conduct(
+    state: &AppState,
+    api: &ApiAccess,
+    id: i64,
+    cancel: bool,
+) -> ApiResult<Json<read::DocumentView>> {
+    api.require("stock.conduct", SHOP_MANAGE)?;
+    read::require_store_control(&state.db).await?;
+    require_exists(&state.db, id).await?;
+    let user_id = Some(api.access.user.id);
+    let mut tx = state.db.begin().await?;
+    let result = if cancel {
+        documents::cancel(&mut tx, id, user_id).await
+    } else {
+        documents::conduct(&mut tx, id, user_id).await
+    };
+    match result {
+        Ok(()) => {
+            tx.commit().await?;
+            Ok(Json(load_document(&state.db, id).await?))
+        }
+        Err(e) => {
+            tx.rollback().await?;
+            Err(map_stock_error(&state.db, e, "").await)
+        }
+    }
+}
+
+pub async fn conduct_document(
+    State(state): State<AppState>,
+    api: ApiAccess,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<read::DocumentView>> {
+    run_conduct(&state, &api, id, false).await
+}
+
+pub async fn cancel_document(
+    State(state): State<AppState>,
+    api: ApiAccess,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<read::DocumentView>> {
+    run_conduct(&state, &api, id, true).await
 }
 
 /// `POST /contractors`

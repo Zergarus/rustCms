@@ -24,7 +24,6 @@ mod smoke_tests;
 mod state;
 #[allow(dead_code)] // документы, резервы и отгрузка подключают модуль в следующих задачах
 mod stock;
-#[allow(dead_code)] // методы записи и ошибки 404/409/422 подключаются в следующих задачах
 mod stock_api;
 #[cfg(test)]
 mod test_support;

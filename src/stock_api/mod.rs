@@ -10,7 +10,7 @@ use axum::{
     Router,
     extract::{ConnectInfo, FromRequestParts, Query},
     http::{header, request::Parts},
-    routing::get,
+    routing::{get, post},
 };
 use serde::Deserialize;
 
@@ -32,6 +32,8 @@ pub fn router() -> Router<AppState> {
                 .put(write::replace_document)
                 .delete(write::delete_document),
         )
+        .route("/documents/{id}/conduct", post(write::conduct_document))
+        .route("/documents/{id}/cancel", post(write::cancel_document))
         .route(
             "/contractors",
             get(read::contractors).post(write::create_contractor),
@@ -41,7 +43,6 @@ pub fn router() -> Router<AppState> {
 
 /// Вызывающий API: ключ, его scope и права пользователя ключа.
 pub struct ApiAccess {
-    pub key_id: i64,
     pub scopes: Vec<String>,
     pub access: Access,
 }
@@ -96,7 +97,6 @@ impl FromRequestParts<AppState> for ApiAccess {
         .ok_or(ApiError::Unauthorized)?;
         let access = Access::load(&state.db, user).await?;
         Ok(ApiAccess {
-            key_id: owner.key_id,
             scopes: owner.scopes,
             access,
         })
@@ -1158,5 +1158,156 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // --- проведение и отмена ---
+
+    async fn conduct_key(db: &PgPool) -> String {
+        let key = key_for(
+            db,
+            &["shop.manage"],
+            &["stock.write", "stock.read", "stock.conduct"],
+        )
+        .await;
+        format!("Bearer {key}")
+    }
+
+    async fn contractor(db: &PgPool) -> i64 {
+        sqlx::query_scalar("INSERT INTO contractors (company) VALUES ('Поставщик') RETURNING id")
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    async fn draft_arrival(db: &PgPool, auth: &str, item: i64, contractor: Option<i64>) -> i64 {
+        let mut body = arrival(serde_json::json!({"item_id": item}));
+        if let Some(c) = contractor {
+            body["contractor_id"] = serde_json::json!(c);
+        }
+        let (status, resp) = send(db, "POST", &format!("{BASE}/documents"), auth, Some(body)).await;
+        assert_eq!(status, StatusCode::CREATED, "{resp}");
+        resp["id"].as_i64().unwrap()
+    }
+
+    #[sqlx::test]
+    async fn conduct_changes_rests_and_batches(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        let a = simple_item(&db, a, "S-1").await;
+        control_on(&db).await;
+        let mut tx = db.begin().await.unwrap();
+        assert!(
+            crate::stock::batches::set_method(&mut tx, crate::stock::batches::Method::Fifo)
+                .await
+                .unwrap()
+        );
+        tx.commit().await.unwrap();
+        let auth = conduct_key(&db).await;
+        let c = contractor(&db).await;
+        let id = draft_arrival(&db, &auth, a, Some(c)).await;
+        let (status, body) = send(
+            &db,
+            "POST",
+            &format!("{BASE}/documents/{id}/conduct"),
+            &auth,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "conducted");
+        let rest: f64 = sqlx::query_scalar(
+            "SELECT amount::float8 FROM catalog_store_amounts WHERE item_id = $1 AND store_id = 1",
+        )
+        .bind(a)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(rest, 10.0);
+        let batch: (f64, f64) = sqlx::query_as(
+            "SELECT available::float8, price::float8 FROM catalog_store_batches
+             WHERE item_id = $1 AND store_id = 1",
+        )
+        .bind(a)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(batch, (10.0, 100.0));
+    }
+
+    #[sqlx::test]
+    async fn conduct_rejected_422(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        control_on(&db).await;
+        let auth = conduct_key(&db).await;
+        let id = draft_arrival(&db, &auth, a, None).await;
+        let (status, body) = send(
+            &db,
+            "POST",
+            &format!("{BASE}/documents/{id}/conduct"),
+            &auth,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["error"], "rejected");
+        assert_eq!(body["messages"][0], "Не указан поставщик.");
+        let (status, _) = send(
+            &db,
+            "POST",
+            &format!("{BASE}/documents/999999/conduct"),
+            &auth,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    async fn cancel_ok(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        let a = simple_item(&db, a, "S-1").await;
+        control_on(&db).await;
+        let auth = conduct_key(&db).await;
+        let c = contractor(&db).await;
+        let id = draft_arrival(&db, &auth, a, Some(c)).await;
+        let url = |what: &str| format!("{BASE}/documents/{id}/{what}");
+        let (status, body) = send(&db, "POST", &url("cancel"), &auth, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["messages"][0], "Документ не проведён");
+        let (status, _) = send(&db, "POST", &url("conduct"), &auth, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = send(&db, "POST", &url("cancel"), &auth, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "draft");
+        let rest: f64 = sqlx::query_scalar(
+            "SELECT amount::float8 FROM catalog_store_amounts WHERE item_id = $1 AND store_id = 1",
+        )
+        .bind(a)
+        .fetch_optional(&db)
+        .await
+        .unwrap()
+        .unwrap_or(0.0);
+        assert_eq!(rest, 0.0);
+        let (status, _) = send(&db, "POST", &url("cancel"), &auth, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[sqlx::test]
+    async fn write_key_cannot_conduct(db: PgPool) {
+        let (a, _) = stock_fixture(&db).await;
+        control_on(&db).await;
+        let (_, auth) = write_key(&db).await;
+        let id = draft_arrival(&db, &auth, a, None).await;
+        for what in ["conduct", "cancel"] {
+            let (status, body) = send(
+                &db,
+                "POST",
+                &format!("{BASE}/documents/{id}/{what}"),
+                &auth,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert_eq!(body["message"], "Нужен scope stock.conduct");
+        }
     }
 }
