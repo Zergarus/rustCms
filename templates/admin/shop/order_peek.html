@@ -25,9 +25,10 @@
   <form method="post" action="/admin/shop/orders/{{ order.id }}/paid" hx-post="/admin/shop/orders/{{ order.id }}/paid" hx-target="#peek" hx-swap="innerHTML">
     <input type="hidden" name="value" value="{% if order.paid %}N{% else %}Y{% endif %}">
     {% call ui.prop("Оплата") %}{% if order.paid %}<span class="badge ok">оплачен</span>{% else %}не оплачен{% endif %}
-      <button class="btn" type="submit"{% if order.canceled %} disabled{% endif %}>{% if order.paid %}Не оплачен{% else %}Оплачен{% endif %}</button>{% endcall %}
+      <button class="btn" type="submit">{% if order.paid %}Не оплачен{% else %}Оплачен{% endif %}</button>{% endcall %}
   </form>
   {% call ui.prop("Отгрузка") %}{% if shipped %}<span class="badge ok">отгружен</span>{% else %}не отгружен{% endif %}{% endcall %}
   {% call ui.prop("Доставка") %}{{ order.shipment.delivery_name if order.shipment else "—" }}{% endcall %}
 {% endcall %}
-{% if row %}{% with o = row, oob = true, peeked = true %}{% include "shop/_order_row.html" %}{% endwith %}{% endif %}
+{#- <tr> вне таблицы парсер отбросит: строку для out-of-band замены htmx берёт из <template> -#}
+{% if row %}<template>{% with o = row, oob = true, peeked = true %}{% include "shop/_order_row.html" %}{% endwith %}</template>{% endif %}

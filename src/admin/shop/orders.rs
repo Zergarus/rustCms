@@ -713,18 +713,18 @@ async fn peek_panel(
             .find(|p| pick(p) && !p.value.trim().is_empty())
             .map(|p| p.value.clone())
     };
-    let buyer = prop(|p| p.is_payer)
-        .or_else(|| Some(order.user_name.clone()).filter(|n| !n.is_empty()))
-        .unwrap_or_else(|| order.user_login.clone());
     let phone = prop(|p| p.is_phone).unwrap_or_default();
     let email = prop(|p| p.is_email).unwrap_or_else(|| order.user_email.clone());
-    let row: Option<OrderRow> = if with_row {
-        let mut qb = row_query();
-        qb.push(" AND o.id = ").push_bind(id);
-        qb.build_query_as().fetch_optional(&state.db).await?
-    } else {
-        None
-    };
+    // Покупатель — по тому же правилу, что в списке (свойство-плательщик, иначе логин)
+    let mut qb = row_query();
+    qb.push(" AND o.id = ").push_bind(id);
+    let row: OrderRow = qb
+        .build_query_as()
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let buyer = row.buyer.clone();
+    let row = with_row.then_some(row);
     let html = render(
         state,
         "shop/order_peek.html",
@@ -818,27 +818,11 @@ pub async fn set_paid(
 ) -> AppResult<Response> {
     require_orders(&user)?;
     let paid = form.value == "Y";
-    if is_peek(&headers) {
-        // Из панели у отменённого заказа оплата не меняется (в карточке правило прежнее)
-        let canceled: Option<bool> =
-            sqlx::query_scalar("SELECT canceled FROM orders WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&state.db)
-                .await?;
-        let toast = match canceled {
-            None => return Err(AppError::NotFound),
-            Some(true) => ("Заказ отменён — оплата не меняется", FlashKind::Error),
-            Some(false) => {
-                if repo::set_paid(&state.db, id, paid).await? && paid {
-                    send(&state, "SALE_ORDER_PAID".into(), id);
-                }
-                ("Оплата сохранена", FlashKind::Ok)
-            }
-        };
-        return peek_panel(&state, id, Some(toast), true).await;
-    }
     if repo::set_paid(&state.db, id, paid).await? && paid {
         send(&state, "SALE_ORDER_PAID".into(), id);
+    }
+    if is_peek(&headers) {
+        return peek_panel(&state, id, Some(("Оплата сохранена", FlashKind::Ok)), true).await;
     }
     Ok(back(id, "", "Оплата сохранена"))
 }
@@ -2371,7 +2355,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(html.contains("peek-head"), "панель: {html}");
         assert!(
-            html.contains(&format!("id=\"order-row-{id}\"")),
+            html.contains(&format!("<template><tr id=\"order-row-{id}\"")),
             "строка: {html}"
         );
         assert!(html.contains("hx-swap-oob=\"true\""));
@@ -2385,16 +2369,11 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn peek_paid_on_canceled_shows_error(db: sqlx::PgPool) {
+    async fn peek_paid_returns_panel_and_row(db: sqlx::PgPool) {
         let f = order_fixture(&db).await;
         let id = place_order(&db, &f, None).await;
-        sqlx::query("UPDATE orders SET canceled = TRUE WHERE id = $1")
-            .bind(id)
-            .execute(&db)
-            .await
-            .unwrap();
         let cookie = admin_cookie(&db).await;
-        let (status, headers, html) = peek_post(
+        let (status, _, html) = peek_post(
             &app(&db),
             &format!("/admin/shop/orders/{id}/paid"),
             &cookie,
@@ -2402,15 +2381,58 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(html.contains("peek-head"), "панель с текущим состоянием");
-        let trigger = headers.get("hx-trigger").unwrap().to_str().unwrap();
-        assert!(trigger.contains("\"kind\":\"error\""), "{trigger}");
+        assert!(html.contains("peek-head"), "панель: {html}");
+        assert!(
+            html.contains(&format!("<template><tr id=\"order-row-{id}\"")),
+            "строка внутри template: {html}"
+        );
+        assert!(html.contains("hx-swap-oob=\"true\""));
+        assert!(html.contains("оплачен"));
         let paid: bool = sqlx::query_scalar("SELECT paid FROM orders WHERE id = $1")
             .bind(id)
             .fetch_one(&db)
             .await
             .unwrap();
-        assert!(!paid, "оплата не поставлена");
+        assert!(paid);
+    }
+
+    #[sqlx::test]
+    async fn peek_unknown_status_shows_error_toast(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let cookie = admin_cookie(&db).await;
+        let (status, headers, html) = peek_post(
+            &app(&db),
+            &format!("/admin/shop/orders/{id}/status"),
+            &cookie,
+            "status=ZZ",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("peek-head"));
+        let trigger = headers.get("hx-trigger").unwrap().to_str().unwrap();
+        assert!(trigger.contains("\"kind\":\"error\""), "{trigger}");
+    }
+
+    #[sqlx::test]
+    async fn order_peek_escapes_item_name(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        sqlx::query("UPDATE cart_items SET name = '<script>x</script>' WHERE order_id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let cookie = admin_cookie(&db).await;
+        let (_, html) = htmx_get(
+            &app(&db),
+            &format!("/admin/shop/orders/{id}/peek"),
+            &cookie,
+            "peek",
+        )
+        .await;
+        assert!(!html.contains("<script>x"), "{html}");
+        assert!(html.contains("&lt;script&gt;x"), "{html}");
     }
 
     #[sqlx::test]
