@@ -1318,6 +1318,173 @@ pub async fn update(
     save(&state, user, ctx, Some(id), multipart).await
 }
 
+/// Запрос из панели быстрого просмотра: HTMX с целью `#peek`.
+fn is_peek(headers: &axum::http::HeaderMap) -> bool {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    header("hx-request") == Some("true") && header("hx-target") == Some("peek")
+}
+
+#[derive(Serialize)]
+struct PeekPrice {
+    price: f64,
+    currency: String,
+    type_name: String,
+}
+
+#[derive(Serialize)]
+struct StoreStock {
+    name: String,
+    amount: f64,
+}
+
+/// Панель быстрого просмотра товара (фрагмент); `toast` — уведомление в `HX-Trigger`,
+/// `with_row` добавляет свежую строку списка out-of-band. Права проверяет вызывающий.
+async fn peek_panel(
+    state: &AppState,
+    user: &Access,
+    item: Item,
+    toast: Option<(&str, FlashKind)>,
+    with_row: bool,
+) -> AppResult<Response> {
+    let id = item.id;
+    let section = match item.section_id {
+        Some(sid) => repo::list_sections(&state.db, item.collection_id)
+            .await?
+            .into_iter()
+            .find(|s| s.id == sid)
+            .map(|s| s.name),
+        None => None,
+    };
+    let picture = match item.preview_picture_id.or(item.detail_picture_id) {
+        Some(fid) => files::get_many(&state.db, &[fid])
+            .await?
+            .into_iter()
+            .find(|f| f.is_image())
+            .map(|f| f.url()),
+        None => None,
+    };
+    let offers_priced = matches!(
+        product_type(&state.db, id).await?,
+        Some(catalog::TYPE_SKU | catalog::TYPE_EMPTY_SKU)
+    );
+    let price = catalog::load_prices(&state.db, &[id])
+        .await?
+        .remove(&id)
+        .and_then(|prices| catalog::main_price(&prices).cloned())
+        .map(|p| PeekPrice {
+            price: p.price,
+            currency: p.currency,
+            type_name: p.type_name,
+        });
+    // Остатки и доступное количество — как на вкладке «Каталог» карточки
+    let quantity: f64 =
+        sqlx::query_scalar("SELECT quantity::float8 FROM catalog_products WHERE item_id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .unwrap_or(0.0);
+    let stock = crate::stock::settings(&mut *state.db.acquire().await?).await?;
+    let hide_negative = stock.store_control && !stock.allow_negative;
+    let rows: Vec<(String, f64)> = sqlx::query_as(
+        "SELECT s.name, a.amount::float8 FROM catalog_store_amounts a
+         JOIN catalog_stores s ON s.id = a.store_id
+         WHERE a.item_id = $1 ORDER BY s.sort, s.id",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    let stores: Vec<StoreStock> = rows
+        .into_iter()
+        .map(|(name, amount)| StoreStock {
+            name,
+            amount: if hide_negative {
+                amount.max(0.0)
+            } else {
+                amount
+            },
+        })
+        .collect();
+    let can_write = user.collection_level(item.collection_id) >= Level::Write;
+    let html = render(
+        state,
+        "item_peek.html",
+        context! { item, section, picture, offers_priced, price, quantity, stores, can_write, with_row },
+    )?;
+    Ok(match toast {
+        Some((text, kind)) => (flash::toast(text, kind), html).into_response(),
+        None => html.into_response(),
+    })
+}
+
+/// Запись каталога, к которой у пользователя есть доступ `level`; иначе 404 (нет записи
+/// или коллекция не каталог) или 403.
+async fn peek_item(state: &AppState, user: &Access, id: i64, level: Level) -> AppResult<Item> {
+    let item = repo::get_item(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    user.require_collection(item.collection_id, level)?;
+    let collection = repo::get_collection(&state.db, item.collection_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !collection.is_catalog {
+        return Err(AppError::NotFound);
+    }
+    if level == Level::Write {
+        require_parent_write(user, &collection)?;
+    }
+    Ok(item)
+}
+
+/// Быстрый просмотр товара: `GET /admin/items/{id}/peek`.
+pub async fn peek(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+) -> AppResult<Response> {
+    let item = peek_item(&state, &user, id, Level::Read).await?;
+    peek_panel(&state, &user, item, None, false).await
+}
+
+#[derive(Deserialize)]
+pub struct ActiveForm {
+    /// `on` — включить, иначе выключить.
+    active: String,
+}
+
+/// Переключатель «Активен» из панели: `POST /admin/items/{id}/active`. Как и сохранение
+/// карточки, меняет только `active` и `updated_at` (других побочных эффектов у сохранения нет).
+pub async fn set_active(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+    headers: axum::http::HeaderMap,
+    axum::Form(form): axum::Form<ActiveForm>,
+) -> AppResult<Response> {
+    peek_item(&state, &user, id, Level::Write).await?;
+    let active = form.active == "on";
+    sqlx::query("UPDATE collection_items SET active = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(active)
+        .execute(&state.db)
+        .await?;
+    if !is_peek(&headers) {
+        return Ok(flash::redirect(
+            &format!("/admin/items/{id}"),
+            "Сохранено",
+            FlashKind::Ok,
+        ));
+    }
+    let item = repo::get_item(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let text = if active {
+        "Запись включена"
+    } else {
+        "Запись отключена"
+    };
+    peek_panel(&state, &user, item, Some((text, FlashKind::Ok)), true).await
+}
+
 pub async fn delete(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
@@ -2174,6 +2341,373 @@ mod tests {
             );
             assert_eq!(html.matches(&action).count(), 1, "{html}");
             assert!(!html.contains("<h2>Удаление</h2>"), "{html}");
+        }
+    }
+    mod peek {
+        use axum::http::StatusCode;
+        use sqlx::PgPool;
+
+        use crate::test_support::{admin_cookie, htmx_get, test_state, user_cookie};
+
+        struct Fx {
+            collection: i64,
+            item: i64,
+            section: i64,
+        }
+
+        /// Каталог с ценой 123.5 RUB, двумя складами и записью с именем `name`.
+        async fn fixture(db: &PgPool, name: &str, catalog: bool) -> Fx {
+            let collection: i64 = sqlx::query_scalar(
+                "INSERT INTO collections (code, name, is_catalog) VALUES ('goods', 'Товары', $1) RETURNING id",
+            )
+            .bind(catalog)
+            .fetch_one(db)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO catalog_price_types (id, code, name, is_base, sort) VALUES (1, 'BASE', 'Розница', TRUE, 100)")
+                .execute(db)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO collection_sections (collection_id, code, name) VALUES ($1, 'razdel', 'Раздел Икс')")
+                .bind(collection)
+                .execute(db)
+                .await
+                .unwrap();
+            let item: i64 = sqlx::query_scalar(
+                "INSERT INTO collection_items (collection_id, section_id, code, name, active)
+                 VALUES ($1, (SELECT id FROM collection_sections WHERE collection_id = $1), 'tovar-1', $2, TRUE)
+                 RETURNING id",
+            )
+            .bind(collection)
+            .bind(name)
+            .fetch_one(db)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO catalog_prices (item_id, price_type_id, price, currency) VALUES ($1, 1, 123.5, 'RUB')")
+                .bind(item)
+                .execute(db)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO catalog_stores (id, name) VALUES (11, 'Склад Север'), (12, 'Склад Юг')")
+                .execute(db)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO catalog_products (item_id, quantity) VALUES ($1, 7) ON CONFLICT (item_id) DO UPDATE SET quantity = 7")
+                .bind(item)
+                .execute(db)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO catalog_store_amounts (item_id, store_id, amount) VALUES ($1, 11, 3), ($1, 12, 4)")
+                .bind(item)
+                .execute(db)
+                .await
+                .unwrap();
+            let section =
+                sqlx::query_scalar("SELECT section_id FROM collection_items WHERE id = $1")
+                    .bind(item)
+                    .fetch_one(db)
+                    .await
+                    .unwrap();
+            Fx {
+                collection,
+                item,
+                section,
+            }
+        }
+
+        /// Пользователь без прав администратора с доступом `level` к коллекции.
+        async fn cookie_with(db: &PgPool, collection: i64, level: Option<&str>) -> String {
+            let (uid, cookie) = user_cookie(db, "editor", false).await;
+            let group: i64 = sqlx::query_scalar(
+                "INSERT INTO groups (code, name) VALUES ('ed', 'ed') RETURNING id",
+            )
+            .fetch_one(db)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO group_permissions (group_id, permission) VALUES ($1, 'admin.access')",
+            )
+            .bind(group)
+            .execute(db)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+                .bind(uid)
+                .bind(group)
+                .execute(db)
+                .await
+                .unwrap();
+            if let Some(level) = level {
+                sqlx::query("INSERT INTO collection_access (collection_id, group_id, level) VALUES ($1, $2, $3)")
+                    .bind(collection)
+                    .bind(group)
+                    .bind(level)
+                    .execute(db)
+                    .await
+                    .unwrap();
+            }
+            cookie
+        }
+
+        async fn post_active(
+            app: &axum::Router,
+            item: i64,
+            cookie: &str,
+            body: &str,
+            target: Option<&str>,
+        ) -> (StatusCode, axum::http::HeaderMap, String) {
+            use axum::http::header;
+            use tower::ServiceExt;
+            let mut req = axum::http::Request::post(format!("/admin/items/{item}/active"))
+                .header(header::COOKIE, cookie)
+                .header(header::HOST, "127.0.0.1:3000")
+                .header(header::ORIGIN, "http://127.0.0.1:3000")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+            if let Some(t) = target {
+                req = req.header("HX-Request", "true").header("HX-Target", t);
+            }
+            let res = app
+                .clone()
+                .oneshot(req.body(axum::body::Body::from(body.to_string())).unwrap())
+                .await
+                .unwrap();
+            let (status, headers) = (res.status(), res.headers().clone());
+            let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                headers,
+                String::from_utf8_lossy(&bytes).into_owned(),
+            )
+        }
+
+        #[sqlx::test]
+        async fn item_peek_fragment(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let fx = fixture(&db, "Дрель", true).await;
+            let (s, html) = htmx_get(
+                &app,
+                &format!("/admin/items/{}/peek", fx.item),
+                &cookie,
+                "peek",
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK);
+            assert!(html.contains("Дрель") && html.contains("tovar-1"), "{html}");
+            assert!(html.contains("Раздел Икс"), "раздел: {html}");
+            assert!(
+                html.contains("123.5") && html.contains("RUB"),
+                "цена: {html}"
+            );
+            assert!(
+                html.contains("Склад Север") && html.contains("Склад Юг"),
+                "склады: {html}"
+            );
+            assert!(html.contains("Доступное количество"), "{html}");
+            assert!(
+                html.contains("Открыть карточку")
+                    && html.contains(&format!("items&#x2f;{}\"", fx.item)),
+                "{html}"
+            );
+            assert!(!html.contains("<html"), "фрагмент");
+        }
+
+        #[sqlx::test]
+        async fn item_peek_forbidden_without_access(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let fx = fixture(&db, "Дрель", true).await;
+            let cookie = cookie_with(&db, fx.collection, None).await;
+            let (s, _) = htmx_get(
+                &app,
+                &format!("/admin/items/{}/peek", fx.item),
+                &cookie,
+                "peek",
+            )
+            .await;
+            assert_eq!(s, StatusCode::FORBIDDEN);
+            let read = cookie_with_second(&db, fx.collection).await;
+            let (s, _) = htmx_get(
+                &app,
+                &format!("/admin/items/{}/peek", fx.item),
+                &read,
+                "peek",
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK, "чтение открывает панель");
+        }
+
+        async fn cookie_with_second(db: &PgPool, collection: i64) -> String {
+            let (uid, cookie) = user_cookie(db, "reader", false).await;
+            let group: i64 = sqlx::query_scalar(
+                "INSERT INTO groups (code, name) VALUES ('rd', 'rd') RETURNING id",
+            )
+            .fetch_one(db)
+            .await
+            .unwrap();
+            for q in [
+                "INSERT INTO group_permissions (group_id, permission) VALUES ($1, 'admin.access')",
+                "INSERT INTO user_groups (group_id, user_id) VALUES ($1, $2)",
+            ] {
+                let mut query = sqlx::query(q).bind(group);
+                if q.contains("user_groups") {
+                    query = query.bind(uid);
+                }
+                query.execute(db).await.unwrap();
+            }
+            sqlx::query("INSERT INTO collection_access (collection_id, group_id, level) VALUES ($1, $2, 'read')")
+                .bind(collection)
+                .bind(group)
+                .execute(db)
+                .await
+                .unwrap();
+            cookie
+        }
+
+        #[sqlx::test]
+        async fn item_active_toggle(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let fx = fixture(&db, "Дрель", true).await;
+            let writer = cookie_with(&db, fx.collection, Some("write")).await;
+            let before: chrono::DateTime<chrono::Utc> =
+                sqlx::query_scalar("SELECT updated_at FROM collection_items WHERE id = $1")
+                    .bind(fx.item)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            let (s, headers, html) =
+                post_active(&app, fx.item, &writer, "active=off", Some("peek")).await;
+            assert_eq!(s, StatusCode::OK, "{html}");
+            let active: bool =
+                sqlx::query_scalar("SELECT active FROM collection_items WHERE id = $1")
+                    .bind(fx.item)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert!(!active);
+            let after: chrono::DateTime<chrono::Utc> =
+                sqlx::query_scalar("SELECT updated_at FROM collection_items WHERE id = $1")
+                    .bind(fx.item)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert!(after > before, "updated_at обновлён");
+            assert!(headers.contains_key("hx-trigger"), "тост");
+            assert!(
+                html.contains("Дрель") && html.contains("Открыть карточку"),
+                "панель: {html}"
+            );
+            assert!(
+                html.contains(&format!("<template><tr id=\"item-row-{}\"", fx.item)),
+                "OOB-строка в template: {html}"
+            );
+            assert!(html.contains("hx-swap-oob=\"true\""), "{html}");
+            // обратно
+            let (s, _, _) = post_active(&app, fx.item, &writer, "active=on", Some("peek")).await;
+            assert_eq!(s, StatusCode::OK);
+            let active: bool =
+                sqlx::query_scalar("SELECT active FROM collection_items WHERE id = $1")
+                    .bind(fx.item)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert!(active);
+            // только чтение — 403, значение не меняется
+            let reader = cookie_with_second(&db, fx.collection).await;
+            let (s, _, _) = post_active(&app, fx.item, &reader, "active=off", Some("peek")).await;
+            assert_eq!(s, StatusCode::FORBIDDEN);
+            let active: bool =
+                sqlx::query_scalar("SELECT active FROM collection_items WHERE id = $1")
+                    .bind(fx.item)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert!(active);
+        }
+
+        #[sqlx::test]
+        async fn item_active_without_peek_redirects(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let fx = fixture(&db, "Дрель", true).await;
+            let (s, headers, _) = post_active(&app, fx.item, &cookie, "active=off", None).await;
+            assert_eq!(s, StatusCode::SEE_OTHER);
+            assert_eq!(
+                headers.get("location").unwrap(),
+                &format!("/admin/items/{}", fx.item)
+            );
+        }
+
+        #[sqlx::test]
+        async fn no_peek_for_non_catalog_collection(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let plain = fixture(&db, "Новость", false).await;
+            let (_, list) = crate::smoke_tests::get(
+                &app,
+                &format!(
+                    "/admin/collections/{}/items?section={}",
+                    plain.collection, plain.section
+                ),
+                &cookie,
+            )
+            .await;
+            assert!(
+                list.contains("Новость") && !list.contains("data-peek"),
+                "{list}"
+            );
+            let (s, _) = htmx_get(
+                &app,
+                &format!("/admin/items/{}/peek", plain.item),
+                &cookie,
+                "peek",
+            )
+            .await;
+            assert_eq!(s, StatusCode::NOT_FOUND);
+        }
+
+        #[sqlx::test]
+        async fn catalog_list_rows_have_peek_attr(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let fx = fixture(&db, "Дрель", true).await;
+            let (_, list) = crate::smoke_tests::get(
+                &app,
+                &format!(
+                    "/admin/collections/{}/items?section={}",
+                    fx.collection, fx.section
+                ),
+                &cookie,
+            )
+            .await;
+            assert!(
+                list.contains(&format!(
+                    "<tr id=\"item-row-{0}\" data-peek=\"/admin/items/{0}/peek\"",
+                    fx.item
+                )),
+                "{list}"
+            );
+            assert!(list.contains(&format!("href=\"/admin/items/{}\"", fx.item)));
+        }
+
+        #[sqlx::test]
+        async fn item_peek_escapes_name(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let fx = fixture(&db, "<script>alert(1)</script>", true).await;
+            let (_, html) = htmx_get(
+                &app,
+                &format!("/admin/items/{}/peek", fx.item),
+                &cookie,
+                "peek",
+            )
+            .await;
+            assert!(!html.contains("<script>"), "{html}");
+            assert!(html.contains("&lt;script&gt;"), "{html}");
+            let (_, _, html) =
+                post_active(&app, fx.item, &cookie, "active=off", Some("peek")).await;
+            assert!(!html.contains("<script>"), "{html}");
         }
     }
 }

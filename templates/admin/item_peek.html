@@ -1,0 +1,32 @@
+{#- Быстрый просмотр записи каталога: панель + строка списка out-of-band (row — свежая запись) -#}
+{% import "_ui.html" as ui %}
+{% import "_peek.html" as peek %}
+{% call peek.frame(item.name, "/admin/items/" ~ item.id) %}
+  {% if picture %}<p><img src="{{ picture }}" alt="" style="max-width:100%;max-height:200px;border-radius:6px"></p>{% endif %}
+  {% call ui.prop("Название") %}<b>{{ item.name }}</b>{% endcall %}
+  {% call ui.prop("Код") %}<code>{{ item.code }}</code>{% endcall %}
+  {% call ui.prop("Раздел") %}{{ section or "—" }}{% endcall %}
+  {% if offers_priced %}
+  {% call ui.prop("Цена") %}<span class="muted">задаётся у предложений</span>{% endcall %}
+  {% else %}
+  {% call ui.prop("Цена") %}{% if price %}<b>{{ price.price }} {{ price.currency }}</b> <span class="muted">{{ price.type_name }}</span>{% else %}—{% endif %}{% endcall %}
+  <h3>Остатки</h3>
+  <ul class="peek-lines">
+    {%- for s in stores %}
+    <li><span>{{ s.name }}</span><span>{{ s.amount }}</span></li>
+    {%- else %}
+    <li class="muted">Нет записей по складам</li>
+    {%- endfor %}
+  </ul>
+  {% call ui.prop("Доступное количество") %}<b>{{ quantity }}</b>{% endcall %}
+  {% endif %}
+
+  <h3>Состояние</h3>
+  <form method="post" action="/admin/items/{{ item.id }}/active" hx-post="/admin/items/{{ item.id }}/active" hx-target="#peek" hx-swap="innerHTML">
+    <input type="hidden" name="active" value="{% if item.active %}off{% else %}on{% endif %}">
+    {% call ui.prop("Активен") %}{% if item.active %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}
+      {% if can_write %}<button class="btn" type="submit">{% if item.active %}Отключить{% else %}Включить{% endif %}</button>{% endif %}{% endcall %}
+  </form>
+{% endcall %}
+{#- <tr> вне таблицы парсер отбросит: строку для out-of-band замены htmx берёт из <template> -#}
+{% if with_row %}<template>{% with el = item, oob = true, peeked = true, peek = true %}{% include "_item_row.html" %}{% endwith %}</template>{% endif %}

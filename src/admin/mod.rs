@@ -79,6 +79,8 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/collections/{id}/items/new", get(items::new_form))
         .route("/items/{id}", get(items::edit_form).post(items::update))
         .route("/items/{id}/delete", post(items::delete))
+        .route("/items/{id}/peek", get(items::peek))
+        .route("/items/{id}/active", post(items::set_active))
         .route(
             "/items/{id}/offers/generate",
             get(sku::generate_form).post(sku::generate),
