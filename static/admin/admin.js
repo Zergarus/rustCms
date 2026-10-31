@@ -219,17 +219,19 @@
 
   /* ---------- Вкладки карточки ---------- */
 
-  // Панели лежат в том же родителе (форме), что и полоса вкладок.
-  function tabScope(nav) { return nav.closest('form') || nav.parentElement; }
+  // Карточка — контейнер [data-card]: в нём полоса вкладок, основная форма и панели вне формы.
+  function cardOf(el) { return el.closest('[data-card]') || el.parentElement; }
 
   function paneOf(nav, key) {
-    return $('section[data-tab="' + key + '"]', tabScope(nav));
+    return $('section[data-tab="' + key + '"]', cardOf(nav));
   }
 
-  // Адрес записи в строке открытых записей обновляется тем же запросом, что и при загрузке страницы.
+  // Адрес записи в строке открытых записей обновляется тем же запросом, что и при загрузке страницы;
+  // условия те же, что в base.html (страница GET, вкладки включены, не data-no-tab).
   function refreshOpenStrip() {
     var strip = $('#open-tabs');
-    if (!strip || document.body.dataset.tabs === 'off' || !window.htmx) return;
+    if (!strip || !strip.hasAttribute('data-record-page') || document.body.hasAttribute('data-no-tab') ||
+        document.body.dataset.tabs === 'off' || !window.htmx) return;
     window.htmx.ajax('POST', '/admin/tabs', {
       target: '#open-tabs',
       swap: 'innerHTML',
@@ -263,7 +265,7 @@
 
   // [ и ] — предыдущая/следующая вкладка (вызывается из общего обработчика клавиш)
   function stepTab(dir) {
-    var nav = $('[data-card-tabs]');
+    var nav = $('[data-card] [data-card-tabs]');
     if (!nav) return false;
     var btns = $$('[data-tab-btn]', nav);
     var cur = btns.findIndex(function (b) { return b.classList.contains('active'); });
@@ -274,22 +276,30 @@
     return true;
   }
 
-  // ввод в поле вкладки помечает её кнопку точкой «изменено»
+  // ввод в поле вкладки основной формы помечает её кнопку точкой «изменено»;
+  // у вкладок с собственными формами (вне data-dirty-guard) панели «Сохранить» нет — точка не нужна
   function markTabDirty(e) {
-    var pane = e.target.closest && e.target.closest('section[data-tab]');
-    if (!pane) return;
-    var nav = $('[data-card-tabs]', tabScope(pane)) || $('[data-card-tabs]', pane.parentElement);
-    var btn = nav && $('[data-tab-btn="' + pane.dataset.tab + '"] .tab-dot.dirty', nav);
-    if (btn) btn.hidden = false;
+    var t = e.target;
+    if (!t.closest || !t.closest('form[data-dirty-guard]')) return;
+    var pane = t.closest('section[data-tab]');
+    var nav = pane && $('[data-card-tabs]', cardOf(pane));
+    var dot = nav && $('[data-tab-btn="' + pane.dataset.tab + '"] .tab-dot.dirty', nav);
+    if (dot) dot.hidden = false;
   }
   document.addEventListener('input', markTabDirty);
   document.addEventListener('change', markTabDirty);
 
-  // проверка браузера упёрлась в поле скрытой вкладки — показываем её (invalid не всплывает)
+  // Проверка браузера упёрлась в поле скрытой вкладки — показываем её (invalid не всплывает).
+  // invalid приходит на каждое неверное поле до фокуса на первом, поэтому за проход проверки
+  // берём только первое событие (флаг сбрасывается следующим тиком).
+  var invalidSeen = false;
   document.addEventListener('invalid', function (e) {
+    if (invalidSeen) return;
+    invalidSeen = true;
+    window.setTimeout(function () { invalidSeen = false; }, 0);
     var pane = e.target.closest && e.target.closest('section[data-tab][hidden]');
     if (!pane) return;
-    var nav = $('[data-card-tabs]', pane.parentElement) || $('[data-card-tabs]', pane.closest('form') || document);
+    var nav = $('[data-card-tabs]', cardOf(pane));
     if (nav) showTab(nav, pane.dataset.tab, true);
   }, true);
 
@@ -359,6 +369,7 @@
     } else if (keyIs(e, 'g', 'KeyG') && !e.shiftKey) {
       gPending = window.setTimeout(function () { gPending = null; }, 1000);
     } else if ((e.code === 'BracketLeft' || e.code === 'BracketRight') && !e.shiftKey) {
+      if (e.repeat) return;
       if (stepTab(e.code === 'BracketLeft' ? -1 : 1)) e.preventDefault();
     } else if (keyIs(e, 'c', 'KeyC')) {
       var c = $('[data-hotkey=c]');

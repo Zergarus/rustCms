@@ -212,8 +212,10 @@ body[data-tabs="off"] .topbar:not(:has(.nav-toggle:not([hidden]))) { min-height:
 .tabs .tab:hover { color: var(--text); text-decoration: none; }
 .tabs .tab.active { background: var(--selected); color: var(--text); }
 /* вкладки карточки: кнопки без запросов, точки «ошибка» и «изменено» */
+.card-tabs { flex-wrap: nowrap; overflow-x: auto; }
 .card-tabs .tab { background: none; font: inherit; cursor: pointer; gap: 6px; }
 .card-tabs .tab:hover { color: var(--text); }
+.card-tabs .count { color: var(--muted); font-size: 12px; }
 .tab-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .tab-dot[hidden] { display: none; }
 .tab-dot.err { background: var(--danger); }

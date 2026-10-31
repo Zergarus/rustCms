@@ -127,22 +127,29 @@ mod tests {
         let mut e = TabErrors::new();
         e.push("text", "Ошибка <b>");
         e.push("", "Общая");
-        let tabctx = tab_context(&e, &["main", "text"], Some("main"));
+        let tabctx = tab_context(&e, &["main", "text", "keys"], Some("main"));
         let html = render(
-            r#"{% import "_ui.html" as ui %}{{ ui.card_errors(tabctx) }}{{ ui.card_tabs([("main","Основное"),("text","Описание")], tabctx) }}{% call ui.tab_pane("main", tabctx) %}A{% endcall %}{% call ui.tab_pane("text", tabctx) %}B{% endcall %}"#,
+            r#"{% import "_ui.html" as ui %}{{ ui.card_errors(tabctx) }}<div data-card>{{ ui.card_tabs([("main","Основное"),("text","Описание",0),("keys","Ключи",3)], tabctx) }}<form data-dirty-guard>{% call ui.tab_pane("main", tabctx) %}A{% endcall %}{% call ui.tab_pane("text", tabctx) %}B{% endcall %}</form>{% call ui.tab_pane("keys", tabctx) %}C{% endcall %}</div>"#,
             minijinja::context! { tabctx },
         );
         assert!(html.contains(r#"data-tab-btn="text""#), "{html}");
         assert_eq!(html.matches("tab-dot err").count(), 1, "{html}");
-        assert_eq!(html.matches("tab-dot dirty").count(), 2, "{html}");
-        // активна вкладка с ошибкой, скрыта другая панель
+        assert_eq!(html.matches("tab-dot dirty").count(), 3, "{html}");
+        // активна вкладка с ошибкой; остальные панели (и в форме, и вне её) скрыты
         assert!(
             html.contains(r#"<section data-tab="main" hidden>"#),
             "{html}"
         );
         assert!(html.contains(r#"<section data-tab="text">"#), "{html}");
+        assert!(
+            html.contains(r#"<section data-tab="keys" hidden>"#),
+            "{html}"
+        );
         assert!(html.contains("Ошибка &lt;b&gt;"), "{html}");
         assert!(html.contains("Общая"), "{html}");
         assert!(html.contains("data-card-tabs"), "{html}");
+        // счётчик только у ненулевого значения
+        assert_eq!(html.matches(r#"<span class="count">"#).count(), 1, "{html}");
+        assert!(html.contains(r#"<span class="count">3</span>"#), "{html}");
     }
 }

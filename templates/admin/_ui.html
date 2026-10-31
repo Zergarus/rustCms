@@ -93,14 +93,16 @@
 </div>
 {%- endmacro -%}
 
-{#- Вкладки карточки без запросов (переключает admin.js). items — пары (ключ, название);
-    tabctx — результат tab_context. Панели (tab_pane) должны лежать в том же родителе
-    (форме или контейнере), что и эта полоса. -#}
+{#- Вкладки карточки без запросов (переключает admin.js). items — пары (ключ, название)
+    или тройки (ключ, название, счётчик; ноль не показывается); tabctx — результат tab_context.
+    Полосу, основную форму и панели вне формы оборачивайте в один <div data-card>:
+    admin.js ищет панели через ближайший [data-card]. -#}
 {%- macro card_tabs(items, tabctx) -%}
 <nav class="tabs card-tabs" role="tablist" data-card-tabs>
   {%- for t in items %}
   <button type="button" role="tab" class="tab{% if t[0] == tabctx.active %} active{% endif %}" data-tab-btn="{{ t[0] }}" aria-selected="{% if t[0] == tabctx.active %}true{% else %}false{% endif %}">
     {{- t[1] -}}
+    {%- if t[2] %}<span class="count">{{ t[2] }}</span>{% endif -%}
     {%- if t[0] in tabctx.error_tabs %}<span class="tab-dot err" title="Есть ошибки"></span>{% endif -%}
     <span class="tab-dot dirty" title="Изменено" hidden></span>
   </button>
