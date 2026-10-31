@@ -249,6 +249,9 @@
       var pane = paneOf(nav, b.dataset.tabBtn);
       if (pane) pane.hidden = !on;
     });
+    // форма карточки возвращает на ту же вкладку после сохранения
+    var back = $('form input[name="tab"]', cardOf(nav));
+    if (back) back.value = key;
     if (!remember) return;
     var url = new URL(location.href);
     url.searchParams.set('tab', key);
@@ -539,7 +542,17 @@
 
   /* ---------- Инициализация страницы ---------- */
 
+  // Переход по якорю вкладки (например, #offers после создания предложения) открывает её
+  function openTabFromHash() {
+    var key = location.hash.slice(1);
+    var nav = key && $('[data-card] [data-card-tabs]');
+    if (!nav || new URLSearchParams(location.search).has('tab')) return;
+    var btn = $('[data-tab-btn="' + key + '"]', nav);
+    if (btn && !btn.classList.contains('active')) showTab(nav, key, false);
+  }
+
   function init() {
+    openTabFromHash();
     $$('#lines tr.line, #ship-lines tr.line').forEach(bcRefresh);
     $$('#toasts .toast').forEach(armToast);
     initNav();

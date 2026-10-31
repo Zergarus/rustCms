@@ -10,7 +10,6 @@ pub(crate) struct TabErrors {
     items: Vec<(&'static str, String)>,
 }
 
-#[allow(dead_code)] // используется карточками следующих задач
 impl TabErrors {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -24,7 +23,19 @@ impl TabErrors {
         self.items.is_empty()
     }
 
+    /// Добавляет ошибки другого набора, сохраняя их вкладки.
+    pub(crate) fn append(&mut self, other: TabErrors) {
+        self.items.extend(other.items);
+    }
+
+    /// Ошибки с их вкладками (пустой ключ — без вкладки).
+    #[cfg(test)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        self.items.iter().map(|(t, m)| (*t, m.as_str()))
+    }
+
     /// Добавляет общие ошибки (без вкладки).
+    #[allow(dead_code)] // понадобится карточкам без привязки к вкладке
     pub(crate) fn extend_general(&mut self, msgs: Vec<String>) {
         self.items.extend(msgs.into_iter().map(|m| ("", m)));
     }
@@ -33,7 +44,6 @@ impl TabErrors {
 /// Контекст вкладок для шаблона: `{ active, error_tabs, by_tab, general }`.
 /// Активна первая видимая вкладка с ошибкой, иначе запрошенная (если видима),
 /// иначе первая видимая. Ошибки невидимых вкладок и без вкладки попадают в `general`.
-#[allow(dead_code)] // используется карточками следующих задач
 pub(crate) fn tab_context(
     errors: &TabErrors,
     visible: &[&'static str],

@@ -10,7 +10,11 @@ use minijinja::context;
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 
-use super::{parse_sort, read_upload_form, render};
+use super::{
+    card::{TabErrors, tab_context},
+    flash::{self, FlashKind},
+    parse_sort, read_upload_form, render,
+};
 use crate::{
     access::{Access, Level},
     catalog::{self, PurchaseInput},
@@ -24,6 +28,8 @@ use crate::{
     stock::{self, StockError},
 };
 
+/// Вкладки карточки записи, на которые можно вернуться после сохранения.
+const CARD_TABS: [&str; 5] = ["main", "text", "fields", "catalog", "offers"];
 const PER_PAGE: i64 = 50;
 const DATETIME_FORMAT: &str = "%Y-%m-%dT%H:%M";
 /// Картинки записи — одиночные файловые поля.
@@ -93,13 +99,18 @@ impl FormValues {
     }
 }
 
-fn parse_optional_id(raw: &str, what: &str, errors: &mut Vec<String>) -> Option<i64> {
+fn parse_optional_id(
+    raw: &str,
+    what: &str,
+    tab: &'static str,
+    errors: &mut TabErrors,
+) -> Option<i64> {
     match raw {
         "" => None,
         raw => match raw.parse::<i64>() {
             Ok(id) if id > 0 => Some(id),
             _ => {
-                errors.push(format!("{what}: неверный id"));
+                errors.push(tab, format!("{what}: неверный id"));
                 None
             }
         },
@@ -111,35 +122,43 @@ fn build_input(
     properties: &[Field],
     enums: &[FieldOption],
     sections: &[Section],
-) -> Result<ItemInput, String> {
+) -> Result<ItemInput, TabErrors> {
     let get = |key: &str| form.get(key);
-    let mut errors = Vec::new();
+    let mut errors = TabErrors::new();
 
     let name = get("name");
     if name.is_empty() {
-        errors.push("Укажите название".to_string());
+        errors.push("main", "Укажите название");
     }
     let code = match get("code") {
         "" => slugify(name),
         code => code.to_string(),
     };
     if !code.is_empty() && !is_valid_slug(&code) {
-        errors.push("Код: только латиница, цифры, «_» и «-»".into());
+        errors.push("main", "Код: только латиница, цифры, «_» и «-»");
     }
-    let section_id = parse_optional_id(get("section_id"), "Раздел", &mut errors);
+    let section_id = parse_optional_id(get("section_id"), "Раздел", "main", &mut errors);
     if section_id.is_some_and(|id| !sections.iter().any(|s| s.id == id)) {
-        errors.push("Раздел не найден в этой коллекции".into());
+        errors.push("main", "Раздел не найден в этой коллекции");
     }
-    let preview_picture_id =
-        parse_optional_id(get("preview_picture_id"), "Картинка анонса", &mut errors);
-    let detail_picture_id =
-        parse_optional_id(get("detail_picture_id"), "Детальная картинка", &mut errors);
+    let preview_picture_id = parse_optional_id(
+        get("preview_picture_id"),
+        "Картинка анонса",
+        "text",
+        &mut errors,
+    );
+    let detail_picture_id = parse_optional_id(
+        get("detail_picture_id"),
+        "Детальная картинка",
+        "text",
+        &mut errors,
+    );
     let published_at = match get("published_at") {
         "" => None,
         raw => match NaiveDateTime::parse_from_str(raw, DATETIME_FORMAT) {
             Ok(dt) => Some(dt.and_utc()),
             Err(_) => {
-                errors.push("Неверная дата публикации".into());
+                errors.push("main", "Неверная дата публикации");
                 None
             }
         },
@@ -157,12 +176,12 @@ fn build_input(
             Ok(value) => {
                 values.insert(prop.code.clone(), value);
             }
-            Err(e) => errors.push(e),
+            Err(e) => errors.push("fields", e),
         }
     }
 
     if !errors.is_empty() {
-        return Err(errors.join("; "));
+        return Err(errors);
     }
     Ok(ItemInput {
         section_id,
@@ -186,8 +205,8 @@ async fn check_references(
     state: &AppState,
     properties: &[Field],
     input: &ItemInput,
-) -> AppResult<Result<(), String>> {
-    let mut errors = Vec::new();
+) -> AppResult<Result<(), TabErrors>> {
+    let mut errors = TabErrors::new();
     let mut file_ids: Vec<i64> = [input.preview_picture_id, input.detail_picture_id]
         .into_iter()
         .flatten()
@@ -206,11 +225,10 @@ async fn check_references(
                     .map(i64::to_string)
                     .collect();
                 if !missing.is_empty() {
-                    errors.push(format!(
-                        "«{}»: нет записей с id {}",
-                        prop.name,
-                        missing.join(", ")
-                    ));
+                    errors.push(
+                        "fields",
+                        format!("«{}»: нет записей с id {}", prop.name, missing.join(", ")),
+                    );
                 }
             }
             "file" => file_ids.extend(ids),
@@ -219,12 +237,12 @@ async fn check_references(
     }
     let found = files::get_many(&state.db, &file_ids).await?;
     if file_ids.iter().any(|id| !found.iter().any(|f| f.id == *id)) {
-        errors.push("Часть файлов не найдена — загрузите их заново".into());
+        errors.push("fields", "Часть файлов не найдена — загрузите их заново");
     }
     Ok(if errors.is_empty() {
         Ok(())
     } else {
-        Err(errors.join("; "))
+        Err(errors)
     })
 }
 
@@ -641,14 +659,16 @@ struct FileView {
     is_image: bool,
 }
 
+#[allow(clippy::too_many_arguments)] // контекст формы, ошибки по вкладкам, уведомление и вкладка
 async fn render_form(
     state: &AppState,
     user: Access,
     ctx: CollectionContext,
     item_id: Option<i64>,
     form: FormValues,
-    error: Option<String>,
+    errors: TabErrors,
     notice: Option<String>,
+    tab: Option<&str>,
 ) -> AppResult<Html<String>> {
     let CollectionContext {
         collection,
@@ -752,11 +772,25 @@ async fn render_form(
         }
         _ => Vec::new(),
     };
+    // Вкладки: «Основное» и «Описание» всегда, остальные — по данным коллекции и записи
+    let mut card_tabs: Vec<(&'static str, &'static str, Option<usize>)> =
+        vec![("main", "Основное", None), ("text", "Описание", None)];
+    if !properties.is_empty() {
+        card_tabs.push(("fields", "Поля", None));
+    }
+    if catalog.is_some() {
+        card_tabs.push(("catalog", "Каталог", None));
+    }
+    if let Some(t) = &offers_tab {
+        card_tabs.push(("offers", "Предложения", Some(t.rows.len())));
+    }
+    let visible: Vec<&'static str> = card_tabs.iter().map(|t| t.0).collect();
+    let tabctx = tab_context(&errors, &visible, tab);
     render(
         state,
         "item_form.html",
         context! {
-            user, collection, properties, item_id, error, can_write, sections, enums, files, linked,
+            user, collection, properties, item_id, card_tabs, tabctx, can_write, sections, enums, files, linked,
             multi, catalog, store_control, offers_priced, offers, offers_tab, can_write_offers, offer_product, notice,
             can_purchase_info, can_shop, barcode_stores,
             form => form.first_values(),
@@ -982,7 +1016,7 @@ pub async fn new_form(
             .collect();
         form.0.insert(format!("prop_{}", prop.code), defaults);
     }
-    render_form(&state, user, ctx, None, form, None, None).await
+    render_form(&state, user, ctx, None, form, TabErrors::new(), None, None).await
 }
 
 /// Разбирает отправленную форму и сохраняет запись (`item_id` = None — создание).
@@ -1057,23 +1091,39 @@ async fn save(
             p
         })
         .collect();
-    let result = match build_input(&form, &parse_props, &ctx.enums, &ctx.sections) {
-        Ok(_) if purchase_error.is_some() => Err(purchase_error.clone().unwrap_or_default()),
-        Ok(input) if upload.rejected.is_empty() => {
-            match offer_link_error(state, &ctx, &input).await? {
-                Some(e) => Err(e),
-                None => match check_references(state, &ctx.properties, &input).await? {
-                    Ok(()) => Ok(input),
-                    Err(e) => Err(e),
-                },
-            }
+    // Ошибки всех вкладок собираются сразу: карточка открывается на первой из них
+    let mut errors = TabErrors::new();
+    let built = match build_input(&form, &parse_props, &ctx.enums, &ctx.sections) {
+        Ok(input) => Some(input),
+        Err(e) => {
+            errors.append(e);
+            None
         }
-        Ok(_) => Err(upload.rejected.join("; ")),
-        Err(e) if upload.rejected.is_empty() => Err(e),
-        Err(e) => Err(format!("{e}; {}", upload.rejected.join("; "))),
     };
-    let error = match result {
-        Ok(mut input) => {
+    if let Some(e) = purchase_error {
+        errors.push("catalog", e);
+    }
+    for r in &upload.rejected {
+        errors.push("fields", r.clone());
+    }
+    // Проверки с обращением к БД — только когда форма сама по себе верна
+    let result = match built {
+        Some(input) if errors.is_empty() => {
+            match offer_link_error(state, &ctx, &input).await? {
+                Some(e) => errors.push("fields", e),
+                None => {
+                    if let Err(e) = check_references(state, &ctx.properties, &input).await? {
+                        errors.append(e);
+                    }
+                }
+            }
+            errors.is_empty().then_some(input)
+        }
+        _ => None,
+    };
+    let requested_tab = Some(form.get("tab").to_string()).filter(|t| !t.is_empty());
+    let errors = match result {
+        Some(mut input) => {
             // Связь предложения с товаром хранится в колонке, а не в field_values
             input.product_id =
                 sku::take_link(&ctx.collection, &ctx.properties, &mut input.field_values);
@@ -1096,14 +1146,19 @@ async fn save(
                         match e {
                             // Запись уже сохранена: форма показывает отказ и ведёт на её правку
                             StockError::Rejected(m) => {
+                                let mut errors = TabErrors::new();
+                                for msg in m {
+                                    errors.push("catalog", msg);
+                                }
                                 let page = render_form(
                                     state,
                                     user,
                                     ctx,
                                     Some(saved_id),
                                     form,
-                                    Some(m.join("; ")),
+                                    errors,
                                     None,
+                                    requested_tab.as_deref(),
                                 )
                                 .await?;
                                 return Ok(page.into_response());
@@ -1111,26 +1166,47 @@ async fn save(
                             StockError::Db(e) => return Err(e.into()),
                         }
                     }
-                    let url = match input.product_id {
+                    return Ok(match (input.product_id, requested_tab.as_deref()) {
                         // Предложение: назад в карточку товара, на вкладку предложений
-                        Some(product) => format!("/admin/items/{product}#offers"),
-                        None => {
+                        (Some(product), _) => {
+                            Redirect::to(&format!("/admin/items/{product}#offers")).into_response()
+                        }
+                        // Карточка с вкладкой: назад на ту же вкладку
+                        (None, Some(tab)) if CARD_TABS.contains(&tab) => flash::redirect(
+                            &format!("/admin/items/{saved_id}?tab={tab}"),
+                            "Сохранено",
+                            FlashKind::Ok,
+                        ),
+                        (None, _) => {
                             let mut url = format!("/admin/collections/{}/items", ctx.collection.id);
                             if let Some(section) = input.section_id {
                                 url.push_str(&format!("?section={section}"));
                             }
-                            url
+                            Redirect::to(&url).into_response()
                         }
-                    };
-                    return Ok(Redirect::to(&url).into_response());
+                    });
                 }
-                Err(e) if is_unique_violation(&e) => "Запись с таким кодом уже есть".into(),
+                Err(e) if is_unique_violation(&e) => {
+                    let mut errors = TabErrors::new();
+                    errors.push("main", "Запись с таким кодом уже есть");
+                    errors
+                }
                 Err(e) => return Err(e.into()),
             }
         }
-        Err(msg) => msg,
+        None => errors,
     };
-    let page = render_form(state, user, ctx, item_id, form, Some(error), None).await?;
+    let page = render_form(
+        state,
+        user,
+        ctx,
+        item_id,
+        form,
+        errors,
+        None,
+        requested_tab.as_deref(),
+    )
+    .await?;
     Ok(page.into_response())
 }
 
@@ -1183,6 +1259,8 @@ pub async fn create(
 pub struct EditQuery {
     generated: Option<usize>,
     skipped: Option<usize>,
+    /// Открываемая вкладка карточки.
+    tab: Option<String>,
 }
 
 pub async fn edit_form(
@@ -1212,7 +1290,17 @@ pub async fn edit_form(
             q.skipped.unwrap_or(0)
         )
     });
-    render_form(&state, user, ctx, Some(id), form, None, notice).await
+    render_form(
+        &state,
+        user,
+        ctx,
+        Some(id),
+        form,
+        TabErrors::new(),
+        notice,
+        q.tab.as_deref(),
+    )
+    .await
 }
 
 pub async fn update(
@@ -1351,9 +1439,75 @@ mod tests {
     fn collects_errors() {
         let form = form(&[("name", ""), ("section_id", "7")]);
         let err = build_input(&form, &[prop("price", "number", true)], &[], &[]).unwrap_err();
-        assert!(err.contains("Укажите название"));
-        assert!(err.contains("обязательное"));
-        assert!(err.contains("Раздел"));
+        let all = err.iter().map(|(_, m)| m).collect::<Vec<_>>().join("; ");
+        assert!(all.contains("Укажите название"));
+        assert!(all.contains("обязательное"));
+        assert!(all.contains("Раздел"));
+    }
+
+    #[test]
+    fn item_errors_tagged() {
+        type Case<'a> = (&'a [(&'a str, &'a str)], &'a str, &'a str);
+        let cases: [Case; 7] = [
+            (&[("name", "")], "Укажите название", "main"),
+            (&[("name", "А"), ("code", "плохой код")], "Код:", "main"),
+            (
+                &[("name", "А"), ("section_id", "x")],
+                "Раздел: неверный id",
+                "main",
+            ),
+            (
+                &[("name", "А"), ("section_id", "7")],
+                "Раздел не найден",
+                "main",
+            ),
+            (
+                &[("name", "А"), ("published_at", "вчера")],
+                "Неверная дата",
+                "main",
+            ),
+            (
+                &[("name", "А"), ("preview_picture_id", "x")],
+                "Картинка анонса",
+                "text",
+            ),
+            (&[("name", "А")], "обязательное", "fields"),
+        ];
+        for (pairs, needle, tab) in cases {
+            let err =
+                build_input(&form(pairs), &[prop("price", "number", true)], &[], &[]).unwrap_err();
+            let hit = err.iter().find(|(_, m)| m.contains(needle));
+            assert_eq!(hit.map(|h| h.0), Some(tab), "{needle}: {err:?}");
+        }
+    }
+
+    #[sqlx::test]
+    async fn item_references_errors_tagged(db: sqlx::PgPool) {
+        let state = crate::test_support::test_state(db);
+        let input = ItemInput {
+            section_id: None,
+            code: "a".into(),
+            xml_id: String::new(),
+            name: "А".into(),
+            active: true,
+            sort: 500,
+            preview_text: String::new(),
+            detail_text: String::new(),
+            preview_picture_id: Some(987654),
+            detail_picture_id: None,
+            published_at: None,
+            field_values: Map::new(),
+            product_id: None,
+        };
+        let err = check_references(&state, &[], &input)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            err.iter().map(|(t, _)| t).collect::<Vec<_>>(),
+            ["fields"],
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1713,6 +1867,301 @@ mod tests {
             .unwrap();
             let (_, html) = get(&app, &format!("/admin/items/{id}"), &cookie).await;
             assert!(html.contains("value=\"-2\""), "{html}");
+        }
+    }
+
+    mod card_tabs {
+        use axum::http::StatusCode;
+        use sqlx::PgPool;
+
+        use crate::{
+            smoke_tests::{get, post_multipart},
+            test_support::{admin_cookie, test_state},
+        };
+
+        /// Коллекция (опционально с полем и каталогом) и одна запись в ней.
+        async fn setup(db: &PgPool, with_field: bool, catalog: bool) -> (i64, i64) {
+            let c: i64 = sqlx::query_scalar(
+                "INSERT INTO collections (code, name, is_catalog) VALUES ('goods', 'Товары', $1) RETURNING id",
+            )
+            .bind(catalog)
+            .fetch_one(db)
+            .await
+            .unwrap();
+            if with_field {
+                sqlx::query(
+                    "INSERT INTO collection_fields (collection_id, code, name, kind) VALUES ($1, 'note', 'Заметка', 'string')",
+                )
+                .bind(c)
+                .execute(db)
+                .await
+                .unwrap();
+            }
+            if catalog {
+                sqlx::query("INSERT INTO catalog_price_types (id, code, name, is_base, sort) VALUES (1, 'BASE', 'Розница', TRUE, 100)")
+                    .execute(db)
+                    .await
+                    .unwrap();
+            }
+            let item: i64 = sqlx::query_scalar(
+                "INSERT INTO collection_items (collection_id, code, name) VALUES ($1, 'tovar', 'Товар') RETURNING id",
+            )
+            .bind(c)
+            .fetch_one(db)
+            .await
+            .unwrap();
+            (c, item)
+        }
+
+        fn has_tab(html: &str, key: &str) -> bool {
+            html.contains(&format!("data-tab-btn=\"{key}\""))
+        }
+
+        #[sqlx::test]
+        async fn item_card_tabs_visibility(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let (_, item) = setup(&db, false, false).await;
+            let (s, html) = get(&app, &format!("/admin/items/{item}"), &cookie).await;
+            assert_eq!(s, StatusCode::OK);
+            assert!(has_tab(&html, "main") && has_tab(&html, "text"), "{html}");
+            for k in ["fields", "catalog", "offers"] {
+                assert!(!has_tab(&html, k), "{k}: {html}");
+            }
+            // каталог и поля открывают свои вкладки
+            let (c, item) = setup_second(&db).await;
+            let (_, html) = get(&app, &format!("/admin/items/{item}"), &cookie).await;
+            assert!(
+                has_tab(&html, "fields") && has_tab(&html, "catalog"),
+                "{html}"
+            );
+            assert!(!has_tab(&html, "offers"), "{html}");
+            // коллекция предложений делает видимой вкладку «Предложения»
+            sqlx::query(
+                "INSERT INTO collections (code, name, product_collection_id) VALUES ('goods_offers', 'Предложения', $1)",
+            )
+            .bind(c)
+            .execute(&db)
+            .await
+            .unwrap();
+            let (_, html) = get(&app, &format!("/admin/items/{item}"), &cookie).await;
+            assert!(has_tab(&html, "offers"), "{html}");
+        }
+
+        /// Вторая коллекция с полем и каталогом (цены уже заведены).
+        async fn setup_second(db: &PgPool) -> (i64, i64) {
+            let c: i64 = sqlx::query_scalar(
+                "INSERT INTO collections (code, name, is_catalog) VALUES ('goods2', 'Товары 2', TRUE) RETURNING id",
+            )
+            .fetch_one(db)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO collection_fields (collection_id, code, name, kind) VALUES ($1, 'note', 'Заметка', 'string')",
+            )
+            .bind(c)
+            .execute(db)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO catalog_price_types (id, code, name, is_base, sort) VALUES (1, 'BASE', 'Розница', TRUE, 100)")
+                .execute(db)
+                .await
+                .unwrap();
+            let item: i64 = sqlx::query_scalar(
+                "INSERT INTO collection_items (collection_id, code, name) VALUES ($1, 'tovar2', 'Товар 2') RETURNING id",
+            )
+            .bind(c)
+            .fetch_one(db)
+            .await
+            .unwrap();
+            (c, item)
+        }
+
+        #[sqlx::test]
+        async fn item_tab_query_opens_tab(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let (_, item) = setup(&db, false, true).await;
+            let (_, html) = get(&app, &format!("/admin/items/{item}?tab=catalog"), &cookie).await;
+            assert!(html.contains("<section data-tab=\"catalog\">"), "{html}");
+            assert!(
+                html.contains("<section data-tab=\"main\" hidden>"),
+                "{html}"
+            );
+            // неизвестная вкладка — первая
+            let (_, html) = get(&app, &format!("/admin/items/{item}?tab=nope"), &cookie).await;
+            assert!(html.contains("<section data-tab=\"main\">"), "{html}");
+        }
+
+        #[sqlx::test]
+        async fn item_error_opens_error_tab(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let (_, item) = setup(&db, false, true).await;
+            let (s, html) = post_multipart(
+                &app,
+                &format!("/admin/items/{item}"),
+                &cookie,
+                &[
+                    ("name", ""),
+                    ("sort", "500"),
+                    ("tab", "catalog"),
+                    ("price_1", "abc"),
+                ],
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK);
+            // активна «Основное» (первая с ошибкой), точки на «Основное» и «Каталог»
+            assert!(html.contains("<section data-tab=\"main\">"), "{html}");
+            assert!(
+                html.contains("<section data-tab=\"catalog\" hidden>"),
+                "{html}"
+            );
+            assert_eq!(html.matches("tab-dot err").count(), 2, "{html}");
+            let main = html.find("<section data-tab=\"main\">").unwrap();
+            let cat = html.find("<section data-tab=\"catalog\"").unwrap();
+            let name_err = html.find("Укажите название").unwrap();
+            let price_err = html.find("Цена: ожидается число").unwrap();
+            assert!(main < name_err && name_err < cat, "{html}");
+            assert!(cat < price_err, "{html}");
+        }
+
+        #[sqlx::test]
+        async fn item_save_returns_to_tab(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let (_, item) = setup(&db, false, true).await;
+            let res = post_multipart_location(
+                &app,
+                &format!("/admin/items/{item}"),
+                &cookie,
+                &[("name", "Товар"), ("sort", "500"), ("tab", "catalog")],
+            )
+            .await;
+            assert_eq!(res.0, StatusCode::SEE_OTHER);
+            assert_eq!(res.1, format!("/admin/items/{item}?tab=catalog"));
+            assert!(res.2.contains("admin_flash"), "{}", res.2);
+        }
+
+        /// Заголовки Location и Set-Cookie ответа на multipart-форму.
+        async fn post_multipart_location(
+            app: &axum::Router,
+            path: &str,
+            cookie: &str,
+            fields: &[(&str, &str)],
+        ) -> (StatusCode, String, String) {
+            use tower::ServiceExt;
+            let boundary = "tabboundary";
+            let mut body = String::new();
+            for (name, value) in fields {
+                body.push_str(&format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+                ));
+            }
+            body.push_str(&format!("--{boundary}--\r\n"));
+            let req = axum::http::Request::post(path)
+                .header(axum::http::header::COOKIE, cookie)
+                .header(axum::http::header::HOST, "127.0.0.1:3000")
+                .header(axum::http::header::ORIGIN, "http://127.0.0.1:3000")
+                .header(
+                    axum::http::header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let res = app.clone().oneshot(req).await.unwrap();
+            let h = |name| {
+                res.headers()
+                    .get(name)
+                    .map(|v| v.to_str().unwrap().to_string())
+                    .unwrap_or_default()
+            };
+            (
+                res.status(),
+                h(axum::http::header::LOCATION),
+                h(axum::http::header::SET_COOKIE),
+            )
+        }
+
+        #[sqlx::test]
+        async fn save_from_any_tab_sends_all_fields(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let (_, item) = setup(&db, false, true).await;
+            let (_, html) = get(&app, &format!("/admin/items/{item}"), &cookie).await;
+            // одна форма: поля «Основного» и «Каталога» — внутри неё, вкладка в скрытом поле
+            let form_start = html.find("<form class=\"card form\"").unwrap();
+            let form_end = html[form_start..].find("</form>").unwrap() + form_start;
+            let form = &html[form_start..form_end];
+            for name in ["name=\"name\"", "name=\"price_1\"", "name=\"tab\""] {
+                assert!(form.contains(name), "{name}: {html}");
+            }
+            assert_eq!(html.matches("name=\"tab\"").count(), 1, "{html}");
+            let (s, _) = post_multipart(
+                &app,
+                &format!("/admin/items/{item}"),
+                &cookie,
+                &[
+                    ("name", "Новое имя"),
+                    ("sort", "500"),
+                    ("price_1", "42"),
+                    ("tab", "main"),
+                ],
+            )
+            .await;
+            assert!(s.is_redirection(), "{s}");
+            let name: String =
+                sqlx::query_scalar("SELECT name FROM collection_items WHERE id = $1")
+                    .bind(item)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            let price: f64 = sqlx::query_scalar(
+                "SELECT price::float8 FROM catalog_prices WHERE item_id = $1 AND price_type_id = 1",
+            )
+            .bind(item)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            assert_eq!((name.as_str(), price), ("Новое имя", 42.0));
+        }
+
+        #[sqlx::test]
+        async fn new_item_only_form_tabs(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let (c, _) = setup(&db, true, true).await;
+            sqlx::query(
+                "INSERT INTO collections (code, name, product_collection_id) VALUES ('goods_offers', 'Предложения', $1)",
+            )
+            .bind(c)
+            .execute(&db)
+            .await
+            .unwrap();
+            let (s, html) = get(&app, &format!("/admin/collections/{c}/items/new"), &cookie).await;
+            assert_eq!(s, StatusCode::OK);
+            for k in ["main", "text", "fields", "catalog"] {
+                assert!(has_tab(&html, k), "{k}: {html}");
+            }
+            assert!(!has_tab(&html, "offers"), "{html}");
+            assert!(!html.contains("/delete"), "{html}");
+        }
+
+        #[sqlx::test]
+        async fn item_delete_button_in_header(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let (_, item) = setup(&db, false, false).await;
+            let (_, html) = get(&app, &format!("/admin/items/{item}"), &cookie).await;
+            let action = format!("action=\"/admin/items/{item}/delete\"");
+            let at = html.find(&action).expect(&html);
+            assert!(at < html.find("data-card>").unwrap(), "{html}");
+            assert!(
+                html[at..].contains("hx-confirm=\"Удалить «Товар»?\""),
+                "{html}"
+            );
+            assert_eq!(html.matches(&action).count(), 1, "{html}");
+            assert!(!html.contains("<h2>Удаление</h2>"), "{html}");
         }
     }
 }

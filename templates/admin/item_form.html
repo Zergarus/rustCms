@@ -14,19 +14,26 @@
 {% endmacro %}
 
 {% block content %}
-<div class="breadcrumbs">
-  <a href="/admin/collections">Коллекции</a> /
-  <a href="/admin/collections/{{ collection.id }}/items">{{ collection.name }}</a> /
-</div>
-<h1>{% if item_id %}{{ form.name }}{% else %}Новая запись{% endif %}</h1>
+{% import "_ui.html" as ui %}
+{% call ui.page_head([("Коллекции", "/admin/collections"), (collection.name, "/admin/collections/" ~ collection.id ~ "/items"), (form.name if item_id else "Новая запись", none)]) %}
+  {%- if item_id and can_write %}
+  <form method="post" action="/admin/items/{{ item_id }}/delete" hx-confirm="Удалить «{{ form.name }}»?">
+    <button class="btn danger" type="submit">Удалить</button>
+  </form>
+  {%- endif %}
+{% endcall %}
 {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+{{ ui.card_errors(tabctx) }}
 
-<form class="card form" method="post" enctype="multipart/form-data"
+<div data-card>
+{{ ui.card_tabs(card_tabs, tabctx) }}
+<form class="card form" method="post" enctype="multipart/form-data" data-dirty-guard
       action="{% if item_id %}/admin/items/{{ item_id }}{% else %}/admin/collections/{{ collection.id }}/items{% endif %}">
-  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <input type="hidden" name="tab" value="{{ tabctx.active }}">
   {% if not can_write %}<div class="notice">Только просмотр: у вас нет прав на изменение записей этой коллекции.</div>{% endif %}
   <fieldset class="plain" {% if not can_write %}disabled{% endif %}>
 
+  {% call ui.tab_pane("main", tabctx) %}
   <div class="grid-2">
     <label>Название *
       <input name="name" value="{{ form.name }}" required>
@@ -60,6 +67,14 @@
       <small>Пусто — опубликован сразу. В будущем — появится в API в это время.</small>
     </label>
   </div>
+  {% endcall %}
+  {% call ui.tab_pane("text", tabctx) %}
+  <label>Анонс
+    <textarea name="preview_text" rows="3">{{ form.preview_text }}</textarea>
+  </label>
+  <label>Детальный текст
+    <textarea name="detail_text" rows="10">{{ form.detail_text }}</textarea>
+  </label>
 
   <div class="grid-2">
     {% for key, label in [("preview_picture_id", "Картинка анонса"), ("detail_picture_id", "Детальная картинка")] %}
@@ -70,15 +85,9 @@
     </div>
     {% endfor %}
   </div>
-
-  <label>Анонс
-    <textarea name="preview_text" rows="3">{{ form.preview_text }}</textarea>
-  </label>
-  <label>Детальный текст
-    <textarea name="detail_text" rows="10">{{ form.detail_text }}</textarea>
-  </label>
-
+  {% endcall %}
   {% if properties %}
+  {% call ui.tab_pane("fields", tabctx) %}
   <fieldset>
     <legend>Поля</legend>
     {% for p in properties %}
@@ -121,8 +130,11 @@
       {% endif %}
     {% endfor %}
   </fieldset>
+  {% endcall %}
   {% endif %}
 
+  {% if catalog %}
+  {% call ui.tab_pane("catalog", tabctx) %}
   {% if offers_priced %}
   <fieldset>
     <legend>Торговый каталог</legend>
@@ -189,6 +201,8 @@
     {% endif %}
   </fieldset>
   {% endif %}
+  {% endcall %}
+  {% endif %}
 
   </fieldset>
   <div class="form-actions">
@@ -198,7 +212,8 @@
 </form>
 
 {% if offers_tab %}
-<section class="card" id="offers">
+{% call ui.tab_pane("offers", tabctx) %}
+<div class="card" id="offers">
   <div class="page-head">
     <h2>Торговые предложения</h2>
     {% if can_write_offers %}<a class="btn" href="/admin/collections/{{ offers.id }}/items/new?product={{ item_id }}">Добавить предложение</a>
@@ -236,6 +251,8 @@
   {% else %}
   <p class="muted">Предложений пока нет.</p>
   {% endif %}
-</section>
+</div>
+{% endcall %}
 {% endif %}
+</div>
 {% endblock %}
