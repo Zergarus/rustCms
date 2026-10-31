@@ -2,15 +2,25 @@
 {% set section = "collections" %}
 {% block title %}{% if collection %}{{ collection.name }}{% else %}Новая коллекция{% endif %}{% endblock %}
 {% block content %}
-<div class="breadcrumbs"><a href="/admin/collections">Коллекции</a> /</div>
-<div class="page-head">
-  <h1>{% if collection %}{{ collection.name }}{% else %}Новая коллекция{% endif %}</h1>
-  {% if collection %}<a class="btn" href="/admin/collections/{{ collection.id }}/items">Записи →</a>{% endif %}
-</div>
+{% import "_ui.html" as ui %}
+{% call ui.page_head([("Коллекции", "/admin/collections"), (collection.name if collection else "Новая коллекция", none)]) %}
+  {%- if collection %}
+  <a class="btn" href="/admin/collections/{{ collection.id }}/items">Записи →</a>
+  <form method="post" action="/admin/collections/{{ collection.id }}/delete"
+        hx-confirm="Удалить коллекцию «{{ collection.name }}» со всеми записями?">
+    <button class="btn danger" type="submit">Удалить коллекцию</button>
+  </form>
+  {%- endif %}
+{% endcall %}
+{{ ui.card_errors(tabctx) }}
 
-{% if offers_error and not (collection.is_catalog or collection.product_collection_id) %}<div class="alert">{{ offers_error }}</div>{% endif %}
-<form class="card form" method="post" action="{% if collection %}/admin/collections/{{ collection.id }}{% else %}/admin/collections{% endif %}">
-  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<div data-card>
+{{ ui.card_tabs(card_tabs, tabctx) }}
+<form class="card form" method="post" data-dirty-guard
+      action="{% if collection %}/admin/collections/{{ collection.id }}{% else %}/admin/collections{% endif %}">
+  <input type="hidden" name="tab" value="{{ tabctx.active }}">
+
+  {% call ui.tab_pane("settings", tabctx) %}
   <div class="grid-2">
     <label>Название *
       <input name="name" value="{{ form.name }}" required>
@@ -36,7 +46,9 @@
       Торговый каталог — у записей цены, остатки, покупка
     </label>
   </div>
-  <div class="form-actions">
+  {% endcall %}
+
+  <div class="form-actions" data-form-actions{% if tabctx.active != "settings" %} hidden{% endif %}>
     <button class="btn primary" type="submit">Сохранить</button>
     <a class="btn" href="/admin/collections">Отмена</a>
   </div>
@@ -44,14 +56,14 @@
 
 {% if collection %}
 {% if collection.is_catalog or collection.product_collection_id %}
-<section class="card" id="offers">
+{% call ui.tab_pane("offers", tabctx) %}
+<div class="card" id="offers">
   <h2>Торговые предложения</h2>
   {% if collection.product_collection_id %}
   <p class="muted">Это коллекция предложений товаров{% if product_collection %} коллекции <a href="/admin/collections/{{ product_collection.id }}">{{ product_collection.name }}</a>{% endif %}. Её настраивают в коллекции товаров.</p>
   {% else %}
   <p class="muted">Варианты товара (размер, цвет) — записи отдельной коллекции, привязанные к товару полем «Товар».</p>
   <form class="form" method="post" action="/admin/collections/{{ collection.id }}/offers">
-    {% if offers_error %}<div class="alert">{{ offers_error }}</div>{% endif %}
     <div class="grid-2">
       <label class="check"><input type="radio" name="mode" value="none" {% if not offers %}checked{% endif %}> Нет</label>
       <label class="check"><input type="radio" name="mode" value="create"> Создать новую коллекцию «{{ collection.code }}_offers»</label>
@@ -71,10 +83,12 @@
     <button class="btn" type="submit">Применить</button>
   </form>
   {% endif %}
-</section>
+</div>
+{% endcall %}
 {% endif %}
 
-<section class="card">
+{% call ui.tab_pane("fields", tabctx) %}
+<div class="card">
   <h2>Поля</h2>
   <p class="muted">Дополнительные поля записей. Значения попадают в API в объект <code>properties</code>.</p>
   {% if properties %}
@@ -108,7 +122,6 @@
 
   <form class="form prop-form" method="post" action="/admin/collections/{{ collection.id }}/fields">
     <h3>Добавить поле</h3>
-    {% if prop_error %}<div class="alert">{{ prop_error }}</div>{% endif %}
     <div class="grid-5">
       <label>Название *<input name="name" value="{{ prop_form.name }}" required></label>
       <label>Код *<input name="code" value="{{ prop_form.code }}" pattern="[a-z0-9_\-]+" required></label>
@@ -138,15 +151,8 @@
     </div>
     <button class="btn" type="submit">Добавить</button>
   </form>
-</section>
-
-<section class="card danger-zone">
-  <h2>Удаление</h2>
-  <p class="muted">Коллекция будет удалена вместе со всеми полями и записями.</p>
-  <form method="post" action="/admin/collections/{{ collection.id }}/delete"
-        hx-confirm="Удалить коллекцию «{{ collection.name }}» со всеми записями?">
-    <button class="btn danger" type="submit">Удалить коллекцию</button>
-  </form>
-</section>
+</div>
+{% endcall %}
 {% endif %}
+</div>
 {% endblock %}

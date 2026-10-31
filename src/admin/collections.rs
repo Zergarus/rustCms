@@ -2,13 +2,17 @@ use std::collections::HashMap;
 
 use axum::{
     Extension, Form,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use minijinja::{Value, context};
 use serde::{Deserialize, Serialize};
 
-use super::{parse_sort, render};
+use super::{
+    card::{TabErrors, tab_context},
+    flash::{self, FlashKind},
+    parse_sort, render,
+};
 use crate::{
     access::{Access, COLLECTIONS_MANAGE, Level},
     collection::{
@@ -19,6 +23,20 @@ use crate::{
     error::{AppError, AppResult, is_unique_violation},
     state::AppState,
 };
+
+/// Вкладки карточки, на которые можно вернуться после сохранения.
+const CARD_TABS: [&str; 3] = ["settings", "fields", "offers"];
+
+/// Открываемая вкладка карточки (`?tab=`).
+#[derive(Default, Deserialize)]
+pub struct TabQuery {
+    tab: Option<String>,
+}
+
+/// Адрес карточки коллекции с вкладкой.
+fn card_url(id: i64, tab: &str) -> String {
+    format!("/admin/collections/{id}?tab={tab}")
+}
 
 #[derive(Default, Deserialize, Serialize)]
 pub struct CollectionForm {
@@ -32,17 +50,27 @@ pub struct CollectionForm {
     is_catalog: Option<String>,
     #[serde(default)]
     sort: String,
+    /// Вкладка, с которой отправлена форма.
+    #[serde(default, skip_serializing)]
+    tab: String,
 }
 
 impl CollectionForm {
-    fn validate(&self) -> Result<CollectionInput, String> {
+    fn validate(&self) -> Result<CollectionInput, TabErrors> {
+        let mut errors = TabErrors::new();
         let name = self.name.trim();
         let code = self.code.trim();
         if name.is_empty() {
-            return Err("Укажите название".into());
+            errors.push("settings", "Укажите название");
         }
         if !is_valid_code(code) {
-            return Err("Код: только латиница в нижнем регистре, цифры, «_» и «-»".into());
+            errors.push(
+                "settings",
+                "Код: только латиница в нижнем регистре, цифры, «_» и «-»",
+            );
+        }
+        if !errors.is_empty() {
+            return Err(errors);
         }
         Ok(CollectionInput {
             code: code.to_string(),
@@ -140,6 +168,22 @@ pub async fn list(
     )
 }
 
+/// Карточка новой коллекции: только вкладка настроек.
+fn render_new(
+    state: &AppState,
+    user: Access,
+    form: CollectionForm,
+    errors: &TabErrors,
+) -> AppResult<Html<String>> {
+    let card_tabs = vec![("settings", "Настройки")];
+    let tabctx = tab_context(errors, &["settings"], None);
+    render(
+        state,
+        "collection_form.html",
+        context! { user, form, card_tabs, tabctx },
+    )
+}
+
 pub async fn new_form(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
@@ -150,7 +194,7 @@ pub async fn new_form(
         sort: "500".into(),
         ..Default::default()
     };
-    render(&state, "collection_form.html", context! { user, form })
+    render_new(&state, user, form, &TabErrors::new())
 }
 
 pub async fn create(
@@ -159,49 +203,36 @@ pub async fn create(
     Form(form): Form<CollectionForm>,
 ) -> AppResult<Response> {
     user.require(COLLECTIONS_MANAGE)?;
-    let error = match form.validate() {
+    let errors = match form.validate() {
         Ok(input) => match repo::create_collection(&state.db, &input).await {
             Ok(collection) => {
                 return Ok(
                     Redirect::to(&format!("/admin/collections/{}", collection.id)).into_response(),
                 );
             }
-            Err(e) if is_unique_violation(&e) => "Коллекция с таким кодом уже существует".into(),
+            Err(e) if is_unique_violation(&e) => {
+                let mut errors = TabErrors::new();
+                errors.push("settings", "Коллекция с таким кодом уже существует");
+                errors
+            }
             Err(e) => return Err(e.into()),
         },
-        Err(msg) => msg,
+        Err(errors) => errors,
     };
-    Ok(render(
-        &state,
-        "collection_form.html",
-        context! { user, form, error },
-    )?
-    .into_response())
-}
-
-/// Ошибки блоков страницы коллекции, кроме основной формы.
-#[derive(Default)]
-struct BlockErrors {
-    /// Форма добавления поля (и действия над полями).
-    field: Option<String>,
-    /// Блок «Торговые предложения».
-    offers: Option<String>,
+    Ok(render_new(&state, user, form, &errors)?.into_response())
 }
 
 /// Страница редактирования коллекции вместе со списком полей.
+/// `errors` и `tab` определяют активную вкладку.
 async fn render_edit(
     state: &AppState,
     user: Access,
     id: i64,
     form: Option<CollectionForm>,
-    error: Option<String>,
     prop_form: FieldForm,
-    errors: BlockErrors,
+    errors: &TabErrors,
+    tab: Option<&str>,
 ) -> AppResult<Html<String>> {
-    let BlockErrors {
-        field: prop_error,
-        offers: offers_error,
-    } = errors;
     let collection = repo::get_collection(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -218,7 +249,15 @@ async fn render_edit(
         api_enabled: collection.api_enabled.then(|| "on".into()),
         is_catalog: collection.is_catalog.then(|| "on".into()),
         sort: collection.sort.to_string(),
+        tab: String::new(),
     });
+    let mut card_tabs: Vec<(&'static str, &'static str)> =
+        vec![("settings", "Настройки"), ("fields", "Поля")];
+    if collection.is_catalog || collection.product_collection_id.is_some() {
+        card_tabs.push(("offers", "Предложения"));
+    }
+    let visible: Vec<&'static str> = card_tabs.iter().map(|t| t.0).collect();
+    let tabctx = tab_context(errors, &visible, tab);
     render(
         state,
         "collection_form.html",
@@ -226,13 +265,12 @@ async fn render_edit(
             user,
             collection,
             form,
-            error,
+            card_tabs,
+            tabctx,
             properties,
             prop_form,
-            prop_error,
             offers,
             product_collection,
-            offers_error,
             collections => repo::list_collections(&state.db).await?,
             kinds => Value::from_serialize(fields::KINDS),
         },
@@ -251,6 +289,7 @@ pub async fn edit_form(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
+    Query(q): Query<TabQuery>,
 ) -> AppResult<Html<String>> {
     user.require(COLLECTIONS_MANAGE)?;
     render_edit(
@@ -258,9 +297,9 @@ pub async fn edit_form(
         user,
         id,
         None,
-        None,
         empty_field_form(),
-        BlockErrors::default(),
+        &TabErrors::new(),
+        q.tab.as_deref(),
     )
     .await
 }
@@ -273,30 +312,46 @@ pub async fn update(
 ) -> AppResult<Response> {
     user.require(COLLECTIONS_MANAGE)?;
     let validated = match form.validate() {
-        Ok(input) if !input.is_catalog => {
-            catalog_flag_error(&state, id).await?.map_or(Ok(input), Err)
-        }
+        Ok(input) if !input.is_catalog => match catalog_flag_error(&state, id).await? {
+            Some(msg) => {
+                let mut errors = TabErrors::new();
+                errors.push("settings", msg);
+                Err(errors)
+            }
+            None => Ok(input),
+        },
         other => other,
     };
-    let error = match validated {
+    let errors = match validated {
         Ok(input) => match repo::update_collection(&state.db, id, &input).await {
             Ok(true) => {
-                return Ok(Redirect::to(&format!("/admin/collections/{id}")).into_response());
+                // назад на ту же вкладку; без неё — прежний возврат
+                let tab = form.tab.as_str();
+                return Ok(if CARD_TABS.contains(&tab) {
+                    flash::redirect(&card_url(id, tab), "Сохранено", FlashKind::Ok)
+                } else {
+                    Redirect::to(&format!("/admin/collections/{id}")).into_response()
+                });
             }
             Ok(false) => return Err(AppError::NotFound),
-            Err(e) if is_unique_violation(&e) => "Коллекция с таким кодом уже существует".into(),
+            Err(e) if is_unique_violation(&e) => {
+                let mut errors = TabErrors::new();
+                errors.push("settings", "Коллекция с таким кодом уже существует");
+                errors
+            }
             Err(e) => return Err(e.into()),
         },
-        Err(msg) => msg,
+        Err(errors) => errors,
     };
+    let tab = form.tab.clone();
     let page = render_edit(
         &state,
         user,
         id,
         Some(form),
-        Some(error),
         empty_field_form(),
-        BlockErrors::default(),
+        &errors,
+        Some(&tab),
     );
     Ok(page.await?.into_response())
 }
@@ -326,20 +381,16 @@ pub async fn delete(
     Path(id): Path<i64>,
 ) -> AppResult<Response> {
     user.require(COLLECTIONS_MANAGE)?;
-    let error = match repo::delete_collection(&state.db, id).await {
+    let mut errors = TabErrors::new();
+    match repo::delete_collection(&state.db, id).await {
         Ok(()) => return Ok(Redirect::to("/admin/collections").into_response()),
-        Err(repo::UnlinkError::HasOffers(n)) => format!("Сначала удалите предложения ({n})"),
+        // кнопка удаления в шапке: ошибка над вкладками
+        Err(repo::UnlinkError::HasOffers(n)) => {
+            errors.push("", format!("Сначала удалите предложения ({n})"));
+        }
         Err(repo::UnlinkError::Db(e)) => return Err(e.into()),
-    };
-    let page = render_edit(
-        &state,
-        user,
-        id,
-        None,
-        Some(error),
-        empty_field_form(),
-        BlockErrors::default(),
-    );
+    }
+    let page = render_edit(&state, user, id, None, empty_field_form(), &errors, None);
     Ok(page.await?.into_response())
 }
 
@@ -356,24 +407,15 @@ pub async fn add_field(
             Ok(prop_id) if input.kind == "list" => {
                 return Ok(Redirect::to(&format!("/admin/fields/{prop_id}")).into_response());
             }
-            Ok(_) => return Ok(Redirect::to(&format!("/admin/collections/{id}")).into_response()),
+            Ok(_) => return Ok(Redirect::to(&card_url(id, "fields")).into_response()),
             Err(e) if is_unique_violation(&e) => "Поле с таким кодом уже есть".into(),
             Err(e) => return Err(e.into()),
         },
         Err(msg) => msg,
     };
-    let page = render_edit(
-        &state,
-        user,
-        id,
-        None,
-        None,
-        form,
-        BlockErrors {
-            field: Some(error),
-            ..Default::default()
-        },
-    );
+    let mut errors = TabErrors::new();
+    errors.push("fields", error);
+    let page = render_edit(&state, user, id, None, form, &errors, Some("fields"));
     Ok(page.await?.into_response())
 }
 
@@ -390,19 +432,18 @@ pub async fn set_offers(
         .ok_or(AppError::NotFound)?;
     let result = apply_offers(&state, &collection, &form).await?;
     match result {
-        Ok(()) => Ok(Redirect::to(&format!("/admin/collections/{id}")).into_response()),
+        Ok(()) => Ok(Redirect::to(&card_url(id, "offers")).into_response()),
         Err(error) => {
+            let mut errors = TabErrors::new();
+            errors.push("offers", error);
             let page = render_edit(
                 &state,
                 user,
                 id,
                 None,
-                None,
                 empty_field_form(),
-                BlockErrors {
-                    offers: Some(error),
-                    ..Default::default()
-                },
+                &errors,
+                Some("offers"),
             );
             Ok(page.await?.into_response())
         }
@@ -525,24 +566,23 @@ pub async fn delete_field(
         let field = repo::get_field(&state.db, id)
             .await?
             .ok_or(AppError::NotFound)?;
+        let mut errors = TabErrors::new();
+        errors.push("fields", SYSTEM_LINK_ERROR);
         let page = render_edit(
             &state,
             user,
             field.collection_id,
             None,
-            None,
             empty_field_form(),
-            BlockErrors {
-                field: Some(SYSTEM_LINK_ERROR.to_string()),
-                ..Default::default()
-            },
+            &errors,
+            Some("fields"),
         );
         return Ok(page.await?.into_response());
     }
     let collection_id = repo::delete_field(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    Ok(Redirect::to(&format!("/admin/collections/{collection_id}")).into_response())
+    Ok(Redirect::to(&card_url(collection_id, "fields")).into_response())
 }
 
 /// Страница поля: основные настройки и (для списка) варианты.
@@ -622,7 +662,7 @@ pub async fn update_field(
         }
         Ok(input) => {
             repo::update_field(&state.db, id, &input).await?;
-            let url = format!("/admin/collections/{}", property.collection_id);
+            let url = card_url(property.collection_id, "fields");
             return Ok(Redirect::to(&url).into_response());
         }
         Err(msg) => msg,
@@ -794,5 +834,181 @@ mod tests {
             form("string", false).validate().unwrap().link_collection_id,
             None
         );
+    }
+
+    // ---- вкладки карточки ----
+
+    use crate::{
+        smoke_tests::get,
+        test_support::{admin_cookie, content_fixture, post_form_raw, test_state},
+    };
+    use sqlx::PgPool;
+
+    fn has_tab(html: &str, key: &str) -> bool {
+        html.contains(&format!("data-tab-btn=\"{key}\""))
+    }
+
+    #[test]
+    fn collection_errors_tagged() {
+        let errs = CollectionForm::default().validate().err().unwrap();
+        assert_eq!(
+            errs.iter().collect::<Vec<_>>(),
+            vec![
+                ("settings", "Укажите название"),
+                (
+                    "settings",
+                    "Код: только латиница в нижнем регистре, цифры, «_» и «-»"
+                ),
+            ]
+        );
+    }
+
+    #[sqlx::test]
+    async fn collection_card_tabs(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let c = content_fixture(&db).await;
+        let path = format!("/admin/collections/{}", c.collection_id);
+        let (s, html) = get(&app, &path, &cookie).await;
+        assert_eq!(s, 200);
+        assert!(
+            has_tab(&html, "settings") && has_tab(&html, "fields"),
+            "{html}"
+        );
+        assert!(!has_tab(&html, "offers"), "{html}");
+        assert!(html.contains("<section data-tab=\"settings\">"), "{html}");
+        assert!(html.contains("data-form-actions>"), "{html}");
+        assert!(html.contains("name=\"tab\" value=\"settings\""), "{html}");
+        // удаление — кнопка в шапке, блока «Удаление» нет
+        assert!(html.contains("Удалить коллекцию «"), "{html}");
+        assert!(!html.contains("danger-zone"), "{html}");
+        // вкладка из адреса
+        let (_, html) = get(&app, &format!("{path}?tab=fields"), &cookie).await;
+        assert!(html.contains("<section data-tab=\"fields\">"), "{html}");
+        assert!(
+            html.contains("<section data-tab=\"settings\" hidden>"),
+            "{html}"
+        );
+        assert!(html.contains("data-form-actions hidden"), "{html}");
+        // каталог открывает вкладку предложений
+        sqlx::query("UPDATE collections SET is_catalog = TRUE WHERE id = $1")
+            .bind(c.collection_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let (_, html) = get(&app, &format!("{path}?tab=offers"), &cookie).await;
+        assert!(has_tab(&html, "offers"), "{html}");
+        assert!(html.contains("<section data-tab=\"offers\">"), "{html}");
+        // новая коллекция — только настройки
+        let (_, html) = get(&app, "/admin/collections/new", &cookie).await;
+        assert!(has_tab(&html, "settings"), "{html}");
+        assert!(
+            !has_tab(&html, "fields") && !has_tab(&html, "offers"),
+            "{html}"
+        );
+    }
+
+    #[sqlx::test]
+    async fn add_field_error_opens_fields_tab(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let c = content_fixture(&db).await;
+        let (s, _, html) = post_form_raw(
+            &app,
+            &format!("/admin/collections/{}/fields", c.collection_id),
+            &cookie,
+            "name=&code=my_code&kind=string&sort=500",
+        )
+        .await;
+        assert_eq!(s, 200);
+        assert!(html.contains("<section data-tab=\"fields\">"), "{html}");
+        assert!(
+            html.contains("<section data-tab=\"settings\" hidden>"),
+            "{html}"
+        );
+        assert!(html.contains("Укажите название поля"), "{html}");
+        assert_eq!(html.matches("tab-dot err").count(), 1, "{html}");
+        assert!(html.contains("value=\"my_code\""), "{html}");
+    }
+
+    #[sqlx::test]
+    async fn field_actions_return_to_fields_tab(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let c = content_fixture(&db).await;
+        let (s, h, _) = post_form_raw(
+            &app,
+            &format!("/admin/collections/{}/fields", c.collection_id),
+            &cookie,
+            "name=Ещё&code=extra&kind=string&sort=500",
+        )
+        .await;
+        assert_eq!(s, 303);
+        assert_eq!(
+            h.get("location").unwrap(),
+            &format!("/admin/collections/{}?tab=fields", c.collection_id)
+        );
+    }
+
+    #[sqlx::test]
+    async fn set_offers_returns_to_offers_tab(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let c = content_fixture(&db).await;
+        sqlx::query("UPDATE collections SET is_catalog = TRUE WHERE id = $1")
+            .bind(c.collection_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let (s, _, html) = post_form_raw(
+            &app,
+            &format!("/admin/collections/{}/offers", c.collection_id),
+            &cookie,
+            "mode=nope",
+        )
+        .await;
+        assert_eq!(s, 200);
+        assert!(html.contains("<section data-tab=\"offers\">"), "{html}");
+        assert!(html.contains("Неизвестный вариант"), "{html}");
+        let (s, h, _) = post_form_raw(
+            &app,
+            &format!("/admin/collections/{}/offers", c.collection_id),
+            &cookie,
+            "mode=create",
+        )
+        .await;
+        assert_eq!(s, 303);
+        assert_eq!(
+            h.get("location").unwrap(),
+            &format!("/admin/collections/{}?tab=offers", c.collection_id)
+        );
+    }
+
+    #[sqlx::test]
+    async fn collection_save_returns_to_tab(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let c = content_fixture(&db).await;
+        let path = format!("/admin/collections/{}", c.collection_id);
+        let body = "name=Новости&code=news&sort=500&api_enabled=on";
+        let (s, h, _) = post_form_raw(&app, &path, &cookie, &format!("{body}&tab=settings")).await;
+        assert_eq!(s, 303);
+        assert_eq!(h.get("location").unwrap(), &format!("{path}?tab=settings"));
+        assert!(
+            h.get("set-cookie")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("admin_flash"),
+            "{h:?}"
+        );
+        // без вкладки или с неизвестной — прежний возврат
+        let (_, h, _) = post_form_raw(&app, &path, &cookie, &format!("{body}&tab=zzz")).await;
+        assert_eq!(h.get("location").unwrap(), &path);
+        // ошибка основной формы открывает настройки
+        let (s, _, html) = post_form_raw(&app, &path, &cookie, "name=&code=news&tab=fields").await;
+        assert_eq!(s, 200);
+        assert!(html.contains("Укажите название"), "{html}");
+        assert!(html.contains("<section data-tab=\"settings\">"), "{html}");
     }
 }
