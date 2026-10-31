@@ -120,6 +120,23 @@ struct OrderRow {
     delivery: String,
 }
 
+/// Выборка строки списка заказов; вызывающий добавляет условия после `WHERE TRUE`.
+fn row_query() -> QueryBuilder<Postgres> {
+    QueryBuilder::<Postgres>::new(
+        "SELECT o.id, COALESCE(o.account_number, o.id::text) AS account_number, o.created_at,
+                COALESCE(NULLIF((SELECT v.value FROM order_property_values v
+                                 JOIN order_properties p ON p.id = v.property_id
+                                 WHERE v.order_id = o.id AND p.is_payer LIMIT 1), ''), u.login, '—') AS buyer,
+                COALESCE(s.name, o.status) AS status_name, o.price::float8 AS price, o.currency,
+                o.paid, o.canceled,
+                COALESCE((SELECT sh.delivery_name FROM shipments sh WHERE sh.order_id = o.id LIMIT 1), '') AS delivery
+         FROM orders o
+         LEFT JOIN users u ON u.id = o.user_id
+         LEFT JOIN order_statuses s ON s.code = o.status
+         WHERE TRUE",
+    )
+}
+
 pub async fn list(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
@@ -132,19 +149,7 @@ pub async fn list(
     );
     push_filters(&mut count, &q);
     let total: i64 = count.build_query_scalar().fetch_one(&state.db).await?;
-    let mut qb = QueryBuilder::<Postgres>::new(
-        "SELECT o.id, COALESCE(o.account_number, o.id::text) AS account_number, o.created_at,
-                COALESCE(NULLIF((SELECT v.value FROM order_property_values v
-                                 JOIN order_properties p ON p.id = v.property_id
-                                 WHERE v.order_id = o.id AND p.is_payer LIMIT 1), ''), u.login, '—') AS buyer,
-                COALESCE(s.name, o.status) AS status_name, o.price::float8 AS price, o.currency,
-                o.paid, o.canceled,
-                COALESCE((SELECT sh.delivery_name FROM shipments sh WHERE sh.order_id = o.id LIMIT 1), '') AS delivery
-         FROM orders o
-         LEFT JOIN users u ON u.id = o.user_id
-         LEFT JOIN order_statuses s ON s.code = o.status
-         WHERE TRUE",
-    );
+    let mut qb = row_query();
     push_filters(&mut qb, &q);
     qb.push(" ORDER BY o.created_at DESC, o.id DESC LIMIT ")
         .push_bind(PER_PAGE)
@@ -676,6 +681,71 @@ pub(crate) fn back(id: i64, tab: &str, text: &str) -> Response {
     flash::redirect(&tab_url(id, tab), text, FlashKind::Ok)
 }
 
+/// Запрос из панели быстрого просмотра: HTMX с целью `#peek`.
+fn is_peek(headers: &HeaderMap) -> bool {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    header("hx-request") == Some("true") && header("hx-target") == Some("peek")
+}
+
+/// Панель быстрого просмотра заказа (фрагмент); `toast` — уведомление в `HX-Trigger`.
+/// `with_row` добавляет свежую строку списка out-of-band.
+async fn peek_panel(
+    state: &AppState,
+    id: i64,
+    toast: Option<(&str, FlashKind)>,
+    with_row: bool,
+) -> AppResult<Response> {
+    let order = repo::load(&state.db, id).await?.ok_or(AppError::NotFound)?;
+    let statuses: Vec<(String, String)> =
+        sqlx::query_as("SELECT code, name FROM order_statuses ORDER BY sort, code")
+            .fetch_all(&state.db)
+            .await?;
+    let shipped: bool = sqlx::query_scalar(
+        "SELECT COALESCE((SELECT deducted FROM shipments WHERE order_id = $1 ORDER BY id LIMIT 1), FALSE)",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+    let prop = |pick: fn(&repo::OrderPropertyValue) -> bool| {
+        order
+            .properties
+            .iter()
+            .find(|p| pick(p) && !p.value.trim().is_empty())
+            .map(|p| p.value.clone())
+    };
+    let buyer = prop(|p| p.is_payer)
+        .or_else(|| Some(order.user_name.clone()).filter(|n| !n.is_empty()))
+        .unwrap_or_else(|| order.user_login.clone());
+    let phone = prop(|p| p.is_phone).unwrap_or_default();
+    let email = prop(|p| p.is_email).unwrap_or_else(|| order.user_email.clone());
+    let row: Option<OrderRow> = if with_row {
+        let mut qb = row_query();
+        qb.push(" AND o.id = ").push_bind(id);
+        qb.build_query_as().fetch_optional(&state.db).await?
+    } else {
+        None
+    };
+    let html = render(
+        state,
+        "shop/order_peek.html",
+        context! { order, statuses, shipped, buyer, phone, email, row },
+    )?;
+    Ok(match toast {
+        Some((text, kind)) => (flash::toast(text, kind), html).into_response(),
+        None => html.into_response(),
+    })
+}
+
+/// Быстрый просмотр заказа: `GET /admin/shop/orders/{id}/peek`.
+pub async fn peek(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+) -> AppResult<Response> {
+    require_orders(&user)?;
+    peek_panel(&state, id, None, false).await
+}
+
 #[derive(Deserialize)]
 pub struct StatusForm {
     status: String,
@@ -687,15 +757,21 @@ pub async fn set_status(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
+    headers: HeaderMap,
     Form(form): Form<StatusForm>,
 ) -> AppResult<Response> {
     require_orders(&user)?;
+    let from_peek = is_peek(&headers);
     let notify: Option<bool> =
         sqlx::query_scalar("SELECT notify FROM order_statuses WHERE code = $1")
             .bind(&form.status)
             .fetch_optional(&state.db)
             .await?;
     let Some(notify) = notify else {
+        if from_peek {
+            let toast = Some(("Нет такого статуса", FlashKind::Error));
+            return peek_panel(&state, id, toast, false).await;
+        }
         return card(
             &state,
             user,
@@ -719,6 +795,9 @@ pub async fn set_status(
     {
         send(&state, format!("SALE_STATUS_CHANGED_{}", form.status), id);
     }
+    if from_peek {
+        return peek_panel(&state, id, Some(("Статус изменён", FlashKind::Ok)), true).await;
+    }
     Ok(back(id, "", "Статус изменён"))
 }
 
@@ -734,10 +813,30 @@ pub async fn set_paid(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
+    headers: HeaderMap,
     Form(form): Form<FlagForm>,
 ) -> AppResult<Response> {
     require_orders(&user)?;
     let paid = form.value == "Y";
+    if is_peek(&headers) {
+        // Из панели у отменённого заказа оплата не меняется (в карточке правило прежнее)
+        let canceled: Option<bool> =
+            sqlx::query_scalar("SELECT canceled FROM orders WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&state.db)
+                .await?;
+        let toast = match canceled {
+            None => return Err(AppError::NotFound),
+            Some(true) => ("Заказ отменён — оплата не меняется", FlashKind::Error),
+            Some(false) => {
+                if repo::set_paid(&state.db, id, paid).await? && paid {
+                    send(&state, "SALE_ORDER_PAID".into(), id);
+                }
+                ("Оплата сохранена", FlashKind::Ok)
+            }
+        };
+        return peek_panel(&state, id, Some(toast), true).await;
+    }
     if repo::set_paid(&state.db, id, paid).await? && paid {
         send(&state, "SALE_ORDER_PAID".into(), id);
     }
@@ -2153,5 +2252,213 @@ mod tests {
         for no in ["Себестоимость", "Маржа", "оценка"] {
             assert!(!html.contains(no), "{no}: {html}");
         }
+    }
+    // ---------- Быстрый просмотр ----------
+
+    use crate::test_support::{htmx_get, post_form_raw};
+
+    fn app(db: &sqlx::PgPool) -> axum::Router {
+        crate::app(test_state(db.clone()))
+    }
+
+    /// POST формы как HTMX-запрос из панели (`HX-Target: peek`): статус, заголовки, тело.
+    async fn peek_post(
+        app: &axum::Router,
+        path: &str,
+        cookie: &str,
+        body: &str,
+    ) -> (StatusCode, axum::http::HeaderMap, String) {
+        use axum::http::header;
+        use tower::ServiceExt;
+        let req = axum::http::Request::post(path)
+            .header(header::COOKIE, cookie)
+            .header(header::HOST, "127.0.0.1:3000")
+            .header(header::ORIGIN, "http://127.0.0.1:3000")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header("HX-Request", "true")
+            .header("HX-Target", "peek")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        let (status, headers) = (res.status(), res.headers().clone());
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            headers,
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )
+    }
+
+    #[sqlx::test]
+    async fn order_peek_fragment(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        // ещё шесть позиций: всего 7, в панели 5 и «ещё 2»
+        sqlx::query(
+            "INSERT INTO cart_items (buyer_id, item_id, store_id, quantity, name, price, order_id)
+             SELECT buyer_id, item_id, NULL, 1, 'Позиция ' || g, 100, $1
+             FROM cart_items, generate_series(2, 7) g WHERE order_id = $1",
+        )
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let cookie = admin_cookie(&db).await;
+        let (status, html) = htmx_get(
+            &app(&db),
+            &format!("/admin/shop/orders/{id}/peek"),
+            &cookie,
+            "peek",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let number: String = sqlx::query_scalar(
+            "SELECT COALESCE(account_number, id::text) FROM orders WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert!(html.contains(&format!("Заказ № {number}")), "номер: {html}");
+        assert!(html.contains("100"), "сумма");
+        assert!(html.contains("ещё 2"), "«ещё N»: {html}");
+        assert!(
+            html.contains("Позиция 5") && !html.contains("Позиция 6"),
+            "до 5 позиций"
+        );
+        assert!(
+            html.contains("Открыть карточку") && html.contains(&format!("orders&#x2f;{id}\"")),
+            "ссылка на карточку: {html}"
+        );
+        assert!(!html.contains("<html"), "это фрагмент");
+        assert!(html.contains("Принят"), "статус");
+    }
+
+    #[sqlx::test]
+    async fn order_peek_forbidden_without_right(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let cookie = permitted_cookie(&db, "nobody", &[]).await;
+        let (status, _) = get(&app(&db), &format!("/admin/shop/orders/{id}/peek"), &cookie).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = get(
+            &app(&db),
+            "/admin/shop/orders/999999/peek",
+            &admin_cookie(&db).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    async fn peek_status_returns_panel_and_row(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        sqlx::query("INSERT INTO order_statuses (code, name) VALUES ('F', 'Выполнен')")
+            .execute(&db)
+            .await
+            .unwrap();
+        let id = place_order(&db, &f, None).await;
+        let cookie = admin_cookie(&db).await;
+        let (status, _, html) = peek_post(
+            &app(&db),
+            &format!("/admin/shop/orders/{id}/status"),
+            &cookie,
+            "status=F",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("peek-head"), "панель: {html}");
+        assert!(
+            html.contains(&format!("id=\"order-row-{id}\"")),
+            "строка: {html}"
+        );
+        assert!(html.contains("hx-swap-oob=\"true\""));
+        assert!(html.contains("Выполнен"));
+        let st: String = sqlx::query_scalar("SELECT status FROM orders WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(st, "F");
+    }
+
+    #[sqlx::test]
+    async fn peek_paid_on_canceled_shows_error(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        sqlx::query("UPDATE orders SET canceled = TRUE WHERE id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let cookie = admin_cookie(&db).await;
+        let (status, headers, html) = peek_post(
+            &app(&db),
+            &format!("/admin/shop/orders/{id}/paid"),
+            &cookie,
+            "value=Y",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("peek-head"), "панель с текущим состоянием");
+        let trigger = headers.get("hx-trigger").unwrap().to_str().unwrap();
+        assert!(trigger.contains("\"kind\":\"error\""), "{trigger}");
+        let paid: bool = sqlx::query_scalar("SELECT paid FROM orders WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert!(!paid, "оплата не поставлена");
+    }
+
+    #[sqlx::test]
+    async fn status_without_peek_unchanged(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        sqlx::query("INSERT INTO order_statuses (code, name) VALUES ('F', 'Выполнен')")
+            .execute(&db)
+            .await
+            .unwrap();
+        let id = place_order(&db, &f, None).await;
+        let cookie = admin_cookie(&db).await;
+        let (status, headers, _) = post_form_raw(
+            &app(&db),
+            &format!("/admin/shop/orders/{id}/status"),
+            &cookie,
+            "status=F",
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(
+            headers[axum::http::header::LOCATION],
+            format!("/admin/shop/orders/{id}").as_str()
+        );
+        let (status, headers, _) = post_form_raw(
+            &app(&db),
+            &format!("/admin/shop/orders/{id}/paid"),
+            &cookie,
+            "value=Y",
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert!(headers.get("hx-trigger").is_none());
+    }
+
+    #[sqlx::test]
+    async fn row_has_peek_attr_and_links_stay(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let cookie = admin_cookie(&db).await;
+        let (status, html) = get(&app(&db), "/admin/shop/orders", &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            html.contains(&format!(
+                "<tr id=\"order-row-{id}\" data-peek=\"/admin/shop/orders/{id}/peek\""
+            )),
+            "{html}"
+        );
+        assert!(html.contains(&format!("<a href=\"/admin/shop/orders/{id}\">")));
+        assert!(html.contains("id=\"peek\""), "контейнер панели в оболочке");
     }
 }

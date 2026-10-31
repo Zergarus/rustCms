@@ -135,6 +135,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         )
         .route("/shop/orders", get(shop::orders::list))
         .route("/shop/orders/{id}", get(shop::orders::view))
+        .route("/shop/orders/{id}/peek", get(shop::orders::peek))
         .route("/shop/orders/{id}/xml1c", get(shop::orders::xml1c))
         .route("/shop/orders/{id}/status", post(shop::orders::set_status))
         .route("/shop/orders/{id}/paid", post(shop::orders::set_paid))

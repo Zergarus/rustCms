@@ -30,15 +30,7 @@
     <thead><tr><th>№</th><th>Дата</th><th>Покупатель</th><th>Статус</th><th>Сумма</th><th>Оплата</th><th>Доставка</th></tr></thead>
     <tbody>
       {% for o in rows %}
-      <tr{% if o.canceled %} class="muted"{% endif %}>
-        <td><a href="/admin/shop/orders/{{ o.id }}">{{ o.account_number }}</a></td>
-        <td class="muted">{{ o.created_at[:16]|replace("T", " ") }}</td>
-        <td>{{ o.buyer }}</td>
-        <td>{% if o.canceled %}<span class="badge">отменён</span>{% else %}{{ o.status_name }}{% endif %}</td>
-        <td>{{ o.price }} {{ o.currency }}</td>
-        <td>{% if o.paid %}<span class="badge ok">оплачен</span>{% else %}<span class="muted">нет</span>{% endif %}</td>
-        <td>{{ o.delivery }}</td>
-      </tr>
+      {% include "shop/_order_row.html" %}
       {% endfor %}
     </tbody>
   </table>

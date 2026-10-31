@@ -1,0 +1,13 @@
+{#- Рамка панели быстрого просмотра (#peek): заголовок, крестик, содержимое. Подключение:
+    {% import "_peek.html" as peek %}{% call peek.frame("Заголовок", "/адрес/карточки") %}…{% endcall %} -#}
+{%- macro frame(title, open_url) -%}
+{% import "_ui.html" as ui %}
+<div class="peek-head">
+  <h2>{{ title }}</h2>
+  <button class="ico" type="button" data-peek-close aria-label="Закрыть">{{ ui.icon("close") }}</button>
+</div>
+<div class="peek-body">{{ caller() }}</div>
+{%- if open_url %}
+<div class="peek-foot"><a class="btn primary" href="{{ open_url }}">Открыть карточку</a></div>
+{%- endif %}
+{%- endmacro -%}

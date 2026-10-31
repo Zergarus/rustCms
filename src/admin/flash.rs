@@ -73,8 +73,6 @@ pub(crate) fn read(jar: &CookieJar) -> Option<Flash> {
     })
 }
 
-// Пока не используется: подключается страницами с HTMX-ответами.
-#[allow(dead_code)]
 /// `HX-Trigger: {"toast":{"text":…,"kind":"ok|error"}}`; не-ASCII экранируется, чтобы
 /// заголовок остался корректным.
 pub(crate) fn toast(text: &str, kind: FlashKind) -> [(HeaderName, HeaderValue); 1] {

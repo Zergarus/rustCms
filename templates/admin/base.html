@@ -67,6 +67,8 @@
 
   {% for g in shell.nav.goto %}<a data-goto="{{ g[0] }}" href="{{ g[1] }}" hidden tabindex="-1" aria-hidden="true"></a>{% endfor %}
 
+  <aside id="peek" class="peek" hx-push-url="false" aria-label="Быстрый просмотр" hidden></aside>
+
   <div id="savebar" class="savebar" hidden>
     <span>Есть несохранённые изменения</span>
     <button class="btn" type="button" data-savebar-reset>Отменить</button>

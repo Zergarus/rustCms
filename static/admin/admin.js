@@ -545,6 +545,47 @@
     );
   });
 
+  /* ---------- Быстрый просмотр (#peek) ---------- */
+
+  function peekEl() { return $('#peek'); }
+  function peekOpen() { var p = peekEl(); return !!p && !p.hidden; }
+
+  function peekClose() {
+    var p = peekEl();
+    if (!p) return;
+    p.hidden = true;
+    p.innerHTML = '';
+    $$('tr.peeked').forEach(function (r) { r.classList.remove('peeked'); });
+  }
+
+  // Загрузка панели без истории и без полосы открытых записей: htmx.ajax не меняет адрес
+  function peekShow(row) {
+    var p = peekEl();
+    if (!p || !window.htmx) return;
+    $$('tr.peeked').forEach(function (r) { r.classList.remove('peeked'); });
+    row.classList.add('peeked');
+    p.hidden = false;
+    window.htmx.ajax('GET', row.dataset.peek, { target: '#peek', swap: 'innerHTML' });
+  }
+
+  document.addEventListener('click', function (e) {
+    if (e.target.closest && e.target.closest('[data-peek-close]')) { peekClose(); return; }
+    var row = e.target.closest && e.target.closest('tr[data-peek]');
+    if (!row || e.button) return;
+    if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    if (e.target.closest('a, button, input, select, label, textarea')) return;
+    var sel = window.getSelection && window.getSelection();
+    if (sel && String(sel).trim() !== '') return;
+    peekShow(row);
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && peekOpen() && !$('dialog[open]')) peekClose();
+  });
+
+  // Снимок страницы для кнопки «Назад» не должен хранить открытую панель
+  document.addEventListener('htmx:beforeHistorySave', peekClose);
+
   /* ---------- Инициализация страницы ---------- */
 
   // Переход по якорю вкладки (например, #offers после создания предложения) открывает её

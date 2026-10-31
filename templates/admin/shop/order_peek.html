@@ -1,0 +1,33 @@
+{#- Быстрый просмотр заказа: панель + строка списка out-of-band (row — свежая строка) -#}
+{% import "_ui.html" as ui %}
+{% import "_peek.html" as peek %}
+{% call peek.frame("Заказ № " ~ order.account_number, "/admin/shop/orders/" ~ order.id) %}
+  {% call ui.prop("Дата") %}{{ order.created_at[:16]|replace("T", " ") }}{% endcall %}
+  {% call ui.prop("Покупатель") %}{{ buyer or "—" }}{% endcall %}
+  {% call ui.prop("Телефон") %}{{ phone or "—" }}{% endcall %}
+  {% call ui.prop("E-mail") %}{{ email or "—" }}{% endcall %}
+  {% call ui.prop("Сумма") %}<b>{{ order.price }} {{ order.currency }}</b>{% endcall %}
+
+  <h3>Состав</h3>
+  <ul class="peek-lines">
+    {%- for i in order.items[:5] %}
+    <li><span>{{ i.name }}</span><span class="muted">× {{ i.quantity|int if i.quantity == i.quantity|int else i.quantity }}</span></li>
+    {%- endfor %}
+    {%- if order.items|length > 5 %}
+    <li class="muted">ещё {{ order.items|length - 5 }}</li>
+    {%- endif %}
+  </ul>
+
+  <h3>Состояние</h3>
+  <form method="post" action="/admin/shop/orders/{{ order.id }}/status" hx-post="/admin/shop/orders/{{ order.id }}/status" hx-trigger="change" hx-target="#peek" hx-swap="innerHTML">
+    {% call ui.prop("Статус") %}<select name="status">{% for s in statuses %}<option value="{{ s[0] }}" {% if order.status == s[0] %}selected{% endif %}>{{ s[1] }}</option>{% endfor %}</select>{% if order.canceled %} <span class="badge">отменён</span>{% endif %}{% endcall %}
+  </form>
+  <form method="post" action="/admin/shop/orders/{{ order.id }}/paid" hx-post="/admin/shop/orders/{{ order.id }}/paid" hx-target="#peek" hx-swap="innerHTML">
+    <input type="hidden" name="value" value="{% if order.paid %}N{% else %}Y{% endif %}">
+    {% call ui.prop("Оплата") %}{% if order.paid %}<span class="badge ok">оплачен</span>{% else %}не оплачен{% endif %}
+      <button class="btn" type="submit"{% if order.canceled %} disabled{% endif %}>{% if order.paid %}Не оплачен{% else %}Оплачен{% endif %}</button>{% endcall %}
+  </form>
+  {% call ui.prop("Отгрузка") %}{% if shipped %}<span class="badge ok">отгружен</span>{% else %}не отгружен{% endif %}{% endcall %}
+  {% call ui.prop("Доставка") %}{{ order.shipment.delivery_name if order.shipment else "—" }}{% endcall %}
+{% endcall %}
+{% if row %}{% with o = row, oob = true, peeked = true %}{% include "shop/_order_row.html" %}{% endwith %}{% endif %}
