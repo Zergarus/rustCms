@@ -1978,6 +1978,18 @@ mod tests {
         }
 
         #[sqlx::test]
+        async fn item_form_actions_marked(db: PgPool) {
+            let app = crate::app(test_state(db.clone()));
+            let cookie = admin_cookie(&db).await;
+            let (_, item) = setup(&db, false, true).await;
+            let (_, html) = get(&app, &format!("/admin/items/{item}"), &cookie).await;
+            assert!(
+                html.contains("<div class=\"form-actions\" data-form-actions>"),
+                "{html}"
+            );
+        }
+
+        #[sqlx::test]
         async fn item_tab_query_opens_tab(db: PgPool) {
             let app = crate::app(test_state(db.clone()));
             let cookie = admin_cookie(&db).await;

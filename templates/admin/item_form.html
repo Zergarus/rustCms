@@ -205,7 +205,7 @@
   {% endif %}
 
   </fieldset>
-  <div class="form-actions">
+  <div class="form-actions" data-form-actions{% if tabctx.active == "offers" %} hidden{% endif %}>
     {% if can_write %}<button class="btn primary" type="submit">Сохранить</button>{% endif %}
     <a class="btn" href="/admin/collections/{{ collection.id }}/items{% if form.section_id %}?section={{ form.section_id }}{% endif %}">{% if can_write %}Отмена{% else %}Назад{% endif %}</a>
   </div>

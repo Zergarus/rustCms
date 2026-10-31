@@ -2,12 +2,23 @@
 {% set section = "users" %}
 {% block title %}{% if target %}{{ target.login }}{% else %}Новый пользователь{% endif %}{% endblock %}
 {% block content %}
-<div class="breadcrumbs"><a href="/admin/users">Пользователи</a> /</div>
-<h1>{% if target %}{{ target.login }}{% else %}Новый пользователь{% endif %}</h1>
+{% import "_ui.html" as ui %}
+{% call ui.page_head([("Пользователи", "/admin/users"), (target.login if target else "Новый пользователь", none)]) %}
+  {%- if target and not is_self %}
+  <form method="post" action="/admin/users/{{ target.id }}/delete" hx-confirm="Удалить пользователя «{{ target.login }}»?">
+    <button class="btn danger" type="submit">Удалить</button>
+  </form>
+  {%- endif %}
+{% endcall %}
+{{ ui.card_errors(tabctx) }}
 
-<form class="card form" method="post" action="{% if target %}/admin/users/{{ target.id }}{% else %}/admin/users{% endif %}" autocomplete="off">
-  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<div data-card>
+{{ ui.card_tabs(card_tabs, tabctx) }}
+<form class="card form" method="post" data-dirty-guard autocomplete="off"
+      action="{% if target %}/admin/users/{{ target.id }}{% else %}/admin/users{% endif %}">
+  <input type="hidden" name="tab" value="{{ tabctx.active }}">
 
+  {% call ui.tab_pane("profile", tabctx) %}
   <div class="grid-2">
     <label>Логин *
       <input name="login" value="{{ form.login }}" required minlength="3" maxlength="50">
@@ -19,7 +30,15 @@
   <label>E-mail
     <input name="email" type="email" value="{{ form.email }}">
   </label>
+  {% if target %}
+  <p class="muted">
+    Создан {{ target.created_at[:16]|replace("T", " ") }} ·
+    последний вход {% if target.last_login_at %}{{ target.last_login_at[:16]|replace("T", " ") }}{% else %}— ещё не входил{% endif %}
+  </p>
+  {% endif %}
+  {% endcall %}
 
+  {% call ui.tab_pane("access", tabctx) %}
   <fieldset>
     <legend>Доступ</legend>
     <label class="check">
@@ -50,6 +69,9 @@
     {% endif %}
   </fieldset>
 
+  {% endcall %}
+
+  {% call ui.tab_pane("password", tabctx) %}
   <fieldset>
     <legend>{% if target %}Смена пароля{% else %}Пароль{% endif %}</legend>
     {% if target %}<p class="muted hint">Оставьте пустым, чтобы не менять. После смены все остальные сессии пользователя будут завершены.</p>{% endif %}
@@ -64,21 +86,17 @@
     </div>
   </fieldset>
 
-  {% if target %}
-  <p class="muted">
-    Создан {{ target.created_at[:16]|replace("T", " ") }} ·
-    последний вход {% if target.last_login_at %}{{ target.last_login_at[:16]|replace("T", " ") }}{% else %}— ещё не входил{% endif %}
-  </p>
-  {% endif %}
+  {% endcall %}
 
-  <div class="form-actions">
+  <div class="form-actions" data-form-actions{% if tabctx.active in ["keys", "orders"] %} hidden{% endif %}>
     <button class="btn primary" type="submit">Сохранить</button>
     <a class="btn" href="/admin/users">Отмена</a>
   </div>
 </form>
 
 {% if target %}
-<section class="card form" id="api-keys">
+{% call ui.tab_pane("keys", tabctx) %}
+<div class="card form" id="api-keys">
   <h2>API-ключи</h2>
   <p class="muted hint">Ключи для внешних систем (API склада). Действуют с правами этого пользователя.</p>
 
@@ -150,16 +168,35 @@
     </fieldset>
     <div class="form-actions"><button class="btn primary" type="submit">Выпустить ключ</button></div>
   </form>
-</section>
+</div>
+{% endcall %}
+{% if orders_tab %}
+{% call ui.tab_pane("orders", tabctx) %}
+<div class="card" id="user-orders">
+  <h2>Последние заказы</h2>
+  {% if orders %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Номер</th><th>Дата</th><th>Сумма</th><th>Статус</th><th>Оплачен</th></tr></thead>
+      <tbody>
+        {% for o in orders %}
+        <tr>
+          <td><a href="/admin/shop/orders/{{ o.id }}">{{ o.account_number }}</a></td>
+          <td class="muted">{{ o.created_at[:16]|replace("T", " ") }}</td>
+          <td>{{ o.price }} {{ o.currency }}</td>
+          <td>{{ o.status_name }}</td>
+          <td>{% if o.paid %}<span class="badge ok">оплачен</span>{% else %}<span class="muted">нет</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">Заказов пока нет.</p>
+  {% endif %}
+</div>
+{% endcall %}
 {% endif %}
-
-{% if target and not is_self %}
-<section class="card danger-zone">
-  <h2>Удаление</h2>
-  <p class="muted">Пользователь будет удалён безвозвратно, все его сессии завершатся.</p>
-  <form method="post" action="/admin/users/{{ target.id }}/delete" hx-confirm="Удалить пользователя «{{ target.login }}»?">
-    <button class="btn danger" type="submit">Удалить пользователя</button>
-  </form>
-</section>
 {% endif %}
+</div>
 {% endblock %}

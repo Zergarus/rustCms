@@ -280,6 +280,7 @@ label.check input { width: auto; }
 fieldset { border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 16px 0; margin: 0 0 16px; }
 legend { font-weight: 600; padding: 0 6px; }
 .form-actions { display: flex; gap: 8px; }
+.form-actions[hidden] { display: none; }
 .grid-2, .grid-3, .grid-4, .grid-5 { display: grid; gap: 0 16px; align-items: start; }
 .grid-4 { grid-template-columns: repeat(4, 1fr); }
 .grid-4 .form-actions { margin-top: 24px; }

@@ -249,8 +249,13 @@
       var pane = paneOf(nav, b.dataset.tabBtn);
       if (pane) pane.hidden = !on;
     });
+    // «Сохранить»/«Отмена» относятся только к вкладкам основной формы
+    var card = cardOf(nav);
+    var actions = $('[data-form-actions]', card);
+    var shown = paneOf(nav, key);
+    if (actions) actions.hidden = !(shown && shown.closest('form'));
     // форма карточки возвращает на ту же вкладку после сохранения
-    var back = $('form input[name="tab"]', cardOf(nav));
+    var back = $('form input[name="tab"]', card);
     if (back) back.value = key;
     if (!remember) return;
     var url = new URL(location.href);

@@ -1,6 +1,6 @@
 use axum::{
     Extension,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderValue, header},
     response::{Html, IntoResponse, Redirect, Response},
 };
@@ -8,9 +8,13 @@ use axum_extra::extract::{CookieJar, Form};
 use minijinja::context;
 use serde::{Deserialize, Serialize};
 
-use super::render;
+use super::{
+    card::{TabErrors, tab_context},
+    flash::{self, FlashKind},
+    render,
+};
 use crate::{
-    access::{Access, USERS_MANAGE},
+    access::{Access, ORDERS_MANAGE, USERS_MANAGE},
     apikeys::{self, KeyRow, NewKey, SCOPES},
     auth,
     error::{AppError, AppResult, is_unique_violation},
@@ -20,6 +24,16 @@ use crate::{
 };
 
 const MIN_PASSWORD_LEN: usize = 8;
+/// Вкладки карточки, на которые можно вернуться после сохранения.
+const CARD_TABS: [&str; 5] = ["profile", "access", "password", "keys", "orders"];
+/// Сколько последних заказов показывает вкладка «Заказы».
+const ORDERS_LIMIT: i64 = 20;
+
+/// Открываемая вкладка карточки (`?tab=`).
+#[derive(Default, Deserialize)]
+pub struct TabQuery {
+    tab: Option<String>,
+}
 
 #[derive(Default, Deserialize, Serialize)]
 pub struct UserForm {
@@ -39,38 +53,44 @@ pub struct UserForm {
     /// Отмеченные группы (повторяющееся поле `groups`).
     #[serde(default)]
     groups: Vec<i64>,
+    /// Вкладка, с которой отправлена форма.
+    #[serde(default, skip_serializing)]
+    tab: String,
 }
 
 impl UserForm {
     /// `password_required` — при создании пароль обязателен, при редактировании
     /// пустое поле означает «не менять».
-    fn validate(&self, password_required: bool) -> Result<(UserInput, Option<String>), String> {
-        let mut errors = Vec::new();
+    fn validate(&self, password_required: bool) -> Result<(UserInput, Option<String>), TabErrors> {
+        let mut errors = TabErrors::new();
         let login = self.login.trim();
         if !is_valid_login(login) {
-            errors.push("Логин: 3–50 символов, латиница, цифры и «_ . - @»");
+            errors.push(
+                "profile",
+                "Логин: 3–50 символов, латиница, цифры и «_ . - @»",
+            );
         }
         let email = self.email.trim();
         if !email.is_empty() && !is_valid_email(email) {
-            errors.push("Неверный e-mail");
+            errors.push("profile", "Неверный e-mail");
         }
         let password = match (self.password.is_empty(), password_required) {
             (true, true) => {
-                errors.push("Укажите пароль");
+                errors.push("password", "Укажите пароль");
                 None
             }
             (true, false) => None,
             (false, _) => {
                 if self.password.chars().count() < MIN_PASSWORD_LEN {
-                    errors.push("Пароль должен быть не короче 8 символов");
+                    errors.push("password", "Пароль должен быть не короче 8 символов");
                 } else if self.password != self.password_confirm {
-                    errors.push("Пароли не совпадают");
+                    errors.push("password", "Пароли не совпадают");
                 }
                 Some(self.password.clone())
             }
         };
         if !errors.is_empty() {
-            return Err(errors.join("; "));
+            return Err(errors);
         }
         let input = UserInput {
             login: login.to_string(),
@@ -97,14 +117,65 @@ async fn form_context(state: &AppState, user: &Access) -> AppResult<minijinja::V
     })
 }
 
+/// Заказы пользователя для вкладки «Заказы».
+#[derive(sqlx::FromRow, Serialize)]
+struct UserOrder {
+    id: i64,
+    account_number: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    price: f64,
+    currency: String,
+    status_name: String,
+    paid: bool,
+}
+
+async fn user_orders(state: &AppState, user_id: i64) -> AppResult<Vec<UserOrder>> {
+    Ok(sqlx::query_as(
+        "SELECT o.id, COALESCE(o.account_number, o.id::text) AS account_number, o.created_at,
+                o.price::float8 AS price, o.currency, COALESCE(s.name, o.status) AS status_name, o.paid
+         FROM orders o
+         LEFT JOIN order_statuses s ON s.code = o.status
+         WHERE o.user_id = $1
+         ORDER BY o.id DESC
+         LIMIT $2",
+    )
+    .bind(user_id)
+    .bind(ORDERS_LIMIT)
+    .fetch_all(&state.db)
+    .await?)
+}
+
+/// Отрисовка карточки. `editing` — существующий пользователь (есть вкладки ключей и заказов);
+/// `errors` и `tab` определяют активную вкладку.
 fn render_form(
     state: &AppState,
     user: Access,
+    editing: bool,
     extra: minijinja::Value,
     ctx: minijinja::Value,
+    errors: &TabErrors,
+    tab: Option<&str>,
 ) -> AppResult<Html<String>> {
+    let mut card_tabs: Vec<(&'static str, &'static str)> = vec![
+        ("profile", "Профиль"),
+        ("access", "Доступ"),
+        ("password", "Пароль"),
+    ];
+    let orders_tab = editing && user.can(ORDERS_MANAGE);
+    if editing {
+        card_tabs.push(("keys", "API-ключи"));
+    }
+    if orders_tab {
+        card_tabs.push(("orders", "Заказы"));
+    }
+    let visible: Vec<&'static str> = card_tabs.iter().map(|t| t.0).collect();
+    let tabctx = tab_context(errors, &visible, tab);
     let ctx = minijinja::value::merge_maps([extra, ctx]);
-    render(state, "user_form.html", context! { user, ..ctx })
+    render(
+        state,
+        "user_form.html",
+        context! { user, card_tabs, tabctx, orders_tab, ..ctx },
+    )
 }
 
 /// Суперадминистраторов может менять только суперадминистратор.
@@ -134,7 +205,15 @@ pub async fn new_form(
         ..Default::default()
     };
     let extra = form_context(&state, &user).await?;
-    render_form(&state, user, extra, context! { form })
+    render_form(
+        &state,
+        user,
+        false,
+        extra,
+        context! { form },
+        &TabErrors::new(),
+        None,
+    )
 }
 
 pub async fn create(
@@ -143,7 +222,8 @@ pub async fn create(
     Form(form): Form<UserForm>,
 ) -> AppResult<Response> {
     user.require(USERS_MANAGE)?;
-    let error = match form.validate(true) {
+    let mut errors = TabErrors::new();
+    match form.validate(true) {
         Ok((mut input, Some(password))) => {
             if !user.is_super() {
                 input.is_admin = false;
@@ -156,43 +236,74 @@ pub async fn create(
                     }
                     return Ok(Redirect::to("/admin/users").into_response());
                 }
-                Err(e) => unique_error(&e).ok_or(AppError::from(e))?,
+                Err(e) => errors.push("profile", unique_error(&e).ok_or(AppError::from(e))?),
             }
         }
         Ok((_, None)) => unreachable!("пароль обязателен при создании"),
-        Err(msg) => msg,
-    };
+        Err(e) => errors.append(e),
+    }
     let extra = form_context(&state, &user).await?;
-    Ok(render_form(&state, user, extra, context! { form, error })?.into_response())
+    let tab = form.tab.clone();
+    Ok(render_form(
+        &state,
+        user,
+        false,
+        extra,
+        context! { form },
+        &errors,
+        Some(&tab),
+    )?
+    .into_response())
 }
 
 pub async fn edit_form(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
+    Query(q): Query<TabQuery>,
 ) -> AppResult<Html<String>> {
     user.require(USERS_MANAGE)?;
     let target = users::get(&state.db, id).await?.ok_or(AppError::NotFound)?;
     check_target(&user, &target)?;
-    edit_page(&state, user, target, context! {}).await
+    edit_page(
+        &state,
+        user,
+        target,
+        context! {},
+        None,
+        &TabErrors::new(),
+        q.tab.as_deref(),
+    )
+    .await
 }
 
 /// Карточка пользователя; `keys_extra` — состояние блока ключей (новый ключ, ошибка,
-/// подтверждение отзыва).
+/// подтверждение отзыва), `form` — введённые значения (после ошибки), иначе берутся из базы.
 async fn edit_page(
     state: &AppState,
     user: Access,
     target: UserRow,
     keys_extra: minijinja::Value,
+    form: Option<UserForm>,
+    errors: &TabErrors,
+    tab: Option<&str>,
 ) -> AppResult<Html<String>> {
-    let form = UserForm {
-        login: target.login.clone(),
-        name: target.name.clone(),
-        email: target.email.clone().unwrap_or_default(),
-        is_admin: target.is_admin.then(|| "on".into()),
-        active: target.active.then(|| "on".into()),
-        groups: groups::user_group_ids(&state.db, target.id).await?,
-        ..Default::default()
+    let form = match form {
+        Some(f) => f,
+        None => UserForm {
+            login: target.login.clone(),
+            name: target.name.clone(),
+            email: target.email.clone().unwrap_or_default(),
+            is_admin: target.is_admin.then(|| "on".into()),
+            active: target.active.then(|| "on".into()),
+            groups: groups::user_group_ids(&state.db, target.id).await?,
+            ..Default::default()
+        },
+    };
+    let orders = if user.can(ORDERS_MANAGE) {
+        user_orders(state, target.id).await?
+    } else {
+        Vec::new()
     };
     let is_self = target.id == user.user.id;
     let keys = apikeys::list(&state.db, target.id).await?;
@@ -203,7 +314,15 @@ async fn edit_page(
     let extra = form_context(state, &user).await?;
     let keys_ctx = minijinja::value::merge_maps([context! { keys, scopes }, keys_extra]);
     let extra = minijinja::value::merge_maps([extra, keys_ctx]);
-    render_form(state, user, extra, context! { target, form, is_self })
+    render_form(
+        state,
+        user,
+        true,
+        extra,
+        context! { target, form, is_self, orders },
+        errors,
+        tab,
+    )
 }
 
 #[derive(Default, Deserialize)]
@@ -279,7 +398,16 @@ pub async fn issue_key(
         Ok(new) => {
             let (_, full) = apikeys::issue(&state.db, &new, by).await?;
             // полный ключ — только в этом ответе, не кэшируется и нигде не хранится
-            let page = edit_page(&state, user, target, context! { new_key => full }).await?;
+            let page = edit_page(
+                &state,
+                user,
+                target,
+                context! { new_key => full },
+                None,
+                &TabErrors::new(),
+                Some("keys"),
+            )
+            .await?;
             let mut res = page.into_response();
             res.headers_mut()
                 .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -292,9 +420,17 @@ pub async fn issue_key(
             key_expires => form.expires_at.clone(),
         },
     };
-    Ok(edit_page(&state, user, target, keys_extra)
-        .await?
-        .into_response())
+    Ok(edit_page(
+        &state,
+        user,
+        target,
+        keys_extra,
+        None,
+        &TabErrors::new(),
+        Some("keys"),
+    )
+    .await?
+    .into_response())
 }
 
 /// GET на адреса POST-форм (reload, «Назад») — обратно в карточку.
@@ -324,18 +460,24 @@ pub async fn revoke_key(
         if !apikeys::revoke(&state.db, id, key_id).await? {
             return Err(AppError::NotFound);
         }
-        return Ok(Redirect::to(&format!("/admin/users/{id}")).into_response());
+        return Ok(Redirect::to(&format!("/admin/users/{id}?tab=keys")).into_response());
     }
     let key: KeyRow = apikeys::list(&state.db, id)
         .await?
         .into_iter()
         .find(|k| k.id == key_id && k.revoked_at.is_none())
         .ok_or(AppError::NotFound)?;
-    Ok(
-        edit_page(&state, user, target, context! { confirm_key => key })
-            .await?
-            .into_response(),
+    Ok(edit_page(
+        &state,
+        user,
+        target,
+        context! { confirm_key => key },
+        None,
+        &TabErrors::new(),
+        Some("keys"),
     )
+    .await?
+    .into_response())
 }
 
 pub async fn update(
@@ -349,7 +491,8 @@ pub async fn update(
     let target = users::get(&state.db, id).await?.ok_or(AppError::NotFound)?;
     check_target(&user, &target)?;
     let is_self = target.id == user.user.id;
-    let error = match form.validate(false) {
+    let mut errors = TabErrors::new();
+    match form.validate(false) {
         Ok((mut input, password)) => {
             if is_self {
                 // себя нельзя заблокировать или лишить прав — иначе можно потерять доступ
@@ -376,20 +519,34 @@ pub async fn update(
                         let keep = is_self.then_some(&jar);
                         auth::delete_user_sessions(&state.db, id, keep).await?;
                     }
-                    return Ok(Redirect::to("/admin/users").into_response());
+                    // назад на ту же вкладку; без неё — к списку
+                    let tab = form.tab.as_str();
+                    return Ok(if CARD_TABS.contains(&tab) {
+                        flash::redirect(
+                            &format!("/admin/users/{id}?tab={tab}"),
+                            "Сохранено",
+                            FlashKind::Ok,
+                        )
+                    } else {
+                        Redirect::to("/admin/users").into_response()
+                    });
                 }
-                Err(e) => unique_error(&e).ok_or(AppError::from(e))?,
+                Err(e) => errors.push("profile", unique_error(&e).ok_or(AppError::from(e))?),
             }
         }
-        Err(msg) => msg,
-    };
-    let extra = form_context(&state, &user).await?;
-    let page = render_form(
+        Err(e) => errors.append(e),
+    }
+    let tab = form.tab.clone();
+    let page = edit_page(
         &state,
         user,
-        extra,
-        context! { target, form, is_self, error },
-    )?;
+        target,
+        context! {},
+        Some(form),
+        &errors,
+        Some(&tab),
+    )
+    .await?;
     Ok(page.into_response())
 }
 
@@ -706,5 +863,205 @@ mod tests {
         let by = |n: &str| keys.iter().find(|k| k.name == n).unwrap().scopes.clone();
         assert_eq!(by("K"), vec!["stock.read", "stock.write", "stock.conduct"]);
         assert_eq!(by("D"), vec!["stock.read"]);
+    }
+
+    // ---- вкладки карточки ----
+
+    fn has_tab(html: &str, key: &str) -> bool {
+        html.contains(&format!("data-tab-btn=\"{key}\""))
+    }
+
+    #[test]
+    fn user_errors_tagged() {
+        let bad = UserForm {
+            login: "a".into(),
+            email: "не почта".into(),
+            password: "short".into(),
+            ..Default::default()
+        };
+        let errs = bad.validate(false).err().unwrap();
+        let got: Vec<(&str, String)> = errs.iter().map(|(t, m)| (t, m.to_string())).collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "profile",
+                    "Логин: 3–50 символов, латиница, цифры и «_ . - @»".to_string()
+                ),
+                ("profile", "Неверный e-mail".to_string()),
+                (
+                    "password",
+                    "Пароль должен быть не короче 8 символов".to_string()
+                ),
+            ]
+        );
+        let errs = form("", "").validate(true).err().unwrap();
+        assert_eq!(
+            errs.iter().collect::<Vec<_>>(),
+            vec![("password", "Укажите пароль")]
+        );
+        let errs = form("longenough1", "other").validate(true).err().unwrap();
+        assert_eq!(
+            errs.iter().collect::<Vec<_>>(),
+            vec![("password", "Пароли не совпадают")]
+        );
+    }
+
+    #[sqlx::test]
+    async fn user_card_tabs_visibility(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let admin = admin_cookie(&db).await;
+        let (uid, _) = user_cookie(&db, "worker", false).await;
+        let (s, html) = get(&app, &format!("/admin/users/{uid}"), &admin).await;
+        assert_eq!(s, 200);
+        for k in ["profile", "access", "password", "keys", "orders"] {
+            assert!(has_tab(&html, k), "{k}: {html}");
+        }
+        assert!(html.contains("data-form-actions>"), "{html}");
+        // без orders.manage вкладки заказов нет
+        let manager = permitted_cookie(&db, "manager", &[USERS_MANAGE]).await;
+        let (_, html) = get(&app, &format!("/admin/users/{uid}"), &manager).await;
+        assert!(
+            has_tab(&html, "keys") && !has_tab(&html, "orders"),
+            "{html}"
+        );
+        let (_, html) = get(&app, &format!("/admin/users/{uid}?tab=orders"), &manager).await;
+        assert!(html.contains("<section data-tab=\"profile\">"), "{html}");
+        // новая запись: только форма
+        let (_, html) = get(&app, "/admin/users/new", &admin).await;
+        for k in ["profile", "access", "password"] {
+            assert!(has_tab(&html, k), "{k}: {html}");
+        }
+        for k in ["keys", "orders"] {
+            assert!(!has_tab(&html, k), "{k}: {html}");
+        }
+        assert!(html.contains("data-form-actions"), "{html}");
+    }
+
+    #[sqlx::test]
+    async fn user_orders_tab_lists_last_20(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let admin = admin_cookie(&db).await;
+        let (uid, _) = user_cookie(&db, "worker", false).await;
+        let f = crate::test_support::order_fixture(&db).await;
+        let mut ids = Vec::new();
+        for _ in 0..21 {
+            ids.push(crate::test_support::place_order(&db, &f, Some(uid)).await);
+        }
+        let other = crate::test_support::place_order(&db, &f, None).await;
+        let (_, html) = get(&app, &format!("/admin/users/{uid}?tab=orders"), &admin).await;
+        assert!(html.contains("<section data-tab=\"orders\">"), "{html}");
+        let link = |id: i64| format!("href=\"/admin/shop/orders/{id}\"");
+        assert!(!html.contains(&link(ids[0])), "самый старый не попадает");
+        assert!(html.contains(&link(ids[1])));
+        assert!(html.contains(&link(ids[20])));
+        assert!(!html.contains(&link(other)), "чужой заказ");
+        assert!(html.contains("Принят"), "{html}");
+        assert!(html.contains("RUB"), "{html}");
+        // новейший выше старого
+        assert!(html.find(&link(ids[20])) < html.find(&link(ids[1])));
+    }
+
+    #[sqlx::test]
+    async fn user_error_opens_error_tab(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let admin = admin_cookie(&db).await;
+        let (uid, _) = user_cookie(&db, "worker", false).await;
+        let (s, _, html) = post_form_raw(
+            &app,
+            &format!("/admin/users/{uid}"),
+            &admin,
+            "login=a&password=short&password_confirm=short&tab=password",
+        )
+        .await;
+        assert_eq!(s, 200);
+        assert!(html.contains("<section data-tab=\"profile\">"), "{html}");
+        assert!(
+            html.contains("<section data-tab=\"password\" hidden>"),
+            "{html}"
+        );
+        assert_eq!(html.matches("tab-dot err").count(), 2, "{html}");
+        let prof = html.find("<section data-tab=\"profile\"").unwrap();
+        let pass = html.find("<section data-tab=\"password\"").unwrap();
+        let login_err = html.find("Логин: 3–50").unwrap();
+        let pass_err = html.find("Пароль должен быть не короче 8").unwrap();
+        assert!(prof < login_err && login_err < pass, "{html}");
+        assert!(pass < pass_err, "{html}");
+    }
+
+    #[sqlx::test]
+    async fn user_save_returns_to_tab(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let admin = admin_cookie(&db).await;
+        let (uid, _) = user_cookie(&db, "worker", false).await;
+        let (s, h, _) = post_form_raw(
+            &app,
+            &format!("/admin/users/{uid}"),
+            &admin,
+            "login=worker&active=on&tab=access",
+        )
+        .await;
+        assert_eq!(s, 303);
+        assert_eq!(
+            h["location"],
+            format!("/admin/users/{uid}?tab=access").as_str()
+        );
+        assert!(
+            h[axum::http::header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .contains("admin_flash")
+        );
+        // неизвестная вкладка — как раньше, к списку
+        let (s, h, _) = post_form_raw(
+            &app,
+            &format!("/admin/users/{uid}"),
+            &admin,
+            "login=worker&active=on&tab=%22%3E",
+        )
+        .await;
+        assert_eq!(s, 303);
+        assert_eq!(h["location"], "/admin/users");
+    }
+
+    #[sqlx::test]
+    async fn issue_key_opens_keys_tab(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let admin = admin_cookie(&db).await;
+        let (uid, _) = user_cookie(&db, "worker", false).await;
+        let (_, _, html) = post_form_raw(
+            &app,
+            &format!("/admin/users/{uid}/api-keys"),
+            &admin,
+            "name=K&scopes=stock.read",
+        )
+        .await;
+        assert!(html.contains("<section data-tab=\"keys\">"), "{html}");
+        assert!(
+            html.contains("<section data-tab=\"profile\" hidden>"),
+            "{html}"
+        );
+        // вкладка вне формы — панель «Сохранить» скрыта
+        assert!(html.contains("data-form-actions hidden"), "{html}");
+        // ошибка выпуска тоже остаётся на вкладке ключей
+        let (_, _, html) = post_form_raw(
+            &app,
+            &format!("/admin/users/{uid}/api-keys"),
+            &admin,
+            "name=",
+        )
+        .await;
+        assert!(html.contains("<section data-tab=\"keys\">"), "{html}");
+        // отзыв: шаг подтверждения и редирект после него
+        let kid = crate::apikeys::list(&db, uid).await.unwrap()[0].id;
+        let path = format!("/admin/users/{uid}/api-keys/{kid}/revoke");
+        let (_, _, html) = post_form_raw(&app, &path, &admin, "").await;
+        assert!(html.contains("<section data-tab=\"keys\">"), "{html}");
+        let (s, h, _) = post_form_raw(&app, &path, &admin, "confirm=1").await;
+        assert_eq!(s, 303);
+        assert_eq!(
+            h["location"],
+            format!("/admin/users/{uid}?tab=keys").as_str()
+        );
     }
 }
