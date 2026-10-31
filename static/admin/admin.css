@@ -211,6 +211,14 @@ body[data-tabs="off"] .topbar:not(:has(.nav-toggle:not([hidden]))) { min-height:
 }
 .tabs .tab:hover { color: var(--text); text-decoration: none; }
 .tabs .tab.active { background: var(--selected); color: var(--text); }
+/* вкладки карточки: кнопки без запросов, точки «ошибка» и «изменено» */
+.card-tabs .tab { background: none; font: inherit; cursor: pointer; gap: 6px; }
+.card-tabs .tab:hover { color: var(--text); }
+.tab-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.tab-dot[hidden] { display: none; }
+.tab-dot.err { background: var(--danger); }
+.tab-dot.dirty { background: var(--muted); }
+section[data-tab][hidden] { display: none; }
 .shop-nav { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
 .shop-nav a { height: 32px; display: inline-flex; align-items: center; padding: 0 14px; border-radius: 999px; border: 1px solid var(--border-strong); color: var(--muted); white-space: nowrap; }
 .shop-nav a:hover { color: var(--text); text-decoration: none; }

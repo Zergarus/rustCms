@@ -92,3 +92,35 @@
   {%- endif %}
 </div>
 {%- endmacro -%}
+
+{#- Вкладки карточки без запросов (переключает admin.js). items — пары (ключ, название);
+    tabctx — результат tab_context. Панели (tab_pane) должны лежать в том же родителе
+    (форме или контейнере), что и эта полоса. -#}
+{%- macro card_tabs(items, tabctx) -%}
+<nav class="tabs card-tabs" role="tablist" data-card-tabs>
+  {%- for t in items %}
+  <button type="button" role="tab" class="tab{% if t[0] == tabctx.active %} active{% endif %}" data-tab-btn="{{ t[0] }}" aria-selected="{% if t[0] == tabctx.active %}true{% else %}false{% endif %}">
+    {{- t[1] -}}
+    {%- if t[0] in tabctx.error_tabs %}<span class="tab-dot err" title="Есть ошибки"></span>{% endif -%}
+    <span class="tab-dot dirty" title="Изменено" hidden></span>
+  </button>
+  {%- endfor %}
+</nav>
+{%- endmacro -%}
+
+{#- Панель вкладки: {% call ui.tab_pane("main", tabctx) %}…{% endcall %} -#}
+{%- macro tab_pane(key, tabctx) -%}
+<section data-tab="{{ key }}"{% if key != tabctx.active %} hidden{% endif %}>
+  {%- for msg in (tabctx.by_tab[key] or []) %}
+  <div class="alert">{{ msg }}</div>
+  {%- endfor %}
+  {{ caller() }}
+</section>
+{%- endmacro -%}
+
+{#- Общие ошибки карточки (без вкладки или с невидимой вкладки) -#}
+{%- macro card_errors(tabctx) -%}
+{%- for msg in tabctx.general %}
+<div class="alert">{{ msg }}</div>
+{%- endfor -%}
+{%- endmacro -%}

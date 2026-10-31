@@ -1,6 +1,7 @@
 //! Админ-панель: серверный рендер (MiniJinja) + HTMX.
 
 mod auth_pages;
+mod card;
 mod collections;
 mod discounts;
 mod exchange;

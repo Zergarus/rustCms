@@ -91,6 +91,7 @@
     dirtyForm = null;
     var bar = savebar();
     if (bar) bar.hidden = true;
+    $$('.tab-dot.dirty').forEach(function (d) { d.hidden = true; });
   }
 
   // Форма могла уйти из DOM после перехода — тогда состояние сбрасываем.
@@ -216,6 +217,82 @@
     }
   }
 
+  /* ---------- Вкладки карточки ---------- */
+
+  // Панели лежат в том же родителе (форме), что и полоса вкладок.
+  function tabScope(nav) { return nav.closest('form') || nav.parentElement; }
+
+  function paneOf(nav, key) {
+    return $('section[data-tab="' + key + '"]', tabScope(nav));
+  }
+
+  // Адрес записи в строке открытых записей обновляется тем же запросом, что и при загрузке страницы.
+  function refreshOpenStrip() {
+    var strip = $('#open-tabs');
+    if (!strip || document.body.dataset.tabs === 'off' || !window.htmx) return;
+    window.htmx.ajax('POST', '/admin/tabs', {
+      target: '#open-tabs',
+      swap: 'innerHTML',
+      values: { url: location.pathname + location.search, title: document.title }
+    });
+  }
+
+  function showTab(nav, key, remember) {
+    var btn = $('[data-tab-btn="' + key + '"]', nav);
+    if (!btn) return;
+    $$('[data-tab-btn]', nav).forEach(function (b) {
+      var on = b === btn;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+      var pane = paneOf(nav, b.dataset.tabBtn);
+      if (pane) pane.hidden = !on;
+    });
+    if (!remember) return;
+    var url = new URL(location.href);
+    url.searchParams.set('tab', key);
+    history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+    refreshOpenStrip();
+  }
+
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest && e.target.closest('[data-tab-btn]');
+    if (!btn) return;
+    var nav = btn.closest('[data-card-tabs]');
+    if (nav) { e.preventDefault(); showTab(nav, btn.dataset.tabBtn, true); }
+  });
+
+  // [ и ] — предыдущая/следующая вкладка (вызывается из общего обработчика клавиш)
+  function stepTab(dir) {
+    var nav = $('[data-card-tabs]');
+    if (!nav) return false;
+    var btns = $$('[data-tab-btn]', nav);
+    var cur = btns.findIndex(function (b) { return b.classList.contains('active'); });
+    var next = btns[cur + dir];
+    if (!next) return true;
+    showTab(nav, next.dataset.tabBtn, true);
+    next.focus();
+    return true;
+  }
+
+  // ввод в поле вкладки помечает её кнопку точкой «изменено»
+  function markTabDirty(e) {
+    var pane = e.target.closest && e.target.closest('section[data-tab]');
+    if (!pane) return;
+    var nav = $('[data-card-tabs]', tabScope(pane)) || $('[data-card-tabs]', pane.parentElement);
+    var btn = nav && $('[data-tab-btn="' + pane.dataset.tab + '"] .tab-dot.dirty', nav);
+    if (btn) btn.hidden = false;
+  }
+  document.addEventListener('input', markTabDirty);
+  document.addEventListener('change', markTabDirty);
+
+  // проверка браузера упёрлась в поле скрытой вкладки — показываем её (invalid не всплывает)
+  document.addEventListener('invalid', function (e) {
+    var pane = e.target.closest && e.target.closest('section[data-tab][hidden]');
+    if (!pane) return;
+    var nav = $('[data-card-tabs]', pane.parentElement) || $('[data-card-tabs]', pane.closest('form') || document);
+    if (nav) showTab(nav, pane.dataset.tab, true);
+  }, true);
+
   /* ---------- Горячие клавиши ---------- */
 
   var gPending = null; // таймер ожидания буквы после g
@@ -281,6 +358,8 @@
       if (h) { e.preventDefault(); h.showModal(); }
     } else if (keyIs(e, 'g', 'KeyG') && !e.shiftKey) {
       gPending = window.setTimeout(function () { gPending = null; }, 1000);
+    } else if ((e.code === 'BracketLeft' || e.code === 'BracketRight') && !e.shiftKey) {
+      if (stepTab(e.code === 'BracketLeft' ? -1 : 1)) e.preventDefault();
     } else if (keyIs(e, 'c', 'KeyC')) {
       var c = $('[data-hotkey=c]');
       if (c) { e.preventDefault(); c.click(); }
