@@ -90,7 +90,12 @@
     function sync() { input.value = JSON.stringify(root); }
     function redraw() { box.replaceChildren(renderNode(root, "0", null, 0)); sync(); }
     // После смены структуры пути узлов другие — ошибки сервера больше не к месту
-    function restructure() { errors = {}; redraw(); }
+    // и сообщает форме об изменении (для защиты от ухода с несохранёнными правками)
+    function restructure() {
+      errors = {};
+      redraw();
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
 
     function renderNode(node, path, parent, index) {
       var isRoot = parent === null;

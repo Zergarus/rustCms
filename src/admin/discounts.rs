@@ -15,7 +15,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use super::render;
+use super::{
+    card::{TabErrors, tab_context},
+    flash::{self, FlashKind},
+    render,
+};
 use crate::{
     access::{Access, DISCOUNTS_MANAGE},
     discount::{
@@ -28,6 +32,15 @@ use crate::{
     error::{AppError, AppResult, is_unique_violation},
     state::AppState,
 };
+
+/// Вкладки карточки, на которые можно вернуться после сохранения.
+const CARD_TABS: [&str; 5] = ["main", "conditions", "actions", "groups", "coupons"];
+
+/// Открываемая вкладка карточки (`?tab=`).
+#[derive(Default, serde::Deserialize)]
+pub struct TabQuery {
+    tab: Option<String>,
+}
 
 type FormFields = Vec<(String, String)>;
 
@@ -1037,8 +1050,9 @@ fn scope_errors(conditions: &Node, actions: &Node, errs: &mut Vec<TreeError>) {
 async fn check(
     state: &AppState,
     form: &RuleForm,
-) -> AppResult<Result<RuleInput, (Vec<String>, Vec<TreeError>)>> {
+) -> AppResult<Result<RuleInput, (TabErrors, Vec<TreeError>)>> {
     let mut errors = Vec::new();
+    let mut tab_errors = TabErrors::new();
     if form.name.is_empty() {
         errors.push("Укажите название".to_string());
     }
@@ -1048,14 +1062,19 @@ async fn check(
     let sort = parse_int(&form.sort, 100, "Сортировка", &mut errors);
     let conditions = serde_json::from_str::<Node>(&form.conditions);
     let actions = serde_json::from_str::<Node>(&form.actions);
+    let mut main_errors = TabErrors::new();
+    for msg in errors.drain(..) {
+        main_errors.push("main", msg);
+    }
     if conditions.is_err() {
-        errors.push("Условия: неверный формат дерева".to_string());
+        tab_errors.push("conditions", "Условия: неверный формат дерева");
     }
     if actions.is_err() {
-        errors.push("Действия: неверный формат дерева".to_string());
+        tab_errors.push("actions", "Действия: неверный формат дерева");
     }
     let (Ok(conditions), Ok(actions)) = (conditions, actions) else {
-        return Ok(Err((errors, Vec::new())));
+        main_errors.append(tab_errors);
+        return Ok(Err((main_errors, Vec::new())));
     };
     let hooks = hook_classes(state);
     let unsupported = unsupported_classes_with(&conditions, &actions, hooks);
@@ -1085,8 +1104,17 @@ async fn check(
             .bind(&form.groups)
             .fetch_all(&state.db)
             .await?;
-    if !errors.is_empty() || !tree_errors.is_empty() {
-        return Ok(Err((errors, tree_errors)));
+    for e in &tree_errors {
+        let (tab, label) = if e.tree == "conditions" {
+            ("conditions", "Условия")
+        } else {
+            ("actions", "Действия")
+        };
+        tab_errors.push(tab, format!("{label}, элемент {}: {}", e.path, e.message));
+    }
+    if !main_errors.is_empty() || !tab_errors.is_empty() {
+        main_errors.append(tab_errors);
+        return Ok(Err((main_errors, tree_errors)));
     }
     Ok(Ok(RuleInput {
         name: form.name.clone(),
@@ -1161,8 +1189,9 @@ async fn render_form(
     user: Access,
     rule_id: Option<i64>,
     form: RuleForm,
-    errors: Vec<String>,
+    errors: &TabErrors,
     tree_errors: Vec<TreeError>,
+    tab: Option<&str>,
 ) -> AppResult<Html<String>> {
     let db = &state.db;
     let hooks = hook_classes(state);
@@ -1205,10 +1234,21 @@ async fn render_form(
         }
         None => 0,
     };
+    let mut card_tabs: Vec<(&'static str, &'static str, i64)> = vec![
+        ("main", "Основное", 0),
+        ("conditions", "Условия", 0),
+        ("actions", "Действия", 0),
+        ("groups", "Группы", 0),
+    ];
+    if rule_id.is_some() && form.use_coupons {
+        card_tabs.push(("coupons", "Купоны", coupons));
+    }
+    let visible: Vec<&'static str> = card_tabs.iter().map(|t| t.0).collect();
+    let tabctx = tab_context(errors, &visible, tab);
     render(
         state,
         "discount_form.html",
-        context! { user, rule_id, form, errors, tree_errors, unsupported, groups, coupons, editor },
+        context! { user, rule_id, form, unsupported, groups, coupons, editor, card_tabs, tabctx },
     )
 }
 
@@ -1217,7 +1257,16 @@ pub async fn new_form(
     Extension(user): Extension<Access>,
 ) -> AppResult<Html<String>> {
     user.require(DISCOUNTS_MANAGE)?;
-    render_form(&state, user, None, RuleForm::default(), vec![], vec![]).await
+    render_form(
+        &state,
+        user,
+        None,
+        RuleForm::default(),
+        &TabErrors::new(),
+        vec![],
+        None,
+    )
+    .await
 }
 
 #[derive(sqlx::FromRow)]
@@ -1239,6 +1288,7 @@ pub async fn edit_form(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
+    Query(q): Query<TabQuery>,
 ) -> AppResult<Html<String>> {
     user.require(DISCOUNTS_MANAGE)?;
     let r: RuleRow = sqlx::query_as(
@@ -1270,7 +1320,16 @@ pub async fn edit_form(
         conditions: r.conditions.0.to_string(),
         actions: r.actions.0.to_string(),
     };
-    render_form(&state, user, Some(id), form, vec![], vec![]).await
+    render_form(
+        &state,
+        user,
+        Some(id),
+        form,
+        &TabErrors::new(),
+        vec![],
+        q.tab.as_deref(),
+    )
+    .await
 }
 
 pub async fn create(
@@ -1306,12 +1365,27 @@ async fn save(
     let form = RuleForm::from_fields(&fields);
     match check(&state, &form).await? {
         Ok(input) => {
-            save_rule(&state.db, id, &input).await?;
-            Ok(Redirect::to("/admin/discounts").into_response())
+            let saved = save_rule(&state.db, id, &input).await?;
+            // назад на ту же вкладку; без неё — прежний возврат к списку
+            let tab = field(&fields, "tab");
+            Ok(if id.is_some() && CARD_TABS.contains(&tab) {
+                flash::redirect(
+                    &format!("/admin/discounts/{saved}?tab={tab}"),
+                    "Сохранено",
+                    FlashKind::Ok,
+                )
+            } else {
+                Redirect::to("/admin/discounts").into_response()
+            })
         }
-        Err((errors, tree_errors)) => Ok(render_form(&state, user, id, form, errors, tree_errors)
-            .await?
-            .into_response()),
+        Err((errors, tree_errors)) => {
+            let tab = field(&fields, "tab");
+            Ok(
+                render_form(&state, user, id, form, &errors, tree_errors, Some(tab))
+                    .await?
+                    .into_response(),
+            )
+        }
     }
 }
 
@@ -3158,6 +3232,164 @@ mod tests {
         assert!(
             contains(&ch["actions"]["GiftCondGroup"], "GifterCondIBSection"),
             "{ch}"
+        );
+    }
+
+    // ---- вкладки карточки ----
+
+    use crate::test_support::post_form_raw;
+
+    fn has_tab(html: &str, key: &str) -> bool {
+        html.contains(&format!("data-tab-btn=\"{key}\""))
+    }
+
+    #[sqlx::test]
+    async fn discount_card_tabs(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let id = rule(&db, "Скидка").await;
+        let path = format!("/admin/discounts/{id}");
+        let (s, html) = get(&app, &path, &cookie).await;
+        assert_eq!(s, StatusCode::OK);
+        for k in ["main", "conditions", "actions", "groups"] {
+            assert!(has_tab(&html, k), "{k}: {html}");
+        }
+        // купоны выключены — вкладки нет
+        assert!(!has_tab(&html, "coupons"), "{html}");
+        assert!(html.contains("<section data-tab=\"main\">"), "{html}");
+        assert!(html.contains("data-form-actions>"), "{html}");
+        assert!(html.contains("name=\"tab\" value=\"main\""), "{html}");
+        assert!(html.contains("Удалить правило «"), "{html}");
+        // деревья и скрытые поля внутри формы
+        assert!(html.contains("name=\"conditions\""), "{html}");
+        assert!(html.contains("name=\"actions\""), "{html}");
+        // вкладка из адреса
+        let (_, html) = get(&app, &format!("{path}?tab=actions"), &cookie).await;
+        assert!(html.contains("<section data-tab=\"actions\">"), "{html}");
+        assert!(
+            html.contains("<section data-tab=\"main\" hidden>"),
+            "{html}"
+        );
+        assert!(html.contains("data-form-actions hidden") || html.contains("data-form-actions>"));
+        // купоны включены — вкладка со ссылкой и числом
+        sqlx::query("UPDATE discounts SET use_coupons = TRUE WHERE id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        coupon(&db, id, "AAA", 0).await;
+        coupon(&db, id, "BBB", 0).await;
+        let (_, html) = get(&app, &format!("{path}?tab=coupons"), &cookie).await;
+        assert!(has_tab(&html, "coupons"), "{html}");
+        assert!(html.contains("<section data-tab=\"coupons\">"), "{html}");
+        assert!(html.contains("<span class=\"count\">2</span>"), "{html}");
+        assert!(
+            html.contains(&format!("href=\"/admin/discounts/{id}/coupons\"")),
+            "{html}"
+        );
+        assert!(html.contains("data-form-actions hidden"), "{html}");
+        // новое правило — без купонов
+        let (_, html) = get(&app, "/admin/discounts/new", &cookie).await;
+        assert!(
+            has_tab(&html, "main") && !has_tab(&html, "coupons"),
+            "{html}"
+        );
+    }
+
+    #[sqlx::test]
+    async fn discount_error_opens_error_tab(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let form = body(&[
+            ("name", "Ошибочное"),
+            ("conditions", "{not json"),
+            (
+                "actions",
+                &json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND"}, "CHILDREN": []})
+                    .to_string(),
+            ),
+            ("tab", "main"),
+        ]);
+        let (s, html) = post_form(&app, "/admin/discounts", &cookie, &form).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(html.contains("<section data-tab=\"conditions\">"), "{html}");
+        assert!(
+            html.contains("<section data-tab=\"main\" hidden>"),
+            "{html}"
+        );
+        assert!(html.contains("Условия: неверный формат дерева"), "{html}");
+        assert_eq!(html.matches("tab-dot err").count(), 1, "{html}");
+        // ошибка названия — основное
+        let form = body(&[("name", ""), ("tab", "groups")]);
+        let (_, html) = post_form(&app, "/admin/discounts", &cookie, &form).await;
+        assert!(html.contains("<section data-tab=\"main\">"), "{html}");
+        assert!(html.contains("Укажите название"), "{html}");
+    }
+
+    #[sqlx::test]
+    async fn discount_save_returns_to_tab(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let id = rule(&db, "Скидка").await;
+        let form = |tab: &str| {
+            body(&[
+                ("name", "Скидка"),
+                ("conditions", &conditions().to_string()),
+                (
+                    "actions",
+                    &json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND"}, "CHILDREN": []})
+                        .to_string(),
+                ),
+                ("tab", tab),
+            ])
+        };
+        let (s, h, _) = post_form_raw(
+            &app,
+            &format!("/admin/discounts/{id}"),
+            &cookie,
+            &form("groups"),
+        )
+        .await;
+        assert_eq!(s, 303);
+        assert_eq!(
+            h["location"],
+            format!("/admin/discounts/{id}?tab=groups").as_str()
+        );
+        assert!(
+            h[axum::http::header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .contains("admin_flash")
+        );
+        let (s, h, _) = post_form_raw(
+            &app,
+            &format!("/admin/discounts/{id}"),
+            &cookie,
+            &form("%22%3E"),
+        )
+        .await;
+        assert_eq!(s, 303);
+        assert_eq!(h["location"], "/admin/discounts");
+    }
+
+    #[sqlx::test]
+    async fn discount_errors_tagged(db: PgPool) {
+        let state = test_state(db.clone());
+        let form = super::RuleForm {
+            conditions: "{bad".into(),
+            actions: "{bad".into(),
+            ..Default::default()
+        };
+        let Err((errs, _)) = super::check(&state, &form).await.unwrap() else {
+            panic!("ожидалась ошибка");
+        };
+        assert_eq!(
+            errs.iter().collect::<Vec<_>>(),
+            vec![
+                ("main", "Укажите название"),
+                ("conditions", "Условия: неверный формат дерева"),
+                ("actions", "Действия: неверный формат дерева"),
+            ]
         );
     }
 }

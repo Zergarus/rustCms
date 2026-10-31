@@ -2,26 +2,27 @@
 {% set section = "discounts" %}
 {% block title %}{% if rule_id %}{{ form.name }}{% else %}Новое правило{% endif %}{% endblock %}
 {% block content %}
-<div class="breadcrumbs"><a href="/admin/discounts">Правила работы с корзиной</a> /</div>
-<div class="page-head">
-  <h1>{% if rule_id %}{{ form.name }}{% else %}Новое правило{% endif %}</h1>
-  {% if rule_id %}<a class="btn" href="/admin/discounts/{{ rule_id }}/coupons">Купоны <span class="muted">{{ coupons }}</span></a>{% endif %}
-</div>
+{% import "_ui.html" as ui %}
+{% call ui.page_head([("Правила работы с корзиной", "/admin/discounts"), (form.name if rule_id else "Новое правило", none)]) %}
+  {%- if rule_id %}
+  <form method="post" action="/admin/discounts/{{ rule_id }}/delete"
+        hx-confirm="Удалить правило «{{ form.name }}»? Его купоны тоже удалятся.">
+    <button class="btn danger" type="submit">Удалить правило</button>
+  </form>
+  {%- endif %}
+{% endcall %}
+{{ ui.card_errors(tabctx) }}
+{% if unsupported %}
+<div class="notice">Правило не применяется: неподдерживаемые элементы {{ unsupported|join(", ") }}. Удалите их, чтобы правило заработало.</div>
+{% endif %}
 
-<form class="card form" method="post" action="{% if rule_id %}/admin/discounts/{{ rule_id }}{% else %}/admin/discounts{% endif %}">
-  {% if errors or tree_errors %}
-  <div class="alert">
-    Исправьте ошибки:
-    <ul>
-      {% for e in errors %}<li>{{ e }}</li>{% endfor %}
-      {% for e in tree_errors %}<li>{{ "Условия" if e.tree == "conditions" else "Действия" }}, элемент {{ e.path }}: {{ e.message }}</li>{% endfor %}
-    </ul>
-  </div>
-  {% endif %}
-  {% if unsupported %}
-  <div class="notice">Правило не применяется: неподдерживаемые элементы {{ unsupported|join(", ") }}. Удалите их, чтобы правило заработало.</div>
-  {% endif %}
+<div data-card>
+{{ ui.card_tabs(card_tabs, tabctx) }}
+<form class="card form" method="post" data-dirty-guard
+      action="{% if rule_id %}/admin/discounts/{{ rule_id }}{% else %}/admin/discounts{% endif %}">
+  <input type="hidden" name="tab" value="{{ tabctx.active }}">
 
+  {% call ui.tab_pane("main", tabctx) %}
   <div class="grid-2">
     <label>Название *
       <input name="name" value="{{ form.name }}" required>
@@ -49,7 +50,25 @@
   <label class="check"><input type="checkbox" name="last_discount" {% if form.last_discount %}checked{% endif %}> Прекратить дальнейшее применение правил</label>
   <label class="check"><input type="checkbox" name="last_level_discount" {% if form.last_level_discount %}checked{% endif %}> Не применять остальные правила этого уровня приоритета</label>
   <label class="check"><input type="checkbox" name="use_coupons" {% if form.use_coupons %}checked{% endif %}> Только по купону</label>
+  {% endcall %}
 
+  {% call ui.tab_pane("conditions", tabctx) %}
+  <fieldset>
+    <legend>Условия</legend>
+    <div class="discount-tree" data-tree="conditions"><p class="muted">Конструктор загружается…</p></div>
+    <input type="hidden" name="conditions" value="{{ form.conditions }}">
+  </fieldset>
+  {% endcall %}
+
+  {% call ui.tab_pane("actions", tabctx) %}
+  <fieldset>
+    <legend>Действия</legend>
+    <div class="discount-tree" data-tree="actions"><p class="muted">Конструктор загружается…</p></div>
+    <input type="hidden" name="actions" value="{{ form.actions }}">
+  </fieldset>
+  {% endcall %}
+
+  {% call ui.tab_pane("groups", tabctx) %}
   <fieldset>
     <legend>Группы пользователей</legend>
     {% if groups %}
@@ -62,22 +81,24 @@
     {% endif %}
   </fieldset>
 
-  <fieldset>
-    <legend>Условия</legend>
-    <div class="discount-tree" data-tree="conditions"><p class="muted">Конструктор загружается…</p></div>
-    <input type="hidden" name="conditions" value="{{ form.conditions }}">
-  </fieldset>
-  <fieldset>
-    <legend>Действия</legend>
-    <div class="discount-tree" data-tree="actions"><p class="muted">Конструктор загружается…</p></div>
-    <input type="hidden" name="actions" value="{{ form.actions }}">
-  </fieldset>
+  {% endcall %}
+
   <input type="hidden" id="discount-tree-data" value="{{ editor }}">
 
-  <div class="form-actions">
+  <div class="form-actions" data-form-actions{% if tabctx.active == "coupons" %} hidden{% endif %}>
     <button class="btn primary" type="submit">Сохранить</button>
     <a class="btn" href="/admin/discounts">Отмена</a>
   </div>
 </form>
+
+{% if rule_id and form.use_coupons %}
+{% call ui.tab_pane("coupons", tabctx) %}
+<div class="card">
+  <p><a class="btn" href="/admin/discounts/{{ rule_id }}/coupons">Купоны <span class="muted">{{ coupons }}</span></a></p>
+  <p class="muted hint">Коды купонов, их выпуск и использование — на отдельной странице.</p>
+</div>
+{% endcall %}
+{% endif %}
+</div>
 <script src="/admin/static/discount-tree.js"></script>
 {% endblock %}
