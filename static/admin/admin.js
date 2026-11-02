@@ -110,6 +110,9 @@
   document.addEventListener('click', function (e) {
     if (!isDirty()) return;
     if (e.target.closest('[data-savebar-reset]')) {
+      // дерево скидки собрано JS и держит правки в модели и скрытом JSON:
+      // reset() их не откатит — перезагружаем страницу с сохранённым состоянием
+      if (dirtyForm.querySelector('.discount-tree')) { location.reload(); return; }
       dirtyForm.reset();
       clearDirty();
     } else if (e.target.closest('[data-savebar-save]')) {

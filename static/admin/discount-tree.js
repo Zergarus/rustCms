@@ -91,10 +91,11 @@
     function redraw() { box.replaceChildren(renderNode(root, "0", null, 0)); sync(); }
     // После смены структуры пути узлов другие — ошибки сервера больше не к месту
     // и сообщает форме об изменении (для защиты от ухода с несохранёнными правками)
+    function notify() { input.dispatchEvent(new Event("change", { bubbles: true })); }
     function restructure() {
       errors = {};
       redraw();
-      input.dispatchEvent(new Event("change", { bubbles: true }));
+      notify();
     }
 
     function renderNode(node, path, parent, index) {
@@ -275,7 +276,7 @@
           });
           on(type, function () { r.type = type.value; });
           var del = el("button", { type: "button", "class": "link danger" }, "×");
-          del.addEventListener("click", function () { rows().splice(i, 1); draw(); sync(); });
+          del.addEventListener("click", function () { rows().splice(i, 1); draw(); sync(); notify(); });
           [sum, el("span", { "class": "muted" }, "скидка"), value, type, del].forEach(function (x) { line.appendChild(x); });
           box.appendChild(line);
         });
@@ -284,6 +285,7 @@
           rows().push({ sum: 0, value: 0, type: "P" });
           draw();
           sync();
+          notify();
         });
         box.appendChild(add);
       }

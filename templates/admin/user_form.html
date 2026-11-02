@@ -113,7 +113,7 @@
     <div class="alert">Отозвать ключ «{{ confirm_key.name }}» (cms_{{ confirm_key.prefix }}_…)? Внешние системы с этим ключом потеряют доступ, действие необратимо.</div>
     <input type="hidden" name="confirm" value="1">
     <div class="form-actions"><button class="btn danger" type="submit">Отозвать</button>
-      <a class="btn" href="/admin/users/{{ target.id }}">Отмена</a></div>
+      <a class="btn" href="/admin/users/{{ target.id }}?tab=keys">Отмена</a></div>
   </form>
   {% endif %}
 

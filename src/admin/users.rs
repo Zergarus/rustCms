@@ -234,7 +234,17 @@ pub async fn create(
                     if user.is_super() {
                         groups::set_user_groups(&state.db, id, &form.groups).await?;
                     }
-                    return Ok(Redirect::to("/admin/users").into_response());
+                    // после создания — карточка с полным набором вкладок
+                    let tab = if CARD_TABS.contains(&form.tab.as_str()) {
+                        form.tab.as_str()
+                    } else {
+                        CARD_TABS[0]
+                    };
+                    return Ok(flash::redirect(
+                        &format!("/admin/users/{id}?tab={tab}"),
+                        "Сохранено",
+                        FlashKind::Ok,
+                    ));
                 }
                 Err(e) => errors.push("profile", unique_error(&e).ok_or(AppError::from(e))?),
             }
@@ -435,11 +445,11 @@ pub async fn issue_key(
 
 /// GET на адреса POST-форм (reload, «Назад») — обратно в карточку.
 pub async fn keys_redirect(Path(id): Path<i64>) -> Redirect {
-    Redirect::to(&format!("/admin/users/{id}"))
+    Redirect::to(&format!("/admin/users/{id}?tab=keys"))
 }
 
 pub async fn revoke_redirect(Path((id, _)): Path<(i64, i64)>) -> Redirect {
-    Redirect::to(&format!("/admin/users/{id}"))
+    Redirect::to(&format!("/admin/users/{id}?tab=keys"))
 }
 
 #[derive(Default, Deserialize)]
@@ -783,7 +793,10 @@ mod tests {
             crate::test_support::get_raw(&app, &format!("/admin/users/{uid}/api-keys"), &cookie)
                 .await;
         assert_eq!(s, 303);
-        assert_eq!(h["location"], format!("/admin/users/{uid}").as_str());
+        assert_eq!(
+            h["location"],
+            format!("/admin/users/{uid}?tab=keys").as_str()
+        );
         let (s, _, _) = crate::test_support::get_raw(
             &app,
             &format!("/admin/users/{uid}/api-keys/1/revoke"),
@@ -1022,6 +1035,49 @@ mod tests {
         .await;
         assert_eq!(s, 303);
         assert_eq!(h["location"], "/admin/users");
+    }
+
+    #[sqlx::test]
+    async fn user_create_opens_card(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let admin = admin_cookie(&db).await;
+        let (s, h, _) = post_form_raw(
+            &app,
+            "/admin/users",
+            &admin,
+            "login=newbie&password=Passw0rd-long-1&password_confirm=Passw0rd-long-1&active=on&tab=access",
+        )
+        .await;
+        assert_eq!(s, 303);
+        let id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE login = 'newbie'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            h["location"],
+            format!("/admin/users/{id}?tab=access").as_str()
+        );
+        assert!(
+            h[axum::http::header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .contains("admin_flash")
+        );
+        let (_, h, _) = post_form_raw(
+            &app,
+            "/admin/users",
+            &admin,
+            "login=second&password=Passw0rd-long-1&password_confirm=Passw0rd-long-1&active=on&tab=%22%3E",
+        )
+        .await;
+        let id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE login = 'second'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            h["location"],
+            format!("/admin/users/{id}?tab=profile").as_str()
+        );
     }
 
     #[sqlx::test]

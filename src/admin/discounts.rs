@@ -1368,7 +1368,13 @@ async fn save(
             let saved = save_rule(&state.db, id, &input).await?;
             // назад на ту же вкладку; без неё — прежний возврат к списку
             let tab = field(&fields, "tab");
-            Ok(if id.is_some() && CARD_TABS.contains(&tab) {
+            // после создания — карточка с полным набором вкладок
+            let tab = if id.is_none() && !CARD_TABS.contains(&tab) {
+                CARD_TABS[0]
+            } else {
+                tab
+            };
+            Ok(if CARD_TABS.contains(&tab) {
                 flash::redirect(
                     &format!("/admin/discounts/{saved}?tab={tab}"),
                     "Сохранено",
@@ -3270,7 +3276,9 @@ mod tests {
             html.contains("<section data-tab=\"main\" hidden>"),
             "{html}"
         );
-        assert!(html.contains("data-form-actions hidden") || html.contains("data-form-actions>"));
+        // вкладка «Действия» — внутри формы, блок кнопок виден
+        assert!(html.contains("data-form-actions>"), "{html}");
+        assert!(!html.contains("data-form-actions hidden"), "{html}");
         // купоны включены — вкладка со ссылкой и числом
         sqlx::query("UPDATE discounts SET use_coupons = TRUE WHERE id = $1")
             .bind(id)
@@ -3370,6 +3378,50 @@ mod tests {
         .await;
         assert_eq!(s, 303);
         assert_eq!(h["location"], "/admin/discounts");
+    }
+
+    #[sqlx::test]
+    async fn discount_create_opens_card(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let form = |tab: &str| {
+            body(&[
+                ("name", "Новая"),
+                ("conditions", &conditions().to_string()),
+                (
+                    "actions",
+                    &json!({"CLASS_ID": "CondGroup", "DATA": {"All": "AND"}, "CHILDREN": []})
+                        .to_string(),
+                ),
+                ("tab", tab),
+            ])
+        };
+        let (s, h, _) = post_form_raw(&app, "/admin/discounts", &cookie, &form("actions")).await;
+        assert_eq!(s, 303);
+        let id: i64 = sqlx::query_scalar("SELECT id FROM discounts WHERE name = 'Новая'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            h["location"],
+            format!("/admin/discounts/{id}?tab=actions").as_str()
+        );
+        assert!(
+            h[axum::http::header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .contains("admin_flash")
+        );
+        // неизвестная вкладка — первая
+        let (_, h, _) = post_form_raw(&app, "/admin/discounts", &cookie, &form("%22%3E")).await;
+        let id2: i64 = sqlx::query_scalar("SELECT max(id) FROM discounts")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            h["location"],
+            format!("/admin/discounts/{id2}?tab=main").as_str()
+        );
     }
 
     #[sqlx::test]

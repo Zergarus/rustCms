@@ -1169,7 +1169,8 @@ async fn save(
                     return Ok(match (input.product_id, requested_tab.as_deref()) {
                         // Предложение: назад в карточку товара, на вкладку предложений
                         (Some(product), _) => {
-                            Redirect::to(&format!("/admin/items/{product}#offers")).into_response()
+                            Redirect::to(&format!("/admin/items/{product}?tab=offers"))
+                                .into_response()
                         }
                         // Карточка с вкладкой: назад на ту же вкладку
                         (None, Some(tab)) if CARD_TABS.contains(&tab) => flash::redirect(
@@ -1502,7 +1503,7 @@ pub async fn delete(
         .ok_or(AppError::NotFound)?;
     if let Some(product) = element.product_id {
         // Предложение: назад на вкладку предложений товара
-        return Ok(Redirect::to(&format!("/admin/items/{product}#offers")));
+        return Ok(Redirect::to(&format!("/admin/items/{product}?tab=offers")));
     }
     let mut url = format!("/admin/collections/{collection_id}/items");
     if let Some(section) = element.section_id {
@@ -1514,6 +1515,23 @@ pub async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// «Открыть карточку» в панели должна менять адрес: у #peek нет унаследованного
+    /// `hx-push-url="false"`, а формы внутри панели (hx-post) отключают push явно.
+    #[test]
+    fn peek_panel_pushes_url_only_for_open_link() {
+        let base = include_str!("../../templates/admin/base.html");
+        let peek_tag = base.lines().find(|l| l.contains("id=\"peek\"")).unwrap();
+        assert!(!peek_tag.contains("hx-push-url"), "{peek_tag}");
+        for tpl in [
+            include_str!("../../templates/admin/item_peek.html"),
+            include_str!("../../templates/admin/shop/order_peek.html"),
+        ] {
+            for form in tpl.lines().filter(|l| l.contains("hx-post=")) {
+                assert!(form.contains("hx-push-url=\"false\""), "{form}");
+            }
+        }
+    }
 
     #[test]
     fn purchase_input_from_form_fields() {

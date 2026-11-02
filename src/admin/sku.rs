@@ -327,7 +327,7 @@ pub async fn generate(
     }
     tx.commit().await?;
     Ok(Redirect::to(&format!(
-        "/admin/items/{product_id}?generated={created}&skipped={skipped}#offers"
+        "/admin/items/{product_id}?generated={created}&skipped={skipped}&tab=offers"
     ))
     .into_response())
 }

@@ -19,10 +19,10 @@
   </ul>
 
   <h3>Состояние</h3>
-  <form method="post" action="/admin/shop/orders/{{ order.id }}/status" hx-post="/admin/shop/orders/{{ order.id }}/status" hx-trigger="change" hx-target="#peek" hx-swap="innerHTML">
+  <form method="post" action="/admin/shop/orders/{{ order.id }}/status" hx-post="/admin/shop/orders/{{ order.id }}/status" hx-trigger="change" hx-target="#peek" hx-swap="innerHTML" hx-push-url="false">
     {% call ui.prop("Статус") %}<select name="status">{% for s in statuses %}<option value="{{ s[0] }}" {% if order.status == s[0] %}selected{% endif %}>{{ s[1] }}</option>{% endfor %}</select>{% if order.canceled %} <span class="badge">отменён</span>{% endif %}{% endcall %}
   </form>
-  <form method="post" action="/admin/shop/orders/{{ order.id }}/paid" hx-post="/admin/shop/orders/{{ order.id }}/paid" hx-target="#peek" hx-swap="innerHTML">
+  <form method="post" action="/admin/shop/orders/{{ order.id }}/paid" hx-post="/admin/shop/orders/{{ order.id }}/paid" hx-target="#peek" hx-swap="innerHTML" hx-push-url="false">
     <input type="hidden" name="value" value="{% if order.paid %}N{% else %}Y{% endif %}">
     {% call ui.prop("Оплата") %}{% if order.paid %}<span class="badge ok">оплачен</span>{% else %}не оплачен{% endif %}
       <button class="btn" type="submit">{% if order.paid %}Не оплачен{% else %}Оплачен{% endif %}</button>{% endcall %}

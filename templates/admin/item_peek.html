@@ -22,7 +22,7 @@
   {% endif %}
 
   <h3>Состояние</h3>
-  <form method="post" action="/admin/items/{{ item.id }}/active" hx-post="/admin/items/{{ item.id }}/active" hx-target="#peek" hx-swap="innerHTML">
+  <form method="post" action="/admin/items/{{ item.id }}/active" hx-post="/admin/items/{{ item.id }}/active" hx-target="#peek" hx-swap="innerHTML" hx-push-url="false">
     <input type="hidden" name="active" value="{% if item.active %}off{% else %}on{% endif %}">
     {% call ui.prop("Активен") %}{% if item.active %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}
       {% if can_write %}<button class="btn" type="submit">{% if item.active %}Отключить{% else %}Включить{% endif %}</button>{% endif %}{% endcall %}

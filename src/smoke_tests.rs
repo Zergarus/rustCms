@@ -854,7 +854,7 @@ async fn offers_tab_and_offer_form(db: PgPool) {
 
     let (status, location) = create_offer(&app, &cookie, offers, c.item_id, "Вариант 1").await;
     assert_eq!(status, StatusCode::SEE_OTHER);
-    assert_eq!(location, format!("/admin/items/{}#offers", c.item_id));
+    assert_eq!(location, format!("/admin/items/{}?tab=offers", c.item_id));
 
     page_has(
         &app,
@@ -1483,7 +1483,7 @@ async fn offer_needs_write_on_both_collections(db: PgPool) {
     // право записи есть на предложения и на товары (fixture) — создание проходит
     let (status, loc) = create_offer(&app, &user_cookie, offers, c.item_id, "Вариант 1").await;
     assert_eq!(status, StatusCode::SEE_OTHER);
-    assert_eq!(loc, format!("/admin/items/{}#offers", c.item_id));
+    assert_eq!(loc, format!("/admin/items/{}?tab=offers", c.item_id));
     // права на товары нет — 403 на форму, создание и удаление
     sqlx::query("DELETE FROM collection_access WHERE collection_id = $1")
         .bind(c.collection_id)
@@ -1720,7 +1720,10 @@ async fn generator_creates_offers(db: PgPool) {
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert_eq!(
         location,
-        format!("/admin/items/{}?generated=2&skipped=0#offers", c.item_id)
+        format!(
+            "/admin/items/{}?generated=2&skipped=0&tab=offers",
+            c.item_id
+        )
     );
     page_has(
         &app,
@@ -1832,7 +1835,10 @@ async fn generator_skips_existing_any_order(db: PgPool) {
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert_eq!(
         location,
-        format!("/admin/items/{}?generated=0&skipped=4#offers", c.item_id)
+        format!(
+            "/admin/items/{}?generated=0&skipped=4&tab=offers",
+            c.item_id
+        )
     );
     page_has(
         &app,
