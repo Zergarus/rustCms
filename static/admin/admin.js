@@ -111,8 +111,13 @@
     if (!isDirty()) return;
     if (e.target.closest('[data-savebar-reset]')) {
       // дерево скидки собрано JS и держит правки в модели и скрытом JSON:
-      // reset() их не откатит — перезагружаем страницу с сохранённым состоянием
-      if (dirtyForm.querySelector('.discount-tree')) { location.reload(); return; }
+      // reset() их не откатит — открываем страницу заново (GET, без повторной отправки формы);
+      // признак правок снимаем заранее, иначе перезагрузку перебьёт предупреждение beforeunload
+      if (dirtyForm.querySelector('.discount-tree')) {
+        clearDirty();
+        location.assign(location.pathname + location.search);
+        return;
+      }
       dirtyForm.reset();
       clearDirty();
     } else if (e.target.closest('[data-savebar-save]')) {
