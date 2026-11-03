@@ -8,6 +8,7 @@ mod exchange;
 mod flash;
 mod groups;
 mod items;
+mod list;
 mod modules;
 mod nav;
 mod palette;
