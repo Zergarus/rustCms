@@ -1,5 +1,4 @@
 //! Движок списков админки: спека, состояние URL, SQL, рендер.
-#![allow(dead_code)]
 
 pub(crate) mod collection;
 pub(crate) mod orders;

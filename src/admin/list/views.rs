@@ -134,7 +134,6 @@ pub async fn spec_for_key(db: &PgPool, user: &Access, key: &str) -> AppResult<Li
 
 pub struct Resolved {
     pub parsed: Parsed,
-    pub view: Option<View>,
     pub notices: Vec<String>,
 }
 
@@ -206,7 +205,6 @@ pub async fn resolve(
         }
         return Ok(Resolved {
             parsed,
-            view: None,
             notices: Vec::new(),
         });
     };
@@ -251,7 +249,6 @@ pub async fn resolve(
     parsed.changed = url_set != as_set(&norm) || is_blank(&norm) != edited;
     Ok(Resolved {
         parsed,
-        view: Some(view),
         notices,
     })
 }

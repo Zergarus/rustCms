@@ -40,10 +40,12 @@ fn split_from(from: &str) -> (&str, &str) {
         match ch {
             '(' => depth += 1,
             ')' => depth -= 1,
-            'W' if depth == 0 && i > 0 && from[i..].starts_with("WHERE") => {
-                if from[..i].ends_with(char::is_whitespace) {
-                    return (from[..i].trim_end(), &from[i..]);
-                }
+            'W' if depth == 0
+                && i > 0
+                && from[i..].starts_with("WHERE")
+                && from[..i].ends_with(char::is_whitespace) =>
+            {
+                return (from[..i].trim_end(), &from[i..]);
             }
             _ => {}
         }
