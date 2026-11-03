@@ -926,7 +926,14 @@ pub async fn list(
         .ok_or(AppError::NotFound)?;
     let spec = collection_spec(&state.db, &user, &collection).await?;
     let resolved =
-        views::resolve(&state.db, user.user.id, &spec, raw.as_deref().unwrap_or("")).await?;
+        views::resolve(
+            &state.db,
+            user.user.id,
+            &spec,
+            raw.as_deref().unwrap_or(""),
+            crate::admin::is_full_page(&headers),
+        )
+        .await?;
     let (mut parsed, notices) = (resolved.parsed, resolved.notices);
     let sections = repo::list_sections(&state.db, id).await?;
     // Удалённый или чужой раздел в адресе отбрасывается вместе с «только этот раздел»

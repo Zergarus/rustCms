@@ -518,7 +518,10 @@ pub async fn run_list(
         "_list_body.html"
     };
     let mut resp = render(state, name, ctx)?.into_response();
-    remember(state, user, spec, &st, &stored).await?;
+    // Сбой записи запомненного не должен ронять уже готовый список
+    if let Err(e) = remember(state, user, spec, &st, &stored).await {
+        tracing::warn!(error = ?e, list = %spec.key, "не удалось сохранить состояние списка");
+    }
     if let Some(Ok(v)) = replace_url.as_deref().map(HeaderValue::from_str) {
         resp.headers_mut().insert("HX-Replace-Url", v);
     }

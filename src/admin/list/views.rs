@@ -176,6 +176,9 @@ fn saved_query(saved: &serde_json::Value) -> String {
 /// `resolve` метку снимает; она нужна ровно тогда, когда состояние пустое (`is_blank`),
 /// иначе адрес нормализуется без неё (один редирект, дальше стабильно).
 ///
+/// `restore` — полная страница (не HTMX-фрагмент): только она подставляет сохранённое на голый адрес;
+/// фрагмент с голым адресом значит «умолчания» (ссылки на умолчания адрес не пишут).
+///
 /// Состояние списка по адресу: с `view=<id>` — открытый вид (сохранённый запрос, пока в
 /// адресе нет собственных параметров), иначе обычный разбор.
 pub async fn resolve(
@@ -183,6 +186,7 @@ pub async fn resolve(
     user_id: i64,
     spec: &ListSpec,
     raw_query: &str,
+    restore: bool,
 ) -> AppResult<Resolved> {
     let pairs = pairs_of(raw_query);
     let view_id = pairs
@@ -192,7 +196,7 @@ pub async fn resolve(
         .and_then(|(_, v)| v.parse::<i64>().ok());
     let Some(id) = view_id else {
         let mut parsed;
-        if pairs.is_empty() {
+        if restore && pairs.is_empty() {
             // Голый адрес: колонки, сортировка и размер страницы — как в прошлый раз (без редиректа).
             let saved = shell::list_prefs(db, user_id, &spec.key).await?;
             parsed = state::parse(spec, &saved_query(&saved));
@@ -1247,6 +1251,25 @@ mod tests {
         let (st, h, out) = full_get(&app, "/admin/shop/orders", &cookie).await;
         assert_eq!(st, StatusCode::OK, "{out}");
         assert!(h.get(header::LOCATION).is_none());
+        assert!(out.contains(r#""per":50"#), "{out}");
+        assert!(!out.contains("sort=nope") && !out.contains("gone"));
+        assert!(out.contains(r#""cols":["number"]"#), "{out}");
+    }
+
+    #[sqlx::test]
+    async fn list_prefs_defaults_reselectable(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        full_get(&app, "/admin/shop/orders?per=20&sort=-status", &cookie).await;
+        // фрагмент с голым адресом (ссылка на умолчания) не восстанавливает
+        let (_, _, out) = hx_get(&app, "/admin/shop/orders", &cookie).await;
+        assert!(out.contains("id=\"list-body\""));
+        let p = prefs_of(&db).await;
+        assert_eq!(p["lists"]["orders"]["per"], 50);
+        assert_ne!(p["lists"]["orders"]["sort"], "-status");
+        let (_, _, out) = full_get(&app, "/admin/shop/orders", &cookie).await;
+        assert!(out.contains(r#""per":50"#));
+        assert!(!out.contains("sort=-status"));
     }
 
     #[sqlx::test]

@@ -53,7 +53,14 @@ pub async fn list(
     require_orders(&user)?;
     let spec = orders_spec(&state.db, &user).await?;
     let resolved =
-        views::resolve(&state.db, user.user.id, &spec, raw.as_deref().unwrap_or("")).await?;
+        views::resolve(
+            &state.db,
+            user.user.id,
+            &spec,
+            raw.as_deref().unwrap_or(""),
+            crate::admin::is_full_page(&headers),
+        )
+        .await?;
     let page = ListPage {
         title: "Заказы".into(),
         crumbs: vec![("Магазин".into(), String::new())],
