@@ -128,6 +128,13 @@ fn ser(pairs: &[(String, String)]) -> String {
     s.finish()
 }
 
+/// Метка `edited=1`: единственный источник правды — эта функция и `render::url_of`.
+/// Адрес `path?view=N` (без своих параметров, кроме page/per) означает «открыть сохранённый
+/// вид». Если состояние при открытом виде пустое (убрали последний чип, вид без фильтров),
+/// `url_of` пишет `edited=1&view=N`: так адрес с пустым состоянием отличается от «открыть».
+/// `resolve` метку снимает; она нужна ровно тогда, когда состояние пустое (`is_blank`),
+/// иначе адрес нормализуется без неё (один редирект, дальше стабильно).
+///
 /// Состояние списка по адресу: с `view=<id>` — открытый вид (сохранённый запрос, пока в
 /// адресе нет собственных параметров), иначе обычный разбор.
 pub async fn resolve(
@@ -551,11 +558,14 @@ pub async fn pin(
         .rows_affected()
         > 0;
     if !removed {
-        sqlx::query("INSERT INTO admin_view_pins (user_id, view_id) VALUES ($1, $2)")
-            .bind(user.user.id)
-            .bind(id)
-            .execute(&state.db)
-            .await?;
+        // Параллельный двойной клик: повторная вставка не падает
+        sqlx::query(
+            "INSERT INTO admin_view_pins (user_id, view_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(user.user.id)
+        .bind(id)
+        .execute(&state.db)
+        .await?;
     }
     let back = field(&form, "back").unwrap_or("");
     let resp = rerender(&state, &user, &view.list_key, &path, back).await?;
@@ -988,6 +998,151 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(keys, ["orders"]);
+    }
+
+    async fn raw_get(app: &Router, path: &str, cookie: &str) -> (StatusCode, HeaderMap, String) {
+        let req = Request::get(path)
+            .header(header::COOKIE, cookie)
+            .body(Body::empty())
+            .unwrap();
+        send(app, req).await
+    }
+
+    #[sqlx::test]
+    async fn full_page_open_keeps_dropped_notice(db: PgPool) {
+        let c = content_fixture(&db).await;
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let (uid, _) = user_cookie(&db, "other", true).await;
+        let key = format!("collection:{}", c.collection_id);
+        let id = insert_view(&db, &key, uid, "f.gone=has%3Ax", true).await;
+        let (st, headers, _) = raw_get(
+            &app,
+            &format!("{}?view={id}", list_path(c.collection_id)),
+            &cookie,
+        )
+        .await;
+        assert!(st.is_redirection(), "{st}");
+        let loc = headers[header::LOCATION].to_str().unwrap().to_string();
+        let flash = headers[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let (st, _, body) = raw_get(&app, &loc, &format!("{cookie}; {flash}")).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(body.contains("больше недоступен"), "{body}");
+    }
+
+    #[sqlx::test]
+    async fn edited_marker_edge_cases(db: PgPool) {
+        let c = content_fixture(&db).await;
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let key = format!("collection:{}", c.collection_id);
+        let base = list_path(c.collection_id);
+        let (uid, _) = user_cookie(&db, "other", true).await;
+
+        // пустой сохранённый запрос: ?view=N -> edited=1&view=N, дальше стабильно
+        let empty = insert_view(&db, &key, uid, "", true).await;
+        let (st, h, _) = raw_get(&app, &format!("{base}?view={empty}"), &cookie).await;
+        assert_eq!(st, StatusCode::FOUND);
+        let loc = h[header::LOCATION].to_str().unwrap();
+        assert_eq!(loc, format!("{base}?edited=1&view={empty}"));
+        let (st, _, body) = raw_get(&app, loc, &cookie).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(!body.contains("Вид изменён"));
+
+        // последний чип убран у непустого вида
+        let full = insert_view(&db, &key, uid, "f.name=has%3Ax", true).await;
+        let (st, _, body) = raw_get(&app, &format!("{base}?edited=1&view={full}"), &cookie).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(body.contains("Вид изменён"), "{body}");
+
+        // edited=1 при непустом состоянии снимается один раз
+        let (st, h, _) = raw_get(
+            &app,
+            &format!("{base}?f.name=has%3Ay&edited=1&view={full}"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FOUND);
+        let loc = h[header::LOCATION].to_str().unwrap().to_string();
+        assert_eq!(loc, format!("{base}?f.name=has%3Ay&view={full}"));
+        let (st, _, _) = raw_get(&app, &loc, &cookie).await;
+        assert_eq!(st, StatusCode::OK);
+
+        // «Сбросить» (?view=N) возвращает сохранённый вид
+        let (_, h, _) = raw_get(&app, &format!("{base}?view={full}"), &cookie).await;
+        let loc = h[header::LOCATION].to_str().unwrap();
+        assert_eq!(loc, format!("{base}?f.name=has%3Ax&view={full}"));
+    }
+
+    #[sqlx::test]
+    async fn no_collection_access_is_denied(db: PgPool) {
+        let c = content_fixture(&db).await;
+        let app = app(&db);
+        let (admin_id, _) = user_cookie(&db, "boss", true).await;
+        let key = format!("collection:{}", c.collection_id);
+        let id = insert_view(&db, &key, admin_id, "", true).await;
+        let cookie = permitted_cookie(&db, "nobody", &[]).await;
+        let (st, _, _) = hx_post(
+            &app,
+            "/admin/views",
+            &cookie,
+            &create_body(c.collection_id, "X", "", false),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        for p in [
+            format!("/admin/views/{id}"),
+            format!("/admin/views/{id}/pin"),
+        ] {
+            let (st, _, _) = hx_post(&app, &p, &cookie, "name=x").await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{p}");
+        }
+    }
+
+    #[sqlx::test]
+    async fn orders_views(db: PgPool) {
+        let app = app(&db);
+        let body = format!(
+            "list_key=orders&path={}&name={}&query=",
+            enc("/admin/shop/orders"),
+            enc("Все новые")
+        );
+        let nobody = permitted_cookie(&db, "nobody", &[]).await;
+        let (st, _, _) = hx_post(&app, "/admin/views", &nobody, &body).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let cookie = admin_cookie(&db).await;
+        let (st, h, out) = hx_post(&app, "/admin/views", &cookie, &body).await;
+        assert_eq!(st, StatusCode::OK, "{out}");
+        assert!(out.contains("id=\"list-body\""));
+        assert!(
+            h["hx-replace-url"]
+                .to_str()
+                .unwrap()
+                .starts_with("/admin/shop/orders")
+        );
+    }
+
+    #[sqlx::test]
+    async fn private_owner_without_share_cannot_share(db: PgPool) {
+        let c = content_fixture(&db).await;
+        let app = app(&db);
+        let (uid, cookie) = read_only_user(&db, c.collection_id, "ro").await;
+        let key = format!("collection:{}", c.collection_id);
+        let id = insert_view(&db, &key, uid, "", false).await;
+        let (st, _, _) = hx_post(
+            &app,
+            &format!("/admin/views/{id}"),
+            &cookie,
+            &format!("path={}&shared=1", enc(&list_path(c.collection_id))),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
     }
 
     #[test]

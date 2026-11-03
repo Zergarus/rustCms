@@ -311,10 +311,23 @@ pub async fn run_list(
     notices: Vec<String>,
 ) -> AppResult<Response> {
     let full = is_full_page(headers);
+    // Полностраничный редирект теряет уведомления (например «фильтр больше недоступен»):
+    // они уходят через flash-cookie одной строкой, через пробел.
+    let redirect = |url: String| -> Response {
+        if notices.is_empty() {
+            (StatusCode::FOUND, [(header::LOCATION, url)]).into_response()
+        } else {
+            crate::admin::flash::redirect(
+                &url,
+                &notices.join(" "),
+                crate::admin::flash::FlashKind::Ok,
+            )
+        }
+    };
     let mut st = parsed.state;
     let normalized = url_of(spec, path, &st);
     if parsed.changed && full {
-        return Ok((StatusCode::FOUND, [(header::LOCATION, normalized)]).into_response());
+        return Ok(redirect(normalized));
     }
 
     let (mut rows, total) = fetch(&state.db, spec, &st, &scope).await?;
@@ -324,7 +337,7 @@ pub async fn run_list(
         st.page = pages;
         let clamped = url_of(spec, path, &st);
         if full {
-            return Ok((StatusCode::FOUND, [(header::LOCATION, clamped)]).into_response());
+            return Ok(redirect(clamped));
         }
         rows = fetch(&state.db, spec, &st, &scope).await?.0;
         replace_url = Some(clamped);
