@@ -2356,6 +2356,20 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn orders_fragment_updates_count_oob(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        place_order(&db, &f, None).await;
+        let cookie = admin_cookie(&db).await;
+        let (_, full) = get(&app(&db), "/admin/shop/orders", &cookie).await;
+        assert!(full.contains("id=\"list-count\""), "{full}");
+        assert!(!full.contains("hx-swap-oob=\"true\" id=\"list-count\""), "в полной странице счётчик не oob");
+        let (_, all) = htmx_get(&app(&db), "/admin/shop/orders", &cookie, "list-body").await;
+        assert!(all.contains("id=\"list-count\" hx-swap-oob=\"true\">1<"), "{all}");
+        let (_, none) = htmx_get(&app(&db), "/admin/shop/orders?f.paid=eq:Y", &cookie, "list-body").await;
+        assert!(none.contains("id=\"list-count\" hx-swap-oob=\"true\">0<"), "{none}");
+    }
+
+    #[sqlx::test]
     async fn orders_normalizes_url(db: sqlx::PgPool) {
         let cookie = admin_cookie(&db).await;
         let (status, headers, _) =

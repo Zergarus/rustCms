@@ -215,16 +215,29 @@
       });
       placePop(anchor);
     }
+    var hintText = '';
     function value() {
       remember();
+      hintText = 'Введите значение';
       if (NO_VALUE.indexOf(op) >= 0) return op;
-      if (ty === 'enum') return many.length ? op + ':' + many.join(',') : null;
-      if (op === 'between') return pair[0] !== '' && pair[1] !== '' ? op + ':' + pair[0] + ',' + pair[1] : null;
-      if (op === 'range') return pair[0] || pair[1] ? op + ':' + pair[0] + ',' + pair[1] : null;
+      if (ty === 'enum') { hintText = 'Выберите хотя бы один вариант'; return many.length ? op + ':' + many.join(',') : null; }
+      if (op === 'between' || op === 'range') {
+        var a = pair[0], b = pair[1];
+        if (op === 'between' ? (a === '' || b === '') : (!a && !b)) { hintText = 'Заполните оба значения'; if (op === 'range') hintText = 'Укажите дату от или до'; return null; }
+        if (a !== '' && b !== '' && (op === 'between' ? parseFloat(a) > parseFloat(b) : a > b)) { hintText = 'Начало больше конца'; return null; }
+        return op + ':' + a + ',' + b;
+      }
       return single.trim() !== '' ? op + ':' + single.trim() : null;
     }
     function apply(v) {
-      if (v === null) { var inp = $('input[type=text], input[type=number], input[type=date]', p); if (inp) inp.focus(); return; }
+      if (v === null) {
+        var hint = $('.pop-hint', p);
+        if (!hint) { hint = document.createElement('div'); hint.className = 'pop-hint'; hint.setAttribute('role', 'alert'); var act = $('.actions', p); p.insertBefore(hint, act); }
+        hint.textContent = hintText;
+        var inp = $('input[type=text], input[type=number], input[type=date]', p); if (inp) inp.focus();
+        placePop(anchor);
+        return;
+      }
       go(buildUrl(function (q) { q.set('f.' + code, v); }));
     }
     draw();
@@ -243,7 +256,7 @@
       if (e.target.closest('[data-rm]')) go(buildUrl(function (q) { q.delete('f.' + code); }));
     });
     p.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' && e.target.type !== 'checkbox' && ty !== 'bool') { e.preventDefault(); apply(value()); }
+      if (e.key === 'Enter' && e.target.tagName === 'INPUT' && e.target.type !== 'checkbox' && ty !== 'bool') { e.preventDefault(); apply(value()); }
     });
   }
 
@@ -297,6 +310,13 @@
       }
     });
     p.addEventListener('drop', function (e) { e.preventDefault(); drag = null; sync(); });
+    // перетаскивание отменено (Esc, бросили вне списка): порядок возвращается к текущему из адреса
+    p.addEventListener('dragend', function () {
+      if (!drag) return;
+      drag = null;
+      var list = $('.list', p);
+      if (list) list.innerHTML = $('.list', document.createRange().createContextualFragment(html())).innerHTML;
+    });
   }
 
   /* ---------- События мыши ---------- */
@@ -313,7 +333,7 @@
     var chip = t.closest('[data-chip]');
     if (chip) { filterEditor(chip, chip.dataset.chip); return; }
     var cols = t.closest('#list-cols');
-    if (cols) { colsPicker(cols); return; }
+    if (cols) { if (pop && pop.classList.contains('pop-cols')) closePop(); else colsPicker(cols); return; }
   });
 
   /* ---------- Клавиши ---------- */

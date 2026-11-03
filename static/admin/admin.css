@@ -560,3 +560,5 @@ textarea.bc-text[hidden] { display: none; }
 .pop .drag { cursor: grab; color: var(--muted); }
 .pop label.item { justify-content: flex-start; text-align: left; margin: 0; }
 .pop input[type=checkbox] { width: auto; height: auto; flex: none; margin: 0; }
+.pop .item[hidden] { display: none; }
+.pop-hint { margin: 4px; padding: 4px 8px; border-radius: 6px; font-size: 12px; color: var(--danger); background: rgba(248, 113, 113, .1); }
