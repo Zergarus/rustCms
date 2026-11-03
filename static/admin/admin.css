@@ -498,9 +498,14 @@ textarea.bc-text[hidden] { display: none; }
 .list-tree .cnt { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .tkids { display: none; margin-left: 12px; }
 .tnode.open > .tkids { display: block; }
-.node-menu { display: none; position: relative; }
-.list-tree .node:hover .node-menu, .node-menu[open] { display: block; }
-.list-tree .node:hover .cnt, .list-tree .node:has(.node-menu[open]) .cnt { display: none; }
+.node-menu { position: relative; }
+.node-menu summary { opacity: 0; }
+.list-tree .node:hover .node-menu summary, .list-tree .node:focus-within .node-menu summary, .list-tree .node.on .node-menu summary, .node-menu[open] summary { opacity: 1; }
+@media (hover: none) { .node-menu summary { opacity: 1; } }
+.node-menu summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 4px; }
+.tbtn:focus-visible, .list-tree .tw:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tbtn .when-collapsed, .list-layout.tree-collapsed .tbtn .when-open { display: none; }
+.list-layout.tree-collapsed .tbtn .when-collapsed { display: inline; }
 .node-menu summary { list-style: none; cursor: pointer; color: var(--muted); padding: 0 4px; }
 .node-menu summary::-webkit-details-marker { display: none; }
 .node-menu-list { position: absolute; right: 0; top: 100%; z-index: 30; min-width: 210px; padding: 4px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--raised); box-shadow: var(--shadow); }

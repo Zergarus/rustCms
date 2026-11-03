@@ -2938,7 +2938,10 @@ mod list_tests {
             html.contains("СиротаЗапись") && !html.contains("Первая новость"),
             "{html}"
         );
-        assert!(html.contains("без раздела"), "чип: {html}");
+        assert!(
+            html.contains("Раздел:") && html.contains("без раздела"),
+            "чип: {html}"
+        );
     }
 
     #[sqlx::test]
@@ -2993,27 +2996,42 @@ mod list_tests {
         );
     }
 
+    /// Число из `<span class="cnt">` узла дерева с названием `name`.
+    fn node_count(html: &str, name: &str) -> String {
+        let at = html
+            .find(&format!(">{name}</a>"))
+            .unwrap_or_else(|| panic!("узел {name} не найден"));
+        let rest = &html[at..];
+        let from = rest.find("<span class=\"cnt\">").expect("счётчик") + 18;
+        let rest = &rest[from..];
+        rest[..rest.find("</span>").unwrap()].to_string()
+    }
+
     #[sqlx::test]
     async fn tree_counts_include_descendants(db: PgPool) {
         let fx = content_fixture(&db).await;
         let sub = section(&db, fx.collection_id, Some(fx.section_id), "Подраздел Б").await;
         item(&db, fx.collection_id, Some(sub), "Х1").await;
         item(&db, fx.collection_id, Some(sub), "Х2").await;
+        item(&db, fx.collection_id, None, "Х3").await;
         let app = crate::app(test_state(db.clone()));
         let cookie = admin_cookie(&db).await;
+        // Раздел А выбран: Подраздел Б виден в дереве
         let (_, _, b) = get_raw(
             &app,
-            &format!("/admin/collections/{}/items", fx.collection_id),
+            &format!(
+                "/admin/collections/{}/items?section={}",
+                fx.collection_id, fx.section_id
+            ),
             &cookie,
         )
         .await;
         let html = String::from_utf8_lossy(&b);
-        // Раздел А: своя запись и две в подразделе
-        assert!(html.contains("<span class=\"cnt\">3</span>"), "{html}");
-        assert!(
-            html.contains("Вся коллекция") && html.contains("Без раздела"),
-            "{html}"
-        );
+        // А: своя запись + две в подразделе; Б: две; без раздела: одна; всего четыре
+        assert_eq!(node_count(&html, "Раздел А"), "3", "{html}");
+        assert_eq!(node_count(&html, "Подраздел Б"), "2");
+        assert_eq!(node_count(&html, "Без раздела"), "1");
+        assert_eq!(node_count(&html, "Вся коллекция"), "4");
     }
 
     #[sqlx::test]
@@ -3058,7 +3076,10 @@ mod list_tests {
             "{html}"
         );
         assert!(
-            !html.contains("Добавить запись") && !html.contains("Добавить раздел"),
+            !html.contains("Добавить запись")
+                && !html.contains("Добавить раздел")
+                && !html.contains("Изменить раздел")
+                && !html.contains("Добавить подраздел"),
             "{html}"
         );
     }

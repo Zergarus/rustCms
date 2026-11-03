@@ -620,15 +620,14 @@
     var tog = e.target.closest('[data-tree-tog]');
     if (tog) {
       var node = tog.closest('.tnode');
-      if (node) node.classList.toggle('open');
+      if (node) tog.setAttribute('aria-expanded', node.classList.toggle('open') ? 'true' : 'false');
       return;
     }
     var col = e.target.closest('[data-tree-collapse]');
     if (col) {
       var layout = col.closest('.list-layout');
       if (!layout) return;
-      var on = layout.classList.toggle('tree-collapsed');
-      col.textContent = on ? '⟩' : '⟨';
+      layout.classList.toggle('tree-collapsed');
     }
   });
 

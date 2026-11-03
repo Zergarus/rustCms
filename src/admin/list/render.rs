@@ -398,7 +398,7 @@ pub async fn run_list(
                 0,
                 ChipView {
                     section: true,
-                    label: "Раздел".into(),
+                    label: "Раздел:".into(),
                     op: String::new(),
                     value,
                     url: url_of(spec, path, &next),

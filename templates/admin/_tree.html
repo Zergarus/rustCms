@@ -2,7 +2,7 @@
 {% macro node(n, can_write) %}
 <div class="tnode{% if n.open %} open{% endif %}">
   <div class="node{% if n.selected %} on{% endif %}{% if not n.active %} off{% endif %}">
-    {% if n.has_kids %}<button type="button" class="tw" data-tree-tog aria-label="Раскрыть раздел"{% if not n.open %} hx-get="{{ n.load_url }}" hx-trigger="click once" hx-target="next .tkids" hx-swap="innerHTML" hx-push-url="false"{% endif %}>▸</button>{% else %}<span class="tw"></span>{% endif %}
+    {% if n.has_kids %}<button type="button" class="tw" data-tree-tog aria-label="Раскрыть раздел" aria-expanded="{{ 'true' if n.open else 'false' }}"{% if not n.open %} hx-get="{{ n.load_url }}" hx-trigger="click once" hx-target="next .tkids" hx-swap="innerHTML" hx-push-url="false"{% endif %}>▸</button>{% else %}<span class="tw"></span>{% endif %}
     <a class="nm" href="{{ n.url }}" hx-get="{{ n.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">{{ n.name }}</a>
     <span class="cnt">{{ n.count }}</span>
     {% if can_write %}
@@ -22,7 +22,7 @@
 {% if tree.panel %}
 <div class="tree-top">
   <span class="tree-title">Разделы</span>
-  <button type="button" class="tbtn" data-tree-collapse title="Свернуть дерево" aria-label="Свернуть дерево">⟨</button>
+  <button type="button" class="tbtn" data-tree-collapse title="Свернуть дерево" aria-label="Свернуть дерево"><span class="when-open">⟨</span><span class="when-collapsed">⟩</span></button>
 </div>
 <div class="tree-body">
   <div class="node{% if tree.all.selected %} on{% endif %}"><span class="tw"></span><a class="nm" href="{{ tree.all.url }}" hx-get="{{ tree.all.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">Вся коллекция</a><span class="cnt">{{ tree.all.count }}</span></div>
