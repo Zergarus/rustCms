@@ -70,6 +70,40 @@ pub(crate) async fn load_prefs(db: &PgPool, user_id: i64) -> sqlx::Result<Prefs>
     Ok(v.as_ref().map(Prefs::from_json).unwrap_or_default())
 }
 
+/// Сохранённое состояние списка (`admin_prefs.lists.<key>`); нет записи — `Null`.
+pub(crate) async fn list_prefs(db: &PgPool, user_id: i64, list_key: &str) -> sqlx::Result<Value> {
+    let v: Option<Option<Value>> =
+        sqlx::query_scalar("SELECT admin_prefs #> ARRAY['lists', $2::text] FROM users WHERE id = $1")
+            .bind(user_id)
+            .bind(list_key)
+            .fetch_optional(db)
+            .await?;
+    Ok(v.flatten().unwrap_or(Value::Null))
+}
+
+/// Дописывает ключи `patch` (объект) в `admin_prefs.lists.<key>`, не трогая остальное.
+/// Ключ списка (`collection:5`) идёт параметром, а не частью SQL.
+pub(crate) async fn merge_list_prefs(
+    db: &PgPool,
+    user_id: i64,
+    list_key: &str,
+    patch: Value,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE users SET admin_prefs = jsonb_set(
+             jsonb_set(admin_prefs, '{lists}', COALESCE(admin_prefs -> 'lists', '{}'::jsonb)),
+             ARRAY['lists', $2::text],
+             COALESCE(admin_prefs #> ARRAY['lists', $2::text], '{}'::jsonb) || $3::jsonb)
+         WHERE id = $1",
+    )
+    .bind(user_id)
+    .bind(list_key)
+    .bind(patch)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// Всё, что нужно базовому шаблону полной страницы (`user.shell`).
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Shell {
@@ -106,7 +140,7 @@ pub(super) async fn save_prefs(
         theme,
         tabs: form.tabs.as_deref() == Some("on"),
     };
-    sqlx::query("UPDATE users SET admin_prefs = $2 WHERE id = $1")
+    sqlx::query("UPDATE users SET admin_prefs = admin_prefs || $2::jsonb WHERE id = $1")
         .bind(user.user.id)
         .bind(serde_json::json!({"theme": prefs.theme, "tabs": prefs.tabs}))
         .execute(&state.db)

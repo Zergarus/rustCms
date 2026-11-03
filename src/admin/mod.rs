@@ -78,6 +78,10 @@ pub fn router(state: AppState) -> Router<AppState> {
             get(items::list).post(items::create),
         )
         .route("/collections/{id}/tree", get(items::tree))
+        .route(
+            "/collections/{id}/tree/collapsed",
+            post(items::tree_collapsed),
+        )
         .route("/views", post(list::views::create))
         .route("/views/{id}", post(list::views::update))
         .route("/views/{id}/delete", post(list::views::delete))

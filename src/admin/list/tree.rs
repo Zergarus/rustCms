@@ -171,6 +171,7 @@ impl TreeBuilder<'_> {
                 "selected": selected_none,
             },
             "add_url": format!("/admin/collections/{}/sections/new", self.collection_id),
+            "collapse_url": format!("/admin/collections/{}/tree/collapsed", self.collection_id),
             "nodes": self.level(None),
         })
     }

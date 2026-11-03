@@ -22,7 +22,7 @@
 {% if tree.panel %}
 <div class="tree-top">
   <span class="tree-title">Разделы</span>
-  <button type="button" class="tbtn" data-tree-collapse title="Свернуть дерево" aria-label="Свернуть дерево"><span class="when-open">⟨</span><span class="when-collapsed">⟩</span></button>
+  <button type="button" class="tbtn" data-tree-collapse data-collapse-url="{{ tree.collapse_url }}" title="Свернуть дерево" aria-label="Свернуть дерево"><span class="when-open">⟨</span><span class="when-collapsed">⟩</span></button>
 </div>
 <div class="tree-body">
   <div class="node{% if tree.all.selected %} on{% endif %}"><span class="tw"></span><a class="nm" href="{{ tree.all.url }}" hx-get="{{ tree.all.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">Вся коллекция</a><span class="cnt">{{ tree.all.count }}</span></div>

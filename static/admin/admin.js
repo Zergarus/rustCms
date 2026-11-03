@@ -615,7 +615,7 @@
   // Снимок страницы для кнопки «Назад» не должен хранить открытую панель
   document.addEventListener('htmx:beforeHistorySave', peekClose);
 
-  // Дерево разделов: раскрытие узла и сворачивание колонки (только класс; запоминание — отдельно)
+  // Дерево разделов: раскрытие узла и сворачивание колонки (класс и запоминание на сервере)
   document.addEventListener('click', function (e) {
     var tog = e.target.closest('[data-tree-tog]');
     if (tog) {
@@ -627,7 +627,16 @@
     if (col) {
       var layout = col.closest('.list-layout');
       if (!layout) return;
-      layout.classList.toggle('tree-collapsed');
+      var collapsed = layout.classList.toggle('tree-collapsed');
+      var url = col.getAttribute('data-collapse-url');
+      if (url) {
+        fetch(url, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'value=' + (collapsed ? '1' : '0')
+        }).catch(function () {});
+      }
     }
   });
 

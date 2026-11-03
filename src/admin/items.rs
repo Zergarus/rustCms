@@ -1071,6 +1071,29 @@ pub async fn tree(
 }
 
 #[derive(Deserialize)]
+pub struct CollapsedForm {
+    value: String,
+}
+
+/// Запоминает свёрнутость дерева разделов: `POST /admin/collections/{id}/tree/collapsed`.
+pub async fn tree_collapsed(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+    axum::Form(form): axum::Form<CollapsedForm>,
+) -> AppResult<axum::http::StatusCode> {
+    user.require_collection(id, Level::Read)?;
+    crate::admin::shell::merge_list_prefs(
+        &state.db,
+        user.user.id,
+        &format!("collection:{id}"),
+        serde_json::json!({"tree_collapsed": form.value == "1"}),
+    )
+    .await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
 pub struct NewQuery {
     section: Option<i64>,
     /// Для предложения: товар (запись коллекции товаров), к которому оно добавляется.

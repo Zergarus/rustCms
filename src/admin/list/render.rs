@@ -298,6 +298,33 @@ fn spec_json(spec: &ListSpec, st: &ListState) -> String {
         .replace('<', "\\u003c")
 }
 
+/// Запоминает колонки, сортировку и размер страницы, если они отличаются от сохранённых.
+/// Открытый вид несёт свои колонки, поэтому при нём ничего не пишется. Фильтры не сохраняются.
+async fn remember(
+    state: &AppState,
+    user: &Access,
+    spec: &ListSpec,
+    st: &ListState,
+    stored: &Value,
+) -> AppResult<()> {
+    if st.view.is_some() {
+        return Ok(());
+    }
+    let sort = if st.sort.desc {
+        format!("-{}", st.sort.code)
+    } else {
+        st.sort.code.clone()
+    };
+    let now = serde_json::json!({"cols": st.cols, "sort": sort, "per": st.per});
+    let same = ["cols", "sort", "per"]
+        .iter()
+        .all(|k| stored.get(*k) == now.get(*k));
+    if !same {
+        crate::admin::shell::merge_list_prefs(&state.db, user.user.id, &spec.key, now).await?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_list(
     state: &AppState,
@@ -462,7 +489,10 @@ pub async fn run_list(
         })
         .collect();
     let capped = total >= COUNT_CAP;
+    let stored = crate::admin::shell::list_prefs(&state.db, user.user.id, &spec.key).await?;
+    let tree_collapsed = stored.get("tree_collapsed").and_then(Value::as_bool) == Some(true);
     let ctx = context! {
+        tree_collapsed,
         user,
         page,
         notices,
@@ -488,6 +518,7 @@ pub async fn run_list(
         "_list_body.html"
     };
     let mut resp = render(state, name, ctx)?.into_response();
+    remember(state, user, spec, &st, &stored).await?;
     if let Some(Ok(v)) = replace_url.as_deref().map(HeaderValue::from_str) {
         resp.headers_mut().insert("HX-Replace-Url", v);
     }

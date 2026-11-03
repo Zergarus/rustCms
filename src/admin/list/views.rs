@@ -17,7 +17,10 @@ use super::{
 };
 use crate::{
     access::{Access, Level},
-    admin::flash::{FlashKind, toast},
+    admin::{
+        flash::{FlashKind, toast},
+        shell,
+    },
     collection::repo,
     error::{AppError, AppResult},
     state::AppState,
@@ -149,6 +152,23 @@ fn ser(pairs: &[(String, String)]) -> String {
     s.finish()
 }
 
+/// Сохранённые `cols`/`sort`/`per` одним запросом: разбор отбросит устаревшее
+/// (удалённое поле, недопустимый размер).
+fn saved_query(saved: &serde_json::Value) -> String {
+    let mut pairs = Vec::new();
+    if let Some(cols) = saved.get("cols").and_then(|v| v.as_array()) {
+        let cols: Vec<&str> = cols.iter().filter_map(|c| c.as_str()).collect();
+        pairs.push(("cols".to_string(), cols.join(",")));
+    }
+    if let Some(sort) = saved.get("sort").and_then(|v| v.as_str()) {
+        pairs.push(("sort".to_string(), sort.to_string()));
+    }
+    if let Some(per) = saved.get("per").and_then(|v| v.as_i64()) {
+        pairs.push(("per".to_string(), per.to_string()));
+    }
+    ser(&pairs)
+}
+
 /// Метка `edited=1`: единственный источник правды — эта функция и `render::url_of`.
 /// Адрес `path?view=N` (без своих параметров, кроме page/per) означает «открыть сохранённый
 /// вид». Если состояние при открытом виде пустое (убрали последний чип, вид без фильтров),
@@ -171,8 +191,17 @@ pub async fn resolve(
         .find(|(k, _)| k == "view")
         .and_then(|(_, v)| v.parse::<i64>().ok());
     let Some(id) = view_id else {
+        let mut parsed;
+        if pairs.is_empty() {
+            // Голый адрес: колонки, сортировка и размер страницы — как в прошлый раз (без редиректа).
+            let saved = shell::list_prefs(db, user_id, &spec.key).await?;
+            parsed = state::parse(spec, &saved_query(&saved));
+            parsed.changed = false;
+        } else {
+            parsed = state::parse(spec, raw_query);
+        }
         return Ok(Resolved {
-            parsed: state::parse(spec, raw_query),
+            parsed,
             view: None,
             notices: Vec::new(),
         });
@@ -1163,6 +1192,139 @@ mod tests {
             &format!("path={}&shared=1", enc(&list_path(c.collection_id))),
         )
         .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+    }
+
+    async fn full_get(app: &Router, path: &str, cookie: &str) -> (StatusCode, HeaderMap, String) {
+        let req = Request::get(path)
+            .header(header::COOKIE, cookie)
+            .body(Body::empty())
+            .unwrap();
+        send(app, req).await
+    }
+
+    async fn prefs_of(db: &PgPool) -> serde_json::Value {
+        sqlx::query_scalar("SELECT admin_prefs FROM users WHERE login = 'smoke'")
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn list_prefs_restore(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let (_, _, out) = full_get(
+            &app,
+            "/admin/shop/orders?cols=number,status&sort=-status&per=20&f.number=has:7",
+            &cookie,
+        )
+        .await;
+        assert!(out.contains("sort=-status"));
+        // пустой запрос: колонки, сортировка и размер возвращаются, фильтры нет
+        let (st, h, out) = full_get(&app, "/admin/shop/orders", &cookie).await;
+        assert_eq!(st, StatusCode::OK, "{out}");
+        assert!(h.get(header::LOCATION).is_none());
+        assert!(out.contains(r#""cols":["number","status"]"#), "{out}");
+        assert!(out.contains(r#""per":20"#));
+        assert!(out.contains("sort=-status"));
+        assert!(!out.contains("has:7") && !out.contains("f.number"));
+        // свои параметры сильнее сохранённых
+        let (_, _, out) = full_get(&app, "/admin/shop/orders?cols=number,buyer", &cookie).await;
+        assert!(out.contains(r#""cols":["number","buyer"]"#));
+    }
+
+    #[sqlx::test]
+    async fn list_prefs_stale_column_ignored(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        sqlx::query(
+            r#"UPDATE users SET admin_prefs = '{"lists":{"orders":{"cols":["number","gone"],"sort":"nope","per":7}}}'"#,
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let (st, h, out) = full_get(&app, "/admin/shop/orders", &cookie).await;
+        assert_eq!(st, StatusCode::OK, "{out}");
+        assert!(h.get(header::LOCATION).is_none());
+    }
+
+    #[sqlx::test]
+    async fn list_prefs_no_write_when_same(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let q = "/admin/shop/orders?cols=number,status&sort=-status";
+        full_get(&app, q, &cookie).await;
+        let first = prefs_of(&db).await;
+        assert_eq!(
+            first["lists"]["orders"],
+            serde_json::json!({"cols": ["number", "status"], "sort": "-status", "per": 50})
+        );
+        // метка, которую видно, если запись всё же случится
+        sqlx::query(r#"UPDATE users SET admin_prefs = jsonb_set(admin_prefs, '{marker}', '1')"#)
+            .execute(&db)
+            .await
+            .unwrap();
+        let marked = prefs_of(&db).await;
+        full_get(&app, q, &cookie).await;
+        full_get(&app, "/admin/shop/orders", &cookie).await;
+        assert_eq!(prefs_of(&db).await, marked);
+        // другое состояние — запись, остальные ключи сохраняются
+        full_get(&app, "/admin/shop/orders?cols=number&per=20", &cookie).await;
+        let after = prefs_of(&db).await;
+        assert_eq!(after["marker"], 1);
+        assert_eq!(after["lists"]["orders"]["per"], 20);
+    }
+
+    #[sqlx::test]
+    async fn list_prefs_not_saved_in_view(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let (uid, _) = user_cookie(&db, "smoke", true).await;
+        let id = insert_view(&db, "orders", uid, "cols=number,paid", false).await;
+        let (st, h, _) = full_get(&app, &format!("/admin/shop/orders?view={id}"), &cookie).await;
+        assert_eq!(st, StatusCode::FOUND);
+        let to = h[header::LOCATION].to_str().unwrap().to_string();
+        let (st, _, out) = full_get(&app, &to, &cookie).await;
+        assert_eq!(st, StatusCode::OK, "{out}");
+        assert!(prefs_of(&db).await.get("lists").is_none());
+    }
+
+    #[sqlx::test]
+    async fn prefs_form_keeps_lists(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        full_get(&app, "/admin/shop/orders?per=20", &cookie).await;
+        crate::test_support::post_form_raw(&app, "/admin/prefs", &cookie, "theme=dark").await;
+        let p = prefs_of(&db).await;
+        assert_eq!(p["theme"], "dark");
+        assert_eq!(p["lists"]["orders"]["per"], 20);
+    }
+
+    #[sqlx::test]
+    async fn tree_collapsed_saved_and_rendered(db: PgPool) {
+        let c = content_fixture(&db).await;
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let url = list_path(c.collection_id);
+        let tree = format!("/admin/collections/{}/tree/collapsed", c.collection_id);
+        let (_, _, out) = full_get(&app, &url, &cookie).await;
+        assert!(!out.contains("has-tree tree-collapsed"));
+        let (st, _, _) = hx_post(&app, &tree, &cookie, "value=1").await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let (_, _, out) = full_get(&app, &url, &cookie).await;
+        assert!(out.contains("has-tree tree-collapsed"), "{out}");
+        // запоминание списка не затирает флаг
+        full_get(&app, &format!("{url}?per=20"), &cookie).await;
+        let (_, _, out) = full_get(&app, &url, &cookie).await;
+        assert!(out.contains("tree-collapsed"));
+        let (st, _, _) = hx_post(&app, &tree, &cookie, "value=0").await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let (_, _, out) = full_get(&app, &url, &cookie).await;
+        assert!(!out.contains("has-tree tree-collapsed"));
+        // без права на чтение коллекции — 403
+        let nobody = permitted_cookie(&db, "nobody", &[]).await;
+        let (st, _, _) = hx_post(&app, &tree, &nobody, "value=1").await;
         assert_eq!(st, StatusCode::FORBIDDEN);
     }
 
