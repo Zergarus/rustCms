@@ -101,8 +101,8 @@ pub(crate) async fn build_spec(db: &PgPool, can_share: bool) -> sqlx::Result<Lis
         canceled,
     ];
     // Платёжная система и служба — по первой оплате / отгрузке заказа.
-    let pay_expr = "(SELECT pm.pay_system_id::text FROM payments pm WHERE pm.order_id = o.id ORDER BY pm.id LIMIT 1)";
-    let delivery_expr = "(SELECT sh.delivery_id::text FROM shipments sh WHERE sh.order_id = o.id ORDER BY sh.id LIMIT 1)";
+    let pay_expr = "COALESCE((SELECT pm.pay_system_id::text FROM payments pm WHERE pm.order_id = o.id ORDER BY pm.id LIMIT 1), '')";
+    let delivery_expr = "COALESCE((SELECT sh.delivery_id::text FROM shipments sh WHERE sh.order_id = o.id ORDER BY sh.id LIMIT 1), '')";
     let filters = vec![
         filter(
             "number",
@@ -160,6 +160,7 @@ pub(crate) async fn build_spec(db: &PgPool, can_share: bool) -> sqlx::Result<Lis
         peek_url: Some("/admin/shop/orders/{id}/peek".into()),
         open_url: "/admin/shop/orders/{id}".into(),
         can_share,
+        muted_expr: Some("o.canceled".into()),
     })
 }
 
@@ -264,5 +265,41 @@ mod tests {
             ids(&db, &spec, "f.pay_system=nin:1").await,
             Vec::<i64>::new()
         );
+    }
+
+    /// `nin` включает заказы без оплаты/отгрузки.
+    #[sqlx::test]
+    async fn nin_includes_orders_without_payment(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let a = place_order(&db, &f, None).await; // платёжка 1
+        let b = place_order(&db, &f, None).await; // платёжка 2
+        let c = place_order(&db, &f, None).await; // без оплаты
+        for (id, ps) in [(1, "QR"), (2, "Нал")] {
+            sqlx::query("INSERT INTO pay_systems (id, name) VALUES ($1, $2)")
+                .bind(id as i64)
+                .bind(ps)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE payments SET pay_system_id = 2 WHERE order_id = $1")
+            .bind(b)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM payments WHERE order_id = $1")
+            .bind(c)
+            .execute(&db)
+            .await
+            .unwrap();
+        let spec = build_spec(&db, false).await.unwrap();
+        assert_eq!(ids(&db, &spec, "f.pay_system=in:1").await, vec![a]);
+        assert_eq!(ids(&db, &spec, "f.pay_system=in:2").await, vec![b]);
+        let mut rest = vec![b, c];
+        rest.sort_unstable();
+        assert_eq!(ids(&db, &spec, "f.pay_system=nin:1").await, rest);
+        let mut rest = vec![a, c];
+        rest.sort_unstable();
+        assert_eq!(ids(&db, &spec, "f.pay_system=nin:2").await, rest);
     }
 }

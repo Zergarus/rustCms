@@ -291,6 +291,9 @@ pub fn select(spec: &ListSpec, st: &ListState, scope: &Scope) -> QueryBuilder<Po
             pairs.push(format!("'{}__cur', {}", lit(&c.code), cur));
         }
     }
+    if let Some(m) = &spec.muted_expr {
+        pairs.push(format!("'__muted', {m}"));
+    }
     if pairs.is_empty() {
         qb.push("'{}'::jsonb");
     }

@@ -18,7 +18,7 @@
       </tr></thead>
       <tbody>
         {% for r in rows %}
-        <tr data-id="{{ r.id }}" data-open="{{ r.open }}"{% if r.peek %} data-peek="{{ r.peek }}"{% endif %}>
+        <tr data-id="{{ r.id }}"{% if r.muted %} class="inactive"{% endif %} data-open="{{ r.open }}"{% if r.peek %} data-peek="{{ r.peek }}"{% endif %}>
           {% for c in r.cells %}<td{% if c.num %} class="num"{% endif %}>{% if c.first %}<a href="{{ r.open }}">{{ c.text }}</a>{% elif c.flag == "ok" %}<span class="badge ok">{{ c.text }}</span>{% elif c.flag == "none" %}<span class="muted">{{ c.text }}</span>{% else %}{{ c.text }}{% endif %}</td>{% endfor %}
         </tr>
         {% endfor %}

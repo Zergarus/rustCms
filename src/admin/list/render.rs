@@ -85,7 +85,7 @@ pub fn format_cell(ty: &FieldType, v: &Value, currency: Option<&str>) -> String 
         (_, Value::String(s)) => s.clone(),
         (_, Value::Number(n)) => match n.as_f64() {
             Some(f) if f.fract() == 0.0 && f.abs() < 1e15 => format!("{}", f as i64),
-            _ => n.to_string(),
+            _ => n.to_string().replace('.', ","),
         },
         (_, Value::Bool(b)) => if *b { "да" } else { "нет" }.into(),
         _ => v.to_string(),
@@ -106,6 +106,7 @@ struct RowView {
     id: i64,
     open: String,
     peek: Option<String>,
+    muted: bool,
     cells: Vec<CellView>,
 }
 
@@ -297,9 +298,15 @@ pub async fn run_list(
 
     let (mut rows, total) = fetch(&state.db, spec, &st, &scope).await?;
     let pages = ((total + st.per - 1) / st.per).max(1);
+    let mut replace_url = parsed.changed.then(|| normalized.clone());
     if st.page > pages {
         st.page = pages;
+        let clamped = url_of(spec, path, &st);
+        if full {
+            return Ok((StatusCode::FOUND, [(header::LOCATION, clamped)]).into_response());
+        }
         rows = fetch(&state.db, spec, &st, &scope).await?.0;
+        replace_url = Some(clamped);
     }
 
     let visible: Vec<_> = st.cols.iter().filter_map(|c| spec.column(c)).collect();
@@ -354,6 +361,7 @@ pub async fn run_list(
                 .collect();
             RowView {
                 id: r.id,
+                muted: r.cells.get("__muted") == Some(&Value::Bool(true)),
                 open: spec.open_url.replace("{id}", &r.id.to_string()),
                 peek: spec
                     .peek_url
@@ -413,7 +421,7 @@ pub async fn run_list(
         "_list_body.html"
     };
     let mut resp = render(state, name, ctx)?.into_response();
-    if let (true, Ok(v)) = (parsed.changed, HeaderValue::from_str(&normalized)) {
+    if let Some(Ok(v)) = replace_url.as_deref().map(HeaderValue::from_str) {
         resp.headers_mut().insert("HX-Replace-Url", v);
     }
     Ok(resp)
@@ -452,7 +460,7 @@ mod tests {
         assert_eq!(format_cell(&FieldType::Bool, &json!(false), None), "нет");
         assert_eq!(format_cell(&FieldType::Text, &Value::Null, None), "—");
         assert_eq!(format_cell(&FieldType::Number, &json!(5.0), None), "5");
-        assert_eq!(format_cell(&FieldType::Number, &json!(5.25), None), "5.25");
+        assert_eq!(format_cell(&FieldType::Number, &json!(5.25), None), "5,25");
         assert_eq!(format_cell(&FieldType::Text, &json!("a<b"), None), "a<b");
     }
 }

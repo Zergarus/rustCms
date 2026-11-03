@@ -2330,10 +2330,7 @@ mod tests {
         let (status, frag) = htmx_get(&app(&db), "/admin/shop/orders", &cookie, "list-body").await;
         assert_eq!(status, StatusCode::OK);
         assert!(frag.contains("<table"), "{frag}");
-        assert!(
-            frag.contains("1,00") || frag.contains("100,00 RUB"),
-            "{frag}"
-        );
+        assert!(frag.contains("100,00 RUB"), "{frag}");
         assert!(!frag.contains("<aside class=\"sidebar\""), "{frag}");
     }
 
@@ -2434,5 +2431,68 @@ mod tests {
         )
         .await;
         assert!(!html.contains("data-list-changed"));
+    }
+
+    #[sqlx::test]
+    async fn orders_page_past_end_redirects_to_clamped(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        place_order(&db, &f, None).await;
+        let cookie = admin_cookie(&db).await;
+        let (status, headers, _) = get_raw(&app(&db), "/admin/shop/orders?page=999", &cookie).await;
+        assert_eq!(status, StatusCode::FOUND);
+        assert_eq!(headers[header::LOCATION], "/admin/shop/orders");
+        use tower::ServiceExt;
+        let req = axum::http::Request::get("/admin/shop/orders?page=999")
+            .header(header::COOKIE, &cookie)
+            .header("HX-Request", "true")
+            .header("HX-Target", "list-body")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = app(&db).oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["hx-replace-url"], "/admin/shop/orders");
+    }
+
+    #[sqlx::test]
+    async fn orders_cyrillic_filter_location_roundtrips(db: sqlx::PgPool) {
+        let cookie = admin_cookie(&db).await;
+        let (status, headers, _) = get_raw(
+            &app(&db),
+            "/admin/shop/orders?f.buyer=has:%D0%98%D0%B2%D0%B0%D0%BD&zzz=1&sort=-created_at",
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FOUND);
+        let loc = headers[header::LOCATION].to_str().unwrap().to_string();
+        assert!(loc.is_ascii(), "{loc}");
+        assert_eq!(
+            loc,
+            "/admin/shop/orders?f.buyer=has%3A%D0%98%D0%B2%D0%B0%D0%BD"
+        );
+        let (status, _, html) = get_raw(&app(&db), &loc, &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(String::from_utf8_lossy(&html).contains("Иван"));
+    }
+
+    #[sqlx::test]
+    async fn orders_canceled_row_is_muted(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let ok = place_order(&db, &f, None).await;
+        let canceled = place_order(&db, &f, None).await;
+        sqlx::query("UPDATE orders SET canceled = TRUE WHERE id = $1")
+            .bind(canceled)
+            .execute(&db)
+            .await
+            .unwrap();
+        let cookie = admin_cookie(&db).await;
+        let (_, html) = htmx_get(&app(&db), "/admin/shop/orders", &cookie, "list-body").await;
+        assert!(
+            html.contains(&format!("<tr data-id=\"{canceled}\" class=\"inactive\"")),
+            "{html}"
+        );
+        assert!(
+            html.contains(&format!("<tr data-id=\"{ok}\" data-open")),
+            "{html}"
+        );
     }
 }

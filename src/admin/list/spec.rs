@@ -76,6 +76,8 @@ pub struct ListSpec {
     /// Шаблон с `{id}`.
     pub open_url: String,
     pub can_share: bool,
+    /// Булево SQL-выражение: строки с истиной выводятся приглушёнными.
+    pub muted_expr: Option<String>,
 }
 
 impl ListSpec {
@@ -166,5 +168,6 @@ pub(crate) fn test_spec() -> ListSpec {
         peek_url: None,
         open_url: "/admin/test/{id}".into(),
         can_share: false,
+        muted_expr: None,
     }
 }
