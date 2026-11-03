@@ -12,7 +12,7 @@ use serde_json::Value;
 use super::{
     spec::{FieldType, Filter, ListSpec},
     sql::{COUNT_CAP, Scope, fetch},
-    state::{Cond, ListState, Op, Parsed, Val, to_query},
+    state::{Cond, ListState, Op, Parsed, SectionSel, Val, to_query},
 };
 use crate::{
     access::Access,
@@ -30,6 +30,10 @@ pub struct ListPage {
     pub actions: Vec<Action>,
     /// Данные дерева разделов (рисует шаблон коллекции).
     pub tree: Option<Value>,
+    /// Название выбранного раздела для чипа (у «Без раздела» — пусто).
+    pub section_name: Option<String>,
+    /// У выбранного раздела есть подразделы: показывается галочка «только этот раздел».
+    pub section_has_kids: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -121,6 +125,8 @@ struct HeadView {
 
 #[derive(Serialize)]
 struct ChipView {
+    /// Чип раздела, а не фильтра.
+    section: bool,
     label: String,
     op: String,
     value: String,
@@ -141,7 +147,7 @@ struct PerLink {
     current: bool,
 }
 
-fn url_of(spec: &ListSpec, path: &str, st: &ListState) -> String {
+pub(crate) fn url_of(spec: &ListSpec, path: &str, st: &ListState) -> String {
     let q = to_query(spec, st, true);
     if q.is_empty() {
         path.to_string()
@@ -210,6 +216,7 @@ fn chip(spec: &ListSpec, path: &str, st: &ListState, c: &Cond) -> Option<ChipVie
     next.filters.retain(|x| x.code != c.code);
     next.page = 1;
     Some(ChipView {
+        section: false,
         label: f.label.clone(),
         op,
         value,
@@ -372,14 +379,45 @@ pub async fn run_list(
         })
         .collect();
 
-    let chips: Vec<ChipView> = st
+    let mut chips: Vec<ChipView> = st
         .filters
         .iter()
         .filter_map(|c| chip(spec, path, &st, c))
         .collect();
+    if let Some(sel) = st.section {
+        let value = match sel {
+            SectionSel::Without => Some("без раздела".to_string()),
+            SectionSel::Id(_) => page.section_name.clone(),
+        };
+        if let Some(value) = value {
+            let mut next = st.clone();
+            next.section = None;
+            next.only = false;
+            next.page = 1;
+            chips.insert(
+                0,
+                ChipView {
+                    section: true,
+                    label: "Раздел".into(),
+                    op: String::new(),
+                    value,
+                    url: url_of(spec, path, &next),
+                },
+            );
+        }
+    }
+    let only_toggle = (matches!(st.section, Some(SectionSel::Id(_))) && page.section_has_kids)
+        .then(|| {
+            let mut next = st.clone();
+            next.only = !st.only;
+            next.page = 1;
+            serde_json::json!({"checked": st.only, "url": url_of(spec, path, &next)})
+        });
     let reset_url = {
         let mut next = st.clone();
         next.filters.clear();
+        next.section = None;
+        next.only = false;
         next.page = 1;
         url_of(spec, path, &next)
     };
@@ -412,6 +450,8 @@ pub async fn run_list(
         cur_page => st.page,
         pager => pager(spec, path, &st, pages),
         current_url => url_of(spec, path, &st),
+        only_toggle,
+        full,
         views => Vec::<Value>::new(),
         spec_json => spec_json(spec, &st),
     };

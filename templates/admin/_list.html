@@ -13,7 +13,11 @@
     {% for a in page.actions %}<a class="btn{% if a.primary %} primary{% endif %}" href="{{ a.url }}"{% if a.hotkey %} data-hotkey="{{ a.hotkey }}"{% endif %}>{{ a.label }}</a>{% endfor %}
   </div>
 </div>
-<div id="list-tree"></div>
-{% include "_list_body.html" %}
+<div class="list-layout{% if page.tree %} has-tree{% endif %}" id="list-layout">
+  {% if page.tree %}<aside id="list-tree" class="list-tree">{% set tree = page.tree %}{% include "_tree.html" %}</aside>{% endif %}
+  <div class="list-main">
+    {% include "_list_body.html" %}
+  </div>
+</div>
 <script type="application/json" id="list-spec">{{ spec_json|safe }}</script>
 {% endblock %}

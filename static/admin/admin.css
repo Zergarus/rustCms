@@ -474,3 +474,38 @@ textarea.bc-text[hidden] { display: none; }
 .list-foot { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
 .list-foot .per b { color: var(--text); font-weight: 600; }
 .pager .gap { border: 0; background: none; min-width: 20px; color: var(--muted); }
+
+/* дерево разделов слева от списка записей */
+.list-layout { display: flex; align-items: flex-start; gap: 16px; }
+.list-main { flex: 1; min-width: 0; }
+.list-tree { width: 230px; flex: none; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 10px 6px; }
+.list-layout.tree-collapsed .list-tree { width: 44px; padding: 10px 6px; }
+.list-layout.tree-collapsed .tree-body, .list-layout.tree-collapsed .tree-title { display: none; }
+.tree-top { display: flex; align-items: center; gap: 6px; padding: 0 6px 8px; }
+.tree-title { flex: 1; font-size: 12px; font-weight: 500; color: var(--muted); }
+.tbtn { border: 0; background: none; color: var(--muted); cursor: pointer; border-radius: 6px; width: 26px; height: 26px; }
+.tbtn:hover { background: var(--hover); color: var(--text); }
+.tree-sep { height: 1px; background: var(--border); margin: 8px 6px; }
+.list-tree .node { display: flex; align-items: center; gap: 4px; min-height: 28px; padding: 0 6px; border-radius: 6px; color: var(--muted); position: relative; }
+.list-tree .node:hover { background: var(--hover); color: var(--text); }
+.list-tree .node.on { background: var(--accent-soft); color: var(--text); }
+.list-tree .node.off .nm { opacity: .55; }
+.list-tree .node .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; }
+.list-tree .node .nm:hover { text-decoration: none; }
+.list-tree .tw { width: 16px; flex: none; text-align: center; font-size: 10px; border: 0; background: none; color: var(--muted); padding: 0; cursor: pointer; }
+.list-tree span.tw { cursor: default; }
+.tnode.open > .node > .tw { transform: rotate(90deg); }
+.list-tree .cnt { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tkids { display: none; margin-left: 12px; }
+.tnode.open > .tkids { display: block; }
+.node-menu { display: none; position: relative; }
+.list-tree .node:hover .node-menu, .node-menu[open] { display: block; }
+.list-tree .node:hover .cnt, .list-tree .node:has(.node-menu[open]) .cnt { display: none; }
+.node-menu summary { list-style: none; cursor: pointer; color: var(--muted); padding: 0 4px; }
+.node-menu summary::-webkit-details-marker { display: none; }
+.node-menu-list { position: absolute; right: 0; top: 100%; z-index: 30; min-width: 210px; padding: 4px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--raised); box-shadow: var(--shadow); }
+.node-menu-list a { display: block; padding: 6px 10px; border-radius: 6px; color: var(--text); white-space: nowrap; }
+.node-menu-list a:hover { background: var(--hover); text-decoration: none; }
+.chip.section { border-color: var(--accent-line); background: var(--accent-soft); }
+.list-bar .only { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; margin-left: auto; }
+@media (max-width: 800px) { .list-layout { flex-direction: column; } .list-tree, .list-layout.tree-collapsed .list-tree { width: 100%; } }

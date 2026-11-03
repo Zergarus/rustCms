@@ -1,4 +1,4 @@
-{#- Быстрый просмотр записи каталога: панель + строка списка out-of-band (row — свежая запись) -#}
+{#- Быстрый просмотр записи каталога: панель; изменение записи просит перезапросить список -#}
 {% import "_ui.html" as ui %}
 {% import "_peek.html" as peek %}
 {% call peek.frame(item.name, "/admin/items/" ~ item.id) %}
@@ -28,5 +28,5 @@
       {% if can_write %}<button class="btn" type="submit">{% if item.active %}Отключить{% else %}Включить{% endif %}</button>{% endif %}{% endcall %}
   </form>
 {% endcall %}
-{#- <tr> вне таблицы парсер отбросит: строку для out-of-band замены htmx берёт из <template> -#}
-{% if with_row %}<template>{% with el = item, oob = true, peeked = true, peek = true %}{% include "_item_row.html" %}{% endwith %}</template>{% endif %}
+{#- Запись изменилась: список перезапросится (admin.js ловит [data-list-changed]) -#}
+{% if list_changed %}<div hidden data-list-changed></div>{% endif %}

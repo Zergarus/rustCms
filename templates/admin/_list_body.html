@@ -1,12 +1,15 @@
 {#- Тело списка: виды, чипы, таблица, страницы. Заменяется целиком (outerHTML) при смене фильтров и страниц -#}
+{#- Дерево разделов обновляется вместе со списком (out-of-band): выбранный узел и счётчики -#}
+{% if page.tree and not full %}<aside id="list-tree" class="list-tree" hx-swap-oob="true">{% set tree = page.tree %}{% include "_tree.html" %}</aside>{% endif %}
 <div id="list-body" class="list-body" hx-get="{{ current_url }}" hx-trigger="list:refresh from:body" hx-target="this" hx-swap="outerHTML" hx-push-url="false">
   <div class="list-views" id="list-views">{% for v in views %}{% endfor %}</div>
   {% for n in notices %}<div class="list-notice">{{ n }}</div>{% endfor %}
   {% if chips %}
   <div class="list-bar">
     {% for c in chips %}
-    <span class="chip"><span class="chip-main"><span class="lbl">{{ c.label }}</span>{% if c.op %}<span class="op">{{ c.op }}</span>{% endif %}<span class="val">{{ c.value }}</span></span><a class="chip-x" href="{{ c.url }}" hx-get="{{ c.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true" aria-label="Убрать фильтр {{ c.label }}">✕</a></span>
+    <span class="chip{% if c.section %} section{% endif %}"><span class="chip-main"><span class="lbl">{{ c.label }}</span>{% if c.op %}<span class="op">{{ c.op }}</span>{% endif %}<span class="val">{{ c.value }}</span></span><a class="chip-x" href="{{ c.url }}" hx-get="{{ c.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true" aria-label="Убрать: {{ c.label }}">✕</a></span>
     {% endfor %}
+    {% if only_toggle %}<label class="only"><input type="checkbox"{% if only_toggle.checked %} checked{% endif %} hx-get="{{ only_toggle.url }}" hx-trigger="change" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true"> только этот раздел</label>{% endif %}
     <a class="btn ghost sm" href="{{ reset_url }}" hx-get="{{ reset_url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">Сбросить всё</a>
   </div>
   {% endif %}

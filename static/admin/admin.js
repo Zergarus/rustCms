@@ -615,6 +615,23 @@
   // Снимок страницы для кнопки «Назад» не должен хранить открытую панель
   document.addEventListener('htmx:beforeHistorySave', peekClose);
 
+  // Дерево разделов: раскрытие узла и сворачивание колонки (только класс; запоминание — отдельно)
+  document.addEventListener('click', function (e) {
+    var tog = e.target.closest('[data-tree-tog]');
+    if (tog) {
+      var node = tog.closest('.tnode');
+      if (node) node.classList.toggle('open');
+      return;
+    }
+    var col = e.target.closest('[data-tree-collapse]');
+    if (col) {
+      var layout = col.closest('.list-layout');
+      if (!layout) return;
+      var on = layout.classList.toggle('tree-collapsed');
+      col.textContent = on ? '⟩' : '⟨';
+    }
+  });
+
   /* ---------- Инициализация страницы ---------- */
 
   // Переход по якорю вкладки (например, #offers после создания предложения) открывает её

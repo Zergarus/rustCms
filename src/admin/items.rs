@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use axum::{
     Extension,
-    extract::{Multipart, Path, Query, State},
+    extract::{Multipart, Path, Query, RawQuery, State},
+    http::HeaderMap,
     response::{Html, IntoResponse, Redirect, Response},
 };
 use chrono::NaiveDateTime;
@@ -16,7 +17,13 @@ use super::{
     parse_sort, read_upload_form, render,
 };
 use crate::{
-    access::{Access, Level},
+    access::{Access, COLLECTIONS_MANAGE, Level},
+    admin::list::{
+        collection::{collection_spec, section_scope},
+        render::{Action, ListPage, run_list},
+        state::{self as list_state, SectionSel},
+        tree,
+    },
     catalog::{self, PurchaseInput},
     collection::{
         Collection, Field, FieldOption, Item, ItemInput, Section, fields, is_valid_slug, repo,
@@ -30,7 +37,6 @@ use crate::{
 
 /// Вкладки карточки записи, на которые можно вернуться после сохранения.
 const CARD_TABS: [&str; 5] = ["main", "text", "fields", "catalog", "offers"];
-const PER_PAGE: i64 = 50;
 const DATETIME_FORMAT: &str = "%Y-%m-%dT%H:%M";
 /// Картинки записи — одиночные файловые поля.
 const PICTURE_FIELDS: [&str; 2] = ["preview_picture_id", "detail_picture_id"];
@@ -906,72 +912,168 @@ async fn offers_tab(
     })
 }
 
-#[derive(Deserialize)]
-pub struct ListQuery {
-    page: Option<i64>,
-    section: Option<i64>,
-}
-
-/// Список записей по разделам, как в Битриксе: подразделы текущего раздела,
-/// затем его записи. В корне — разделы верхнего уровня и записи без раздела.
+/// Список записей на движке списков, слева — дерево разделов.
 pub async fn list(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
-    Query(q): Query<ListQuery>,
-) -> AppResult<Html<String>> {
+    RawQuery(raw): RawQuery,
+    headers: HeaderMap,
+) -> AppResult<Response> {
     user.require_collection(id, Level::Read)?;
     let collection = repo::get_collection(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let all_sections = repo::list_sections(&state.db, id).await?;
-    let current = match q.section {
-        Some(sid) => Some(
-            all_sections
-                .iter()
-                .find(|s| s.id == sid)
-                .cloned()
-                .ok_or(AppError::NotFound)?,
-        ),
-        None => None,
-    };
-    let current_id = current.as_ref().map(|s| s.id);
+    let spec = collection_spec(&state.db, &user, &collection).await?;
+    let mut parsed = list_state::parse(&spec, raw.as_deref().unwrap_or(""));
+    let sections = repo::list_sections(&state.db, id).await?;
+    // Удалённый или чужой раздел в адресе отбрасывается вместе с «только этот раздел»
+    if let Some(SectionSel::Id(sid)) = parsed.state.section
+        && !sections.iter().any(|s| s.id == sid)
+    {
+        parsed.state.section = None;
+        parsed.state.only = false;
+        parsed.changed = true;
+    }
+    let (scope, current) =
+        section_scope(&state.db, id, &parsed.state.section, parsed.state.only).await?;
+    let can_write = user.collection_level(id) >= Level::Write;
+    let path = format!("/admin/collections/{id}/items");
 
-    // Цепочка родителей для хлебных крошек
-    let mut chain = Vec::new();
+    // Крошки: цепочка родителей текущего раздела
+    let mut chain: Vec<&Section> = Vec::new();
     let mut cursor = current.as_ref();
     while let Some(s) = cursor {
-        chain.push(s.clone());
+        if chain.iter().any(|c| c.id == s.id) {
+            break;
+        }
+        chain.push(s);
         cursor = s
             .parent_id
-            .and_then(|p| all_sections.iter().find(|x| x.id == p));
+            .and_then(|p| sections.iter().find(|x| x.id == p));
     }
     chain.reverse();
+    let selected_none = parsed.state.section == Some(SectionSel::Without);
+    let mut crumbs = vec![("Коллекции".to_string(), "/admin/collections".to_string())];
+    if chain.is_empty() && !selected_none {
+        // заголовок и есть коллекция
+    } else {
+        crumbs.push((collection.name.clone(), path.clone()));
+        for s in chain.iter().take(chain.len().saturating_sub(1)) {
+            crumbs.push((s.name.clone(), format!("{path}?section={}", s.id)));
+        }
+    }
+    let title = match (&current, selected_none) {
+        (Some(s), _) => s.name.clone(),
+        (None, true) => "Без раздела".to_string(),
+        (None, false) => collection.name.clone(),
+    };
 
-    let subsections: Vec<Section> = all_sections
-        .iter()
-        .filter(|s| s.parent_id == current_id)
-        .cloned()
-        .collect();
+    let new_item = match &current {
+        Some(s) => format!("/admin/collections/{id}/items/new?section={}", s.id),
+        None => format!("/admin/collections/{id}/items/new"),
+    };
+    let mut actions = Vec::new();
+    if user.can(COLLECTIONS_MANAGE) && current.is_none() && !selected_none {
+        actions.push(Action {
+            label: "Настройки".into(),
+            url: format!("/admin/collections/{id}"),
+            primary: false,
+            hotkey: None,
+        });
+    }
+    if can_write {
+        actions.push(Action {
+            label: "Добавить запись".into(),
+            url: new_item,
+            primary: true,
+            hotkey: Some('c'),
+        });
+    }
 
-    let page = q.page.unwrap_or(1).clamp(1, 1_000_000);
-    let (items, total) = repo::list_items(
-        &state.db,
-        id,
-        Some(current_id.unwrap_or(0)),
-        PER_PAGE,
-        (page - 1) * PER_PAGE,
-    )
-    .await?;
-    let pages = ((total + PER_PAGE - 1) / PER_PAGE).max(1);
-    render(
+    let own = tree::own_counts(&state.db, id).await?;
+    let total: i64 = own.values().sum();
+    let without = own.get(&None).copied().unwrap_or(0);
+    let counts = tree::subtree_counts(&sections, &own);
+    let builder = tree::TreeBuilder {
+        collection_id: id,
+        spec: &spec,
+        state: &parsed.state,
+        sections: &sections,
+        counts,
+        path: path.clone(),
+        current: current.as_ref().map(|s| s.id),
+        ancestors: current
+            .as_ref()
+            .map(|s| tree::ancestors_of(&sections, s.id))
+            .unwrap_or_default(),
+    };
+    let tree_value = builder.panel(total, without, selected_none, can_write);
+    let page = ListPage {
+        title,
+        crumbs,
+        actions,
+        tree: Some(tree_value),
+        section_has_kids: current
+            .as_ref()
+            .is_some_and(|c| sections.iter().any(|s| s.parent_id == Some(c.id))),
+        section_name: current.as_ref().map(|s| s.name.clone()),
+    };
+    run_list(
         &state,
-        "items.html",
-        context! {
-            can_write => user.collection_level(id) >= Level::Write,
-            user, collection, items, total, page, pages, subsections, chain,
-        },
+        &user,
+        &headers,
+        &path,
+        &spec,
+        parsed,
+        scope,
+        page,
+        Vec::new(),
     )
+    .await
+}
+
+#[derive(Deserialize)]
+pub struct TreeQuery {
+    parent: i64,
+}
+
+/// Дети узла дерева разделов: `GET /admin/collections/{id}/tree?parent=<id>`.
+pub async fn tree(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+    Query(q): Query<TreeQuery>,
+    RawQuery(raw): RawQuery,
+) -> AppResult<Response> {
+    user.require_collection(id, Level::Read)?;
+    let collection = repo::get_collection(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let sections = repo::list_sections(&state.db, id).await?;
+    if !sections.iter().any(|s| s.id == q.parent) {
+        return Err(AppError::NotFound);
+    }
+    let spec = collection_spec(&state.db, &user, &collection).await?;
+    let parsed = list_state::parse(&spec, raw.as_deref().unwrap_or(""));
+    let own = tree::own_counts(&state.db, id).await?;
+    let builder = tree::TreeBuilder {
+        collection_id: id,
+        spec: &spec,
+        state: &parsed.state,
+        sections: &sections,
+        counts: tree::subtree_counts(&sections, &own),
+        path: format!("/admin/collections/{id}/items"),
+        current: None,
+        ancestors: Default::default(),
+    };
+    let can_write = user.collection_level(id) >= Level::Write;
+    let html = render(
+        &state,
+        "_tree.html",
+        context! { tree => builder.children(q.parent, can_write) },
+    )?;
+    Ok(html.into_response())
 }
 
 #[derive(Deserialize)]
@@ -1339,13 +1441,13 @@ struct StoreStock {
 }
 
 /// Панель быстрого просмотра товара (фрагмент); `toast` — уведомление в `HX-Trigger`,
-/// `with_row` добавляет свежую строку списка out-of-band. Права проверяет вызывающий.
+/// `list_changed` просит страницу перезапросить список (метка `data-list-changed`). Права проверяет вызывающий.
 async fn peek_panel(
     state: &AppState,
     user: &Access,
     item: Item,
     toast: Option<(&str, FlashKind)>,
-    with_row: bool,
+    list_changed: bool,
 ) -> AppResult<Response> {
     let id = item.id;
     let section = match item.section_id {
@@ -1409,7 +1511,7 @@ async fn peek_panel(
     let html = render(
         state,
         "item_peek.html",
-        context! { item, section, picture, offers_priced, price, quantity, stores, can_write, with_row },
+        context! { item, section, picture, offers_priced, price, quantity, stores, can_write, list_changed },
     )?;
     Ok(match toast {
         Some((text, kind)) => (flash::toast(text, kind), html).into_response(),
@@ -2617,10 +2719,10 @@ mod tests {
                 "панель: {html}"
             );
             assert!(
-                html.contains(&format!("<template><tr id=\"item-row-{}\"", fx.item)),
-                "OOB-строка в template: {html}"
+                html.contains("data-list-changed"),
+                "метка обновления списка: {html}"
             );
-            assert!(html.contains("hx-swap-oob=\"true\""), "{html}");
+            assert!(!html.contains("<template>"), "{html}");
             // обратно
             let (s, _, _) = post_active(&app, fx.item, &writer, "active=on", Some("peek")).await;
             assert_eq!(s, StatusCode::OK);
@@ -2701,12 +2803,12 @@ mod tests {
             .await;
             assert!(
                 list.contains(&format!(
-                    "<tr id=\"item-row-{0}\" data-peek=\"/admin/items/{0}/peek\"",
+                    "data-open=\"&#x2f;admin&#x2f;items&#x2f;{0}\" data-peek=\"&#x2f;admin&#x2f;items&#x2f;{0}&#x2f;peek\"",
                     fx.item
                 )),
                 "{list}"
             );
-            assert!(list.contains(&format!("href=\"/admin/items/{}\"", fx.item)));
+            assert!(list.contains(&format!("href=\"&#x2f;admin&#x2f;items&#x2f;{}\"", fx.item)));
         }
 
         #[sqlx::test]
@@ -2727,5 +2829,237 @@ mod tests {
                 post_active(&app, fx.item, &cookie, "active=off", Some("peek")).await;
             assert!(!html.contains("<script>"), "{html}");
         }
+    }
+}
+
+#[cfg(test)]
+mod list_tests {
+    use axum::http::StatusCode;
+    use sqlx::PgPool;
+
+    use crate::test_support::{
+        admin_cookie, content_fixture, get_raw, htmx_get, test_state, user_cookie,
+    };
+
+    async fn section(db: &PgPool, col: i64, parent: Option<i64>, name: &str) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO collection_sections (collection_id, parent_id, code, name)
+             VALUES ($1, $2, lower($3), $3) RETURNING id",
+        )
+        .bind(col)
+        .bind(parent)
+        .bind(name)
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    async fn item(db: &PgPool, col: i64, sec: Option<i64>, name: &str) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO collection_items (collection_id, section_id, code, name)
+             VALUES ($1, $2, lower($3), $3) RETURNING id",
+        )
+        .bind(col)
+        .bind(sec)
+        .bind(name)
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn items_list_shows_subsection_items(db: PgPool) {
+        let fx = content_fixture(&db).await;
+        let sub = section(&db, fx.collection_id, Some(fx.section_id), "Подраздел Б").await;
+        item(&db, fx.collection_id, Some(sub), "ВтораяНовость").await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let base = format!("/admin/collections/{}/items", fx.collection_id);
+
+        let (s, _, b) = get_raw(&app, &format!("{base}?section={}", fx.section_id), &cookie).await;
+        let html = String::from_utf8_lossy(&b);
+        assert_eq!(s, StatusCode::OK);
+        assert!(
+            html.contains("Первая новость") && html.contains("ВтораяНовость"),
+            "{html}"
+        );
+        assert!(html.contains("только этот раздел"), "{html}");
+        assert!(
+            html.contains("Подраздел Б"),
+            "ветка до раздела в дереве: {html}"
+        );
+        assert!(
+            html.contains("Раздел: ") || html.contains("class=\"chip section\""),
+            "{html}"
+        );
+
+        let (_, frag) = htmx_get(
+            &app,
+            &format!("{base}?section={}", fx.section_id),
+            &cookie,
+            "list-body",
+        )
+        .await;
+        assert!(
+            frag.contains("hx-swap-oob")
+                && frag.contains("Вся коллекция")
+                && !frag.contains("<html"),
+            "{frag}"
+        );
+        assert!(!html.contains("<h2>Раздел"), "подразделы таблицей убраны");
+
+        let (_, _, b) = get_raw(
+            &app,
+            &format!("{base}?section={}&only=1", fx.section_id),
+            &cookie,
+        )
+        .await;
+        let html = String::from_utf8_lossy(&b);
+        assert!(
+            html.contains("Первая новость") && !html.contains("ВтораяНовость"),
+            "{html}"
+        );
+    }
+
+    #[sqlx::test]
+    async fn items_without_section(db: PgPool) {
+        let fx = content_fixture(&db).await;
+        item(&db, fx.collection_id, None, "СиротаЗапись").await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (_, _, b) = get_raw(
+            &app,
+            &format!("/admin/collections/{}/items?section=none", fx.collection_id),
+            &cookie,
+        )
+        .await;
+        let html = String::from_utf8_lossy(&b);
+        assert!(
+            html.contains("СиротаЗапись") && !html.contains("Первая новость"),
+            "{html}"
+        );
+        assert!(html.contains("без раздела"), "чип: {html}");
+    }
+
+    #[sqlx::test]
+    async fn items_foreign_section_dropped(db: PgPool) {
+        let fx = content_fixture(&db).await;
+        let other: i64 = sqlx::query_scalar(
+            "INSERT INTO collections (code, name) VALUES ('other', 'Другая') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let foreign = section(&db, other, None, "Чужой").await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (s, headers, _) = get_raw(
+            &app,
+            &format!(
+                "/admin/collections/{}/items?section={foreign}",
+                fx.collection_id
+            ),
+            &cookie,
+        )
+        .await;
+        assert_eq!(s, StatusCode::FOUND);
+        let loc = headers.get("location").unwrap().to_str().unwrap();
+        assert!(!loc.contains("section"), "{loc}");
+    }
+
+    #[sqlx::test]
+    async fn tree_children_fragment(db: PgPool) {
+        let fx = content_fixture(&db).await;
+        section(&db, fx.collection_id, Some(fx.section_id), "Подраздел Б").await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (s, html) = htmx_get(
+            &app,
+            &format!(
+                "/admin/collections/{}/tree?parent={}",
+                fx.collection_id, fx.section_id
+            ),
+            &cookie,
+            "list-tree",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(html.contains("Подраздел Б"), "{html}");
+        assert!(
+            !html.contains("Вся коллекция")
+                && !html.contains("Добавить раздел")
+                && !html.contains("<html"),
+            "{html}"
+        );
+    }
+
+    #[sqlx::test]
+    async fn tree_counts_include_descendants(db: PgPool) {
+        let fx = content_fixture(&db).await;
+        let sub = section(&db, fx.collection_id, Some(fx.section_id), "Подраздел Б").await;
+        item(&db, fx.collection_id, Some(sub), "Х1").await;
+        item(&db, fx.collection_id, Some(sub), "Х2").await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (_, _, b) = get_raw(
+            &app,
+            &format!("/admin/collections/{}/items", fx.collection_id),
+            &cookie,
+        )
+        .await;
+        let html = String::from_utf8_lossy(&b);
+        // Раздел А: своя запись и две в подразделе
+        assert!(html.contains("<span class=\"cnt\">3</span>"), "{html}");
+        assert!(
+            html.contains("Вся коллекция") && html.contains("Без раздела"),
+            "{html}"
+        );
+    }
+
+    #[sqlx::test]
+    async fn items_readonly_user(db: PgPool) {
+        let fx = content_fixture(&db).await;
+        let (uid, cookie) = user_cookie(&db, "reader", false).await;
+        let group: i64 =
+            sqlx::query_scalar("INSERT INTO groups (code, name) VALUES ('rd', 'rd') RETURNING id")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO group_permissions (group_id, permission) VALUES ($1, 'admin.access')",
+        )
+        .bind(group)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+            .bind(uid)
+            .bind(group)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO collection_access (collection_id, group_id, level) VALUES ($1, $2, 'read')")
+            .bind(fx.collection_id)
+            .bind(group)
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let (s, _, b) = get_raw(
+            &app,
+            &format!("/admin/collections/{}/items", fx.collection_id),
+            &cookie,
+        )
+        .await;
+        let html = String::from_utf8_lossy(&b);
+        assert_eq!(s, StatusCode::OK);
+        assert!(
+            html.contains("Первая новость") && html.contains("Раздел А"),
+            "{html}"
+        );
+        assert!(
+            !html.contains("Добавить запись") && !html.contains("Добавить раздел"),
+            "{html}"
+        );
     }
 }
