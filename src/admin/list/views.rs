@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use axum::{
     Extension, Form,
-    extract::{OriginalUri, Path, RawQuery, State},
+    extract::{Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, Uri},
     response::Response,
 };
@@ -390,12 +390,13 @@ async fn rerender(
     headers.insert("hx-target", HeaderValue::from_static("list-body"));
     let mut resp = if list_key == "orders" {
         let uri: Uri = path.parse().map_err(|_| AppError::NotFound)?;
-        crate::admin::shop::orders::list(
-            State(state.clone()),
-            Extension(user.clone()),
-            RawQuery(Some(query.clone())),
+        crate::admin::shop::orders::list_inner(
+            state.clone(),
+            user.clone(),
+            Some(query.clone()),
             headers,
-            OriginalUri(uri),
+            uri,
+            true,
         )
         .await?
     } else {
@@ -403,12 +404,13 @@ async fn rerender(
             .strip_prefix("collection:")
             .and_then(|s| s.parse().ok())
             .ok_or(AppError::NotFound)?;
-        crate::admin::items::list(
-            State(state.clone()),
-            Extension(user.clone()),
-            Path(id),
-            RawQuery(Some(query.clone())),
+        crate::admin::items::list_inner(
+            state.clone(),
+            user.clone(),
+            id,
+            Some(query.clone()),
             headers,
+            true,
         )
         .await?
     };
@@ -1257,6 +1259,27 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn view_action_keeps_prefs(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let (uid, _) = user_cookie(&db, "smoke", true).await;
+        let id = insert_view(&db, "orders", uid, "", false).await;
+        full_get(&app, "/admin/shop/orders?per=20&sort=-status", &cookie).await;
+        full_get(&app, "/admin/shop/orders", &cookie).await;
+        let before = prefs_of(&db).await;
+        let (st, _, out) = hx_post(
+            &app,
+            &format!("/admin/views/{id}/pin"),
+            &cookie,
+            "path=%2Fadmin%2Fshop%2Forders&back=",
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{out}");
+        assert!(out.contains("sort=-status&amp;per=20"), "{out}");
+        assert_eq!(prefs_of(&db).await, before);
+    }
+
+    #[sqlx::test]
     async fn list_prefs_defaults_reselectable(db: PgPool) {
         let app = app(&db);
         let cookie = admin_cookie(&db).await;
@@ -1266,7 +1289,7 @@ mod tests {
         assert!(out.contains("id=\"list-body\""));
         let p = prefs_of(&db).await;
         assert_eq!(p["lists"]["orders"]["per"], 50);
-        assert_ne!(p["lists"]["orders"]["sort"], "-status");
+        assert_eq!(p["lists"]["orders"]["sort"], "-created_at");
         let (_, _, out) = full_get(&app, "/admin/shop/orders", &cookie).await;
         assert!(out.contains(r#""per":50"#));
         assert!(!out.contains("sort=-status"));

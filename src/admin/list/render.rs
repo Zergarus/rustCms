@@ -336,6 +336,7 @@ pub async fn run_list(
     scope: Scope,
     page: ListPage,
     notices: Vec<String>,
+    remember_state: bool,
 ) -> AppResult<Response> {
     let full = is_full_page(headers);
     // Полностраничный редирект теряет уведомления (например «фильтр больше недоступен»):
@@ -519,7 +520,8 @@ pub async fn run_list(
     };
     let mut resp = render(state, name, ctx)?.into_response();
     // Сбой записи запомненного не должен ронять уже готовый список
-    if let Err(e) = remember(state, user, spec, &st, &stored).await {
+    if remember_state
+        && let Err(e) = remember(state, user, spec, &st, &stored).await {
         tracing::warn!(error = ?e, list = %spec.key, "не удалось сохранить состояние списка");
     }
     if let Some(Ok(v)) = replace_url.as_deref().map(HeaderValue::from_str) {

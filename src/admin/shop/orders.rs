@@ -50,6 +50,18 @@ pub async fn list(
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
 ) -> AppResult<Response> {
+    list_inner(state, user, raw, headers, uri, false).await
+}
+
+/// `after_action` — перерисовка после действия с видом: показывает запомненное и ничего не запоминает.
+pub(crate) async fn list_inner(
+    state: AppState,
+    user: Access,
+    raw: Option<String>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    after_action: bool,
+) -> AppResult<Response> {
     require_orders(&user)?;
     let spec = orders_spec(&state.db, &user).await?;
     let resolved =
@@ -58,7 +70,7 @@ pub async fn list(
             user.user.id,
             &spec,
             raw.as_deref().unwrap_or(""),
-            crate::admin::is_full_page(&headers),
+            after_action || crate::admin::is_full_page(&headers),
         )
         .await?;
     let page = ListPage {
@@ -76,6 +88,7 @@ pub async fn list(
         Scope::All,
         page,
         resolved.notices,
+        !after_action,
     )
     .await
 }

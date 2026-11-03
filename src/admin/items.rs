@@ -920,6 +920,18 @@ pub async fn list(
     RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> AppResult<Response> {
+    list_inner(state, user, id, raw, headers, false).await
+}
+
+/// `after_action` — перерисовка после действия с видом: показывает запомненное и ничего не запоминает.
+pub(crate) async fn list_inner(
+    state: AppState,
+    user: Access,
+    id: i64,
+    raw: Option<String>,
+    headers: HeaderMap,
+    after_action: bool,
+) -> AppResult<Response> {
     user.require_collection(id, Level::Read)?;
     let collection = repo::get_collection(&state.db, id)
         .await?
@@ -931,7 +943,7 @@ pub async fn list(
             user.user.id,
             &spec,
             raw.as_deref().unwrap_or(""),
-            crate::admin::is_full_page(&headers),
+            after_action || crate::admin::is_full_page(&headers),
         )
         .await?;
     let (mut parsed, notices) = (resolved.parsed, resolved.notices);
@@ -1029,7 +1041,16 @@ pub async fn list(
         section_name: current.as_ref().map(|s| s.name.clone()),
     };
     run_list(
-        &state, &user, &headers, &path, &spec, parsed, scope, page, notices,
+        &state,
+        &user,
+        &headers,
+        &path,
+        &spec,
+        parsed,
+        scope,
+        page,
+        notices,
+        !after_action,
     )
     .await
 }
