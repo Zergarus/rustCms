@@ -557,12 +557,22 @@
 
   function peekEl() { return $('#peek'); }
   function peekOpen() { var p = peekEl(); return !!p && !p.hidden; }
+  // id открытой записи: список перерисовывается целиком, класс .peeked ставится заново
+  var peekedId = null;
+  function peekMark() {
+    $$('tr.peeked').forEach(function (r) { r.classList.remove('peeked'); });
+    if (peekedId === null || !peekOpen()) return;
+    $$('tr[data-peek]').forEach(function (r) {
+      if (r.dataset.id === peekedId) r.classList.add('peeked');
+    });
+  }
 
   function peekClose() {
     var p = peekEl();
     if (!p) return;
     p.hidden = true;
     p.innerHTML = '';
+    peekedId = null;
     $$('tr.peeked').forEach(function (r) { r.classList.remove('peeked'); });
   }
 
@@ -570,6 +580,7 @@
   function peekShow(row) {
     var p = peekEl();
     if (!p || !window.htmx) return;
+    peekedId = row.dataset.id === undefined ? null : row.dataset.id;
     $$('tr.peeked').forEach(function (r) { r.classList.remove('peeked'); });
     row.classList.add('peeked');
     p.hidden = false;
@@ -590,6 +601,16 @@
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && peekOpen() && !$('dialog[open]')) peekClose();
   });
+
+  // Панель сообщила, что запись изменилась: список перезапрашивается (фильтры и сортировка те же)
+  document.addEventListener('htmx:afterSwap', function (e) {
+    var t = e.detail && e.detail.target;
+    if (t && t.id === 'peek' && t.querySelector('[data-list-changed]') && window.htmx) {
+      window.htmx.trigger(document.body, 'list:refresh');
+    }
+  });
+  // Список заменён (фильтр, страница, обновление): открытая строка подсвечивается снова
+  document.addEventListener('htmx:afterSettle', peekMark);
 
   // Снимок страницы для кнопки «Назад» не должен хранить открытую панель
   document.addEventListener('htmx:beforeHistorySave', peekClose);

@@ -1,0 +1,37 @@
+{#- Тело списка: виды, чипы, таблица, страницы. Заменяется целиком (outerHTML) при смене фильтров и страниц -#}
+<div id="list-body" class="list-body" hx-get="{{ current_url }}" hx-trigger="list:refresh from:body" hx-target="this" hx-swap="outerHTML" hx-push-url="false">
+  <div class="list-views" id="list-views">{% for v in views %}{% endfor %}</div>
+  {% for n in notices %}<div class="list-notice">{{ n }}</div>{% endfor %}
+  {% if chips %}
+  <div class="list-bar">
+    {% for c in chips %}
+    <span class="chip"><span class="chip-main"><span class="lbl">{{ c.label }}</span>{% if c.op %}<span class="op">{{ c.op }}</span>{% endif %}<span class="val">{{ c.value }}</span></span><a class="chip-x" href="{{ c.url }}" hx-get="{{ c.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true" aria-label="Убрать фильтр {{ c.label }}">✕</a></span>
+    {% endfor %}
+    <a class="btn ghost sm" href="{{ reset_url }}" hx-get="{{ reset_url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">Сбросить всё</a>
+  </div>
+  {% endif %}
+  {% if rows %}
+  <div class="card table-wrap">
+    <table class="list-table">
+      <thead><tr>
+        {% for h in heads %}<th{% if h.num %} class="num"{% endif %}>{% if h.sortable %}<a class="sort" href="{{ h.url }}" hx-get="{{ h.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">{{ h.title }}{% if h.arrow %}<span class="arr">{{ h.arrow }}</span>{% endif %}</a>{% else %}{{ h.title }}{% endif %}</th>{% endfor %}
+      </tr></thead>
+      <tbody>
+        {% for r in rows %}
+        <tr data-id="{{ r.id }}" data-open="{{ r.open }}"{% if r.peek %} data-peek="{{ r.peek }}"{% endif %}>
+          {% for c in r.cells %}<td{% if c.num %} class="num"{% endif %}>{% if c.first %}<a href="{{ r.open }}">{{ c.text }}</a>{% elif c.flag == "ok" %}<span class="badge ok">{{ c.text }}</span>{% elif c.flag == "none" %}<span class="muted">{{ c.text }}</span>{% else %}{{ c.text }}{% endif %}</td>{% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card empty"><p>Ничего не найдено. Измените фильтры или сбросьте их</p></div>
+  {% endif %}
+  <div class="list-foot">
+    {% if pages > 1 %}
+    <nav class="pager">{% for p in pager %}{% if p.url and not p.current %}<a href="{{ p.url }}" hx-get="{{ p.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">{{ p.label }}</a>{% elif p.current %}<span class="current">{{ p.label }}</span>{% else %}<span class="gap">{{ p.label }}</span>{% endif %}{% endfor %}</nav>
+    {% endif %}
+    <span class="per">по {% for p in per_links %}{% if p.current %}<b>{{ p.value }}</b>{% else %}<a href="{{ p.url }}" hx-get="{{ p.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">{{ p.value }}</a>{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}</span>
+  </div>
+</div>

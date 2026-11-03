@@ -450,3 +450,27 @@ select[multiple] { min-height: 6em; }
 .bc-bad { color: var(--danger); font-weight: 600; }
 textarea.bc-text { display: block; min-width: 180px; margin-top: 4px; }
 textarea.bc-text[hidden] { display: none; }
+
+/* список на движке: чипы, виды, таблица, страницы */
+.list-views { display: flex; align-items: center; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 10px; flex-wrap: wrap; }
+.list-views:empty { display: none; }
+.list-notice { margin-bottom: 8px; padding: 8px 12px; border-radius: 7px; border: 1px solid var(--border-strong); background: var(--raised); color: var(--muted); font-size: 13px; }
+.list-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-height: 34px; margin-bottom: 10px; }
+.chip { display: inline-flex; align-items: center; height: 28px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--raised); overflow: hidden; font-size: 13px; }
+.chip-main { display: inline-flex; align-items: center; gap: 4px; padding: 0 8px 0 9px; }
+.chip .lbl, .chip .op { color: var(--muted); }
+.chip .val { font-weight: 500; }
+.chip-x { display: inline-flex; align-items: center; height: 100%; padding: 0 8px; color: var(--muted); border-left: 1px solid var(--border-strong); }
+.chip-x:hover { color: var(--danger); background: var(--hover); text-decoration: none; }
+.btn.ghost { border-color: transparent; background: none; color: var(--muted); }
+.btn.ghost:hover { color: var(--text); background: var(--hover); }
+.btn.sm { height: 26px; padding: 0 9px; font-size: 13px; }
+.list-table th.num, .list-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.list-table th a.sort { color: inherit; white-space: nowrap; }
+.list-table th a.sort:hover { color: var(--text); text-decoration: none; }
+.list-table th .arr { font-size: 10px; margin-left: 4px; }
+.list-table td { white-space: nowrap; }
+.list-table tbody tr.peeked { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.list-foot { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+.list-foot .per b { color: var(--text); font-weight: 600; }
+.pager .gap { border: 0; background: none; min-width: 20px; color: var(--muted); }

@@ -1,4 +1,4 @@
-{#- Быстрый просмотр заказа: панель + строка списка out-of-band (row — свежая строка) -#}
+{#- Быстрый просмотр заказа: панель; list_changed — признак «обновить список» -#}
 {% import "_ui.html" as ui %}
 {% import "_peek.html" as peek %}
 {% call peek.frame("Заказ № " ~ order.account_number, "/admin/shop/orders/" ~ order.id) %}
@@ -30,5 +30,5 @@
   {% call ui.prop("Отгрузка") %}{% if shipped %}<span class="badge ok">отгружен</span>{% else %}не отгружен{% endif %}{% endcall %}
   {% call ui.prop("Доставка") %}{{ order.shipment.delivery_name if order.shipment else "—" }}{% endcall %}
 {% endcall %}
-{#- <tr> вне таблицы парсер отбросит: строку для out-of-band замены htmx берёт из <template> -#}
-{% if row %}<template>{% with o = row, oob = true, peeked = true %}{% include "shop/_order_row.html" %}{% endwith %}</template>{% endif %}
+{#- Заказ изменился: список перезапросится (admin.js ловит [data-list-changed]) -#}
+{% if list_changed %}<div hidden data-list-changed></div>{% endif %}

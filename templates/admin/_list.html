@@ -1,0 +1,19 @@
+{#- Страница списка на движке: заголовок, действия, тело (_list_body.html), описание спеки для JS -#}
+{% extends "base.html" %}
+{% block title %}{{ page.title }}{% endblock %}
+{% block content %}
+{% if page.crumbs %}
+<div class="breadcrumbs">
+  {% for c in page.crumbs %}{% if c[1] %}<a href="{{ c[1] }}">{{ c[0] }}</a>{% else %}<span>{{ c[0] }}</span>{% endif %}{% if not loop.last %} /{% endif %} {% endfor %}
+</div>
+{% endif %}
+<div class="page-head">
+  <h1>{{ page.title }} <span class="muted count">{% if capped %}10 000+{% else %}{{ total }}{% endif %}</span></h1>
+  <div class="head-actions">
+    {% for a in page.actions %}<a class="btn{% if a.primary %} primary{% endif %}" href="{{ a.url }}"{% if a.hotkey %} data-hotkey="{{ a.hotkey }}"{% endif %}>{{ a.label }}</a>{% endfor %}
+  </div>
+</div>
+<div id="list-tree"></div>
+{% include "_list_body.html" %}
+<script type="application/json" id="list-spec">{{ spec_json|safe }}</script>
+{% endblock %}

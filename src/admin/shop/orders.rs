@@ -4,12 +4,12 @@ use std::collections::HashMap;
 
 use axum::{
     Extension,
-    extract::{MatchedPath, Multipart, Path, Query, State},
+    extract::{MatchedPath, Multipart, OriginalUri, Path, RawQuery, State},
     http::{HeaderMap, header},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
 };
 use axum_extra::extract::Form;
-use chrono::{Days, NaiveDate, TimeZone, Utc};
+use chrono::Utc;
 use minijinja::context;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -19,6 +19,12 @@ use crate::{
     access::{Access, ORDERS_MANAGE},
     admin::{
         flash::{self, FlashKind},
+        list::{
+            orders::{BUYER_SQL, orders_spec},
+            render::{ListPage, run_list},
+            sql::Scope,
+            state as list_state,
+        },
         nav::ORDER_TABS,
         read_upload_form, render, shell, tabs,
     },
@@ -29,171 +35,41 @@ use crate::{
     stock::{self, StockError},
 };
 
-const PER_PAGE: i64 = 50;
-
 pub(crate) fn require_orders(user: &Access) -> AppResult<()> {
     user.require(ORDERS_MANAGE)
-}
-
-/// Фильтры списка заказов (пустое поле — без условия).
-#[derive(Debug, Default, Deserialize, Serialize)]
-pub struct OrdersQuery {
-    #[serde(default)]
-    pub number: String,
-    #[serde(default)]
-    pub status: String,
-    #[serde(default)]
-    pub from: String,
-    #[serde(default)]
-    pub to: String,
-    #[serde(default)]
-    pub buyer: String,
-    /// `Y` | `N` | пусто
-    #[serde(default)]
-    pub paid: String,
-    #[serde(default)]
-    pub canceled: String,
-    pub page: Option<i64>,
-}
-
-fn date(raw: &str) -> Option<NaiveDate> {
-    NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").ok()
-}
-
-fn yes_no(raw: &str) -> Option<bool> {
-    match raw {
-        "Y" => Some(true),
-        "N" => Some(false),
-        _ => None,
-    }
 }
 
 /// Текст покупателя для поиска (логин, почта, имя, свойства заказа); запрос с `orders o` и `users u`.
 pub(crate) const BUYER_TEXT_SQL: &str = "concat_ws(' ', u.login, u.email, u.name, u.last_name,
                  (SELECT string_agg(v.value, ' ') FROM order_property_values v WHERE v.order_id = o.id))";
 
-/// Условия фильтра к запросу с `orders o` и `users u` (… WHERE TRUE).
-pub(crate) fn push_filters(qb: &mut QueryBuilder<Postgres>, q: &OrdersQuery) {
-    let number = q.number.trim();
-    if !number.is_empty() {
-        qb.push(" AND o.account_number = ")
-            .push_bind(number.to_string());
-    }
-    if !q.status.trim().is_empty() {
-        qb.push(" AND o.status = ")
-            .push_bind(q.status.trim().to_string());
-    }
-    if let Some(from) = date(&q.from) {
-        qb.push(" AND o.created_at >= ")
-            .push_bind(Utc.from_utc_datetime(&from.and_hms_opt(0, 0, 0).unwrap_or_default()));
-    }
-    if let Some(to) = date(&q.to).and_then(|d| d.checked_add_days(Days::new(1))) {
-        qb.push(" AND o.created_at < ")
-            .push_bind(Utc.from_utc_datetime(&to.and_hms_opt(0, 0, 0).unwrap_or_default()));
-    }
-    let buyer = q.buyer.trim();
-    if !buyer.is_empty() {
-        qb.push(" AND ")
-            .push(BUYER_TEXT_SQL)
-            .push(" ILIKE ")
-            .push_bind(format!("%{}%", buyer.replace('%', "")));
-    }
-    if let Some(paid) = yes_no(&q.paid) {
-        qb.push(" AND o.paid = ").push_bind(paid);
-    }
-    if let Some(canceled) = yes_no(&q.canceled) {
-        qb.push(" AND o.canceled = ").push_bind(canceled);
-    }
-}
-
-#[derive(FromRow, Serialize)]
-struct OrderRow {
-    id: i64,
-    account_number: String,
-    created_at: chrono::DateTime<Utc>,
-    buyer: String,
-    status_name: String,
-    price: f64,
-    currency: String,
-    paid: bool,
-    canceled: bool,
-    delivery: String,
-}
-
-/// Выборка строки списка заказов; вызывающий добавляет условия после `WHERE TRUE`.
-fn row_query() -> QueryBuilder<Postgres> {
-    QueryBuilder::<Postgres>::new(
-        "SELECT o.id, COALESCE(o.account_number, o.id::text) AS account_number, o.created_at,
-                COALESCE(NULLIF((SELECT v.value FROM order_property_values v
-                                 JOIN order_properties p ON p.id = v.property_id
-                                 WHERE v.order_id = o.id AND p.is_payer LIMIT 1), ''), u.login, '—') AS buyer,
-                COALESCE(s.name, o.status) AS status_name, o.price::float8 AS price, o.currency,
-                o.paid, o.canceled,
-                COALESCE((SELECT sh.delivery_name FROM shipments sh WHERE sh.order_id = o.id LIMIT 1), '') AS delivery
-         FROM orders o
-         LEFT JOIN users u ON u.id = o.user_id
-         LEFT JOIN order_statuses s ON s.code = o.status
-         WHERE TRUE",
-    )
-}
-
 pub async fn list(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
-    Query(q): Query<OrdersQuery>,
-) -> AppResult<Html<String>> {
+    RawQuery(raw): RawQuery,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+) -> AppResult<Response> {
     require_orders(&user)?;
-    let page = q.page.unwrap_or(1).max(1);
-    let mut count = QueryBuilder::<Postgres>::new(
-        "SELECT count(*) FROM orders o LEFT JOIN users u ON u.id = o.user_id WHERE TRUE",
-    );
-    push_filters(&mut count, &q);
-    let total: i64 = count.build_query_scalar().fetch_one(&state.db).await?;
-    let mut qb = row_query();
-    push_filters(&mut qb, &q);
-    qb.push(" ORDER BY o.created_at DESC, o.id DESC LIMIT ")
-        .push_bind(PER_PAGE)
-        .push(" OFFSET ")
-        .push_bind((page - 1) * PER_PAGE);
-    let rows: Vec<OrderRow> = qb.build_query_as().fetch_all(&state.db).await?;
-    let statuses: Vec<(String, String)> =
-        sqlx::query_as("SELECT code, name FROM order_statuses ORDER BY sort, code")
-            .fetch_all(&state.db)
-            .await?;
-    let pages = (total + PER_PAGE - 1) / PER_PAGE;
-    let query = serde_urlencoded_query(&q);
-    render(
-        &state,
-        "shop/orders.html",
-        context! { user, rows, total, page, pages, q, statuses, query },
-    )
-}
-
-/// Фильтры строкой для ссылок пагинации (без `page`).
-fn serde_urlencoded_query(q: &OrdersQuery) -> String {
-    let enc = |s: &str| {
-        s.bytes()
-            .map(|b| match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
-                    (b as char).to_string()
-                }
-                _ => format!("%{b:02X}"),
-            })
-            .collect::<String>()
+    let spec = orders_spec(&state.db, &user).await?;
+    let parsed = list_state::parse(&spec, raw.as_deref().unwrap_or(""));
+    let page = ListPage {
+        title: "Заказы".into(),
+        crumbs: vec![("Магазин".into(), String::new())],
+        ..ListPage::default()
     };
-    [
-        ("number", &q.number),
-        ("status", &q.status),
-        ("from", &q.from),
-        ("to", &q.to),
-        ("buyer", &q.buyer),
-        ("paid", &q.paid),
-        ("canceled", &q.canceled),
-    ]
-    .iter()
-    .filter(|(_, v)| !v.is_empty())
-    .map(|(k, v)| format!("&{k}={}", enc(v)))
-    .collect()
+    run_list(
+        &state,
+        &user,
+        &headers,
+        uri.path(),
+        &spec,
+        parsed,
+        Scope::All,
+        page,
+        Vec::new(),
+    )
+    .await
 }
 
 /// Свойства типа плательщика, относящиеся к оплате и доставке заказа (служебные — тоже).
@@ -688,12 +564,12 @@ fn is_peek(headers: &HeaderMap) -> bool {
 }
 
 /// Панель быстрого просмотра заказа (фрагмент); `toast` — уведомление в `HX-Trigger`.
-/// `with_row` добавляет свежую строку списка out-of-band.
+/// `list_changed` просит страницу перезапросить список (метка `data-list-changed`).
 async fn peek_panel(
     state: &AppState,
     id: i64,
     toast: Option<(&str, FlashKind)>,
-    with_row: bool,
+    list_changed: bool,
 ) -> AppResult<Response> {
     let order = repo::load(&state.db, id).await?.ok_or(AppError::NotFound)?;
     let statuses: Vec<(String, String)> =
@@ -716,19 +592,19 @@ async fn peek_panel(
     let phone = prop(|p| p.is_phone).unwrap_or_default();
     let email = prop(|p| p.is_email).unwrap_or_else(|| order.user_email.clone());
     // Покупатель — по тому же правилу, что в списке (свойство-плательщик, иначе логин)
-    let mut qb = row_query();
-    qb.push(" AND o.id = ").push_bind(id);
-    let row: OrderRow = qb
-        .build_query_as()
+    let mut qb = QueryBuilder::<Postgres>::new(format!(
+        "SELECT {BUYER_SQL} FROM orders o LEFT JOIN users u ON u.id = o.user_id WHERE o.id = "
+    ));
+    qb.push_bind(id);
+    let buyer: String = qb
+        .build_query_scalar()
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound)?;
-    let buyer = row.buyer.clone();
-    let row = with_row.then_some(row);
     let html = render(
         state,
         "shop/order_peek.html",
-        context! { order, statuses, shipped, buyer, phone, email, row },
+        context! { order, statuses, shipped, buyer, phone, email, list_changed },
     )?;
     Ok(match toast {
         Some((text, kind)) => (flash::toast(text, kind), html).into_response(),
@@ -1141,53 +1017,6 @@ pub async fn save_shipment(
 
 #[cfg(test)]
 mod tests {
-    use sqlx::{Postgres, QueryBuilder};
-
-    use super::*;
-
-    #[test]
-    fn orders_query_filters() {
-        let base = "SELECT o.id FROM orders o WHERE TRUE";
-        let mut empty = QueryBuilder::<Postgres>::new(base);
-        push_filters(&mut empty, &OrdersQuery::default());
-        assert_eq!(empty.sql().as_str(), base);
-
-        let q = OrdersQuery {
-            number: "42".into(),
-            status: "N".into(),
-            from: "2026-10-01".into(),
-            to: "2026-10-08".into(),
-            buyer: "ivan".into(),
-            paid: "Y".into(),
-            canceled: "N".into(),
-            page: None,
-        };
-        let mut qb = QueryBuilder::<Postgres>::new(base);
-        push_filters(&mut qb, &q);
-        let sql = qb.sql().as_str().to_string();
-        for part in [
-            "o.account_number = $1",
-            "o.status = $2",
-            "o.created_at >= $3",
-            "o.created_at < $4",
-            "ILIKE $5",
-            "o.paid = $6",
-            "o.canceled = $7",
-        ] {
-            assert!(sql.contains(part), "{part} в {sql}");
-        }
-        let mut bad = QueryBuilder::<Postgres>::new(base);
-        push_filters(
-            &mut bad,
-            &OrdersQuery {
-                from: "вчера".into(),
-                paid: "?".into(),
-                ..Default::default()
-            },
-        );
-        assert_eq!(bad.sql().as_str(), base);
-    }
-
     use axum::http::{StatusCode, header};
 
     use crate::smoke_tests::get;
@@ -2337,7 +2166,7 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn peek_status_returns_panel_and_row(db: sqlx::PgPool) {
+    async fn peek_status_returns_panel_and_marker(db: sqlx::PgPool) {
         let f = order_fixture(&db).await;
         sqlx::query("INSERT INTO order_statuses (code, name) VALUES ('F', 'Выполнен')")
             .execute(&db)
@@ -2355,10 +2184,9 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(html.contains("peek-head"), "панель: {html}");
         assert!(
-            html.contains(&format!("<template><tr id=\"order-row-{id}\"")),
-            "строка: {html}"
+            html.contains("data-list-changed"),
+            "метка обновления: {html}"
         );
-        assert!(html.contains("hx-swap-oob=\"true\""));
         assert!(html.contains("Выполнен"));
         let st: String = sqlx::query_scalar("SELECT status FROM orders WHERE id = $1")
             .bind(id)
@@ -2369,7 +2197,7 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn peek_paid_returns_panel_and_row(db: sqlx::PgPool) {
+    async fn peek_paid_returns_panel_and_marker(db: sqlx::PgPool) {
         let f = order_fixture(&db).await;
         let id = place_order(&db, &f, None).await;
         let cookie = admin_cookie(&db).await;
@@ -2383,10 +2211,9 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(html.contains("peek-head"), "панель: {html}");
         assert!(
-            html.contains(&format!("<template><tr id=\"order-row-{id}\"")),
-            "строка внутри template: {html}"
+            html.contains("data-list-changed"),
+            "метка обновления: {html}"
         );
-        assert!(html.contains("hx-swap-oob=\"true\""));
         assert!(html.contains("оплачен"));
         let paid: bool = sqlx::query_scalar("SELECT paid FROM orders WHERE id = $1")
             .bind(id)
@@ -2474,13 +2301,138 @@ mod tests {
         let cookie = admin_cookie(&db).await;
         let (status, html) = get(&app(&db), "/admin/shop/orders", &cookie).await;
         assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(&format!("<tr data-id=\"{id}\"")), "{html}");
         assert!(
             html.contains(&format!(
-                "<tr id=\"order-row-{id}\" data-peek=\"/admin/shop/orders/{id}/peek\""
+                "data-peek=\"&#x2f;admin&#x2f;shop&#x2f;orders&#x2f;{id}&#x2f;peek\""
             )),
             "{html}"
         );
-        assert!(html.contains(&format!("<a href=\"/admin/shop/orders/{id}\">")));
+        assert!(
+            html.contains(&format!(
+                "<a href=\"&#x2f;admin&#x2f;shop&#x2f;orders&#x2f;{id}\">"
+            )),
+            "{html}"
+        );
         assert!(html.contains("id=\"peek\""), "контейнер панели в оболочке");
+    }
+
+    #[sqlx::test]
+    async fn orders_full_page_and_fragment(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        place_order(&db, &f, None).await;
+        let cookie = admin_cookie(&db).await;
+        let (status, html) = get(&app(&db), "/admin/shop/orders", &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("id=\"list-body\""), "{html}");
+        assert!(html.contains("<aside class=\"sidebar\""), "меню оболочки");
+        assert!(html.contains("id=\"list-spec\""));
+        let (status, frag) = htmx_get(&app(&db), "/admin/shop/orders", &cookie, "list-body").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(frag.contains("<table"), "{frag}");
+        assert!(
+            frag.contains("1,00") || frag.contains("100,00 RUB"),
+            "{frag}"
+        );
+        assert!(!frag.contains("<aside class=\"sidebar\""), "{frag}");
+    }
+
+    #[sqlx::test]
+    async fn orders_normalizes_url(db: sqlx::PgPool) {
+        let cookie = admin_cookie(&db).await;
+        let (status, headers, _) =
+            get_raw(&app(&db), "/admin/shop/orders?f.zzz=eq:1", &cookie).await;
+        assert_eq!(status, StatusCode::FOUND);
+        assert_eq!(headers[header::LOCATION], "/admin/shop/orders");
+        use tower::ServiceExt;
+        let req = axum::http::Request::get("/admin/shop/orders?f.zzz=eq:1")
+            .header(header::COOKIE, &cookie)
+            .header("HX-Request", "true")
+            .header("HX-Target", "list-body")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = app(&db).oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["hx-replace-url"], "/admin/shop/orders");
+    }
+
+    #[sqlx::test]
+    async fn orders_page_past_end(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        place_order(&db, &f, None).await;
+        let cookie = admin_cookie(&db).await;
+        let (status, html) = htmx_get(
+            &app(&db),
+            "/admin/shop/orders?page=999",
+            &cookie,
+            "list-body",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            html.contains("<table"),
+            "последняя страница с данными: {html}"
+        );
+    }
+
+    #[sqlx::test]
+    async fn orders_readonly_403(db: sqlx::PgPool) {
+        let cookie = permitted_cookie(&db, "nobody", &[]).await;
+        let (status, _) = get(&app(&db), "/admin/shop/orders", &cookie).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    async fn orders_filter_chip_and_sort(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        place_order(&db, &f, None).await;
+        let cookie = admin_cookie(&db).await;
+        let (_, html) = htmx_get(
+            &app(&db),
+            "/admin/shop/orders?f.status=in:N&sort=number",
+            &cookie,
+            "list-body",
+        )
+        .await;
+        assert!(html.contains("class=\"chip\""), "{html}");
+        assert!(html.contains("Принят"), "подпись варианта: {html}");
+        assert!(html.contains("Сбросить всё"));
+        let (_, none) = htmx_get(
+            &app(&db),
+            "/admin/shop/orders?f.number=eq:zzz",
+            &cookie,
+            "list-body",
+        )
+        .await;
+        assert!(none.contains("Ничего не найдено"), "{none}");
+    }
+
+    #[sqlx::test]
+    async fn peek_change_triggers_refresh(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        sqlx::query("INSERT INTO order_statuses (code, name) VALUES ('F', 'Выполнен')")
+            .execute(&db)
+            .await
+            .unwrap();
+        let id = place_order(&db, &f, None).await;
+        let cookie = admin_cookie(&db).await;
+        let (status, _, html) = peek_post(
+            &app(&db),
+            &format!("/admin/shop/orders/{id}/status"),
+            &cookie,
+            "status=F",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("data-list-changed"), "{html}");
+        // GET панели без изменения метки не несёт
+        let (_, html) = htmx_get(
+            &app(&db),
+            &format!("/admin/shop/orders/{id}/peek"),
+            &cookie,
+            "peek",
+        )
+        .await;
+        assert!(!html.contains("data-list-changed"));
     }
 }
