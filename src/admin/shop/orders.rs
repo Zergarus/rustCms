@@ -23,7 +23,7 @@ use crate::{
             orders::{BUYER_SQL, orders_spec},
             render::{ListPage, run_list},
             sql::Scope,
-            state as list_state,
+            views,
         },
         nav::ORDER_TABS,
         read_upload_form, render, shell, tabs,
@@ -52,7 +52,8 @@ pub async fn list(
 ) -> AppResult<Response> {
     require_orders(&user)?;
     let spec = orders_spec(&state.db, &user).await?;
-    let parsed = list_state::parse(&spec, raw.as_deref().unwrap_or(""));
+    let resolved =
+        views::resolve(&state.db, user.user.id, &spec, raw.as_deref().unwrap_or("")).await?;
     let page = ListPage {
         title: "Заказы".into(),
         crumbs: vec![("Магазин".into(), String::new())],
@@ -64,10 +65,10 @@ pub async fn list(
         &headers,
         uri.path(),
         &spec,
-        parsed,
+        resolved.parsed,
         Scope::All,
         page,
-        Vec::new(),
+        resolved.notices,
     )
     .await
 }

@@ -99,12 +99,7 @@ impl TreeBuilder<'_> {
         st.section = sel;
         st.only = false;
         st.page = 1;
-        let q = to_query(self.spec, &st, true);
-        if q.is_empty() {
-            self.path.clone()
-        } else {
-            format!("{}?{q}", self.path)
-        }
+        super::render::url_of(self.spec, &self.path, &st)
     }
 
     fn load_url(&self, parent: i64) -> String {

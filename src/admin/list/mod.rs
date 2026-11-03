@@ -8,3 +8,4 @@ pub(crate) mod spec;
 pub(crate) mod sql;
 pub(crate) mod state;
 pub(crate) mod tree;
+pub(crate) mod views;

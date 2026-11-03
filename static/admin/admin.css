@@ -453,7 +453,23 @@ textarea.bc-text[hidden] { display: none; }
 
 /* список на движке: чипы, виды, таблица, страницы */
 .list-views { display: flex; align-items: center; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 10px; flex-wrap: wrap; }
-.list-views:empty { display: none; }
+.list-views .view { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; position: relative; }
+.list-views .view:hover, .list-views .view.on { color: var(--text); text-decoration: none; }
+.list-views .view.on { border-bottom-color: var(--accent); }
+.list-views .view-name { color: inherit; }
+.list-views .shared { font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--raised); color: var(--muted); }
+.list-views form.inline { display: inline-flex; margin: 0; }
+.list-views .pin { border: 0; background: none; cursor: pointer; font-size: 12px; color: var(--muted); opacity: .5; padding: 0; }
+.list-views .pin.pinned { color: var(--warn); opacity: 1; }
+.list-views .pin:hover { opacity: 1; }
+.list-views details > summary { cursor: pointer; list-style: none; }
+.list-views details > summary::-webkit-details-marker { display: none; }
+.view-menu > summary { color: var(--muted); padding: 0 2px; }
+.view-menu-body { position: absolute; z-index: 20; top: 100%; left: 0; min-width: 240px; display: flex; flex-direction: column; gap: 6px; padding: 10px; background: var(--surface, var(--raised)); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, .15); }
+.view-saveas { position: relative; }
+.view-dirty { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+.view-dirty .dirty { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--warn); }
+.view-dirty .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
 .list-notice { margin-bottom: 8px; padding: 8px 12px; border-radius: 7px; border: 1px solid var(--border-strong); background: var(--raised); color: var(--muted); font-size: 13px; }
 .list-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-height: 34px; margin-bottom: 10px; }
 .chip { display: inline-flex; align-items: center; height: 28px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--raised); overflow: hidden; font-size: 13px; }

@@ -78,6 +78,10 @@ pub fn router(state: AppState) -> Router<AppState> {
             get(items::list).post(items::create),
         )
         .route("/collections/{id}/tree", get(items::tree))
+        .route("/views", post(list::views::create))
+        .route("/views/{id}", post(list::views::update))
+        .route("/views/{id}/delete", post(list::views::delete))
+        .route("/views/{id}/pin", post(list::views::pin))
         .route("/collections/{id}/items/new", get(items::new_form))
         .route("/items/{id}", get(items::edit_form).post(items::update))
         .route("/items/{id}/delete", post(items::delete))

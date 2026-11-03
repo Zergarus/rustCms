@@ -148,7 +148,21 @@ struct PerLink {
 }
 
 pub(crate) fn url_of(spec: &ListSpec, path: &str, st: &ListState) -> String {
-    let q = to_query(spec, st, true);
+    let mut q = to_query(spec, st, true);
+    if let Some(id) = st.view {
+        // Пустое состояние при открытом виде отличается от «открыть вид» меткой `edited`.
+        if super::views::is_blank(&q) {
+            q.push_str(if q.is_empty() {
+                "edited=1"
+            } else {
+                "&edited=1"
+            });
+        }
+        if !q.is_empty() {
+            q.push('&');
+        }
+        q.push_str(&format!("view={id}"));
+    }
     if q.is_empty() {
         path.to_string()
     } else {
@@ -452,7 +466,7 @@ pub async fn run_list(
         current_url => url_of(spec, path, &st),
         only_toggle,
         full,
-        views => Vec::<Value>::new(),
+        vb => super::views::bar(&state.db, user.user.id, spec, path, &st, &url_of(spec, path, &st)).await?,
         spec_json => spec_json(spec, &st),
     };
     let name = if full {

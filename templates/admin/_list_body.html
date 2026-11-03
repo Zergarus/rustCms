@@ -2,7 +2,66 @@
 {#- Дерево разделов обновляется вместе со списком (out-of-band): выбранный узел и счётчики -#}
 {% if page.tree and not full %}<aside id="list-tree" class="list-tree" hx-swap-oob="true">{% set tree = page.tree %}{% include "_tree.html" %}</aside>{% endif %}
 <div id="list-body" class="list-body" hx-get="{{ current_url }}" hx-trigger="list:refresh from:body" hx-target="this" hx-swap="outerHTML" hx-push-url="false">
-  <div class="list-views" id="list-views">{% for v in views %}{% endfor %}</div>
+    <div class="list-views" id="list-views">
+    <a class="view{% if vb.all_current %} on{% endif %}" href="{{ vb.all_url }}" hx-get="{{ vb.all_url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">Все</a>
+    {% for v in vb.items %}
+    <span class="view{% if v.current %} on{% endif %}">
+      <a class="view-name" href="{{ v.url }}" hx-get="{{ v.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">{{ v.name }}</a>
+      {% if v.shared %}<span class="shared" title="Общий вид: виден всем, у кого есть доступ к списку">общий</span>{% endif %}
+      <form class="inline" hx-post="/admin/views/{{ v.id }}/pin" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="false">
+        <input type="hidden" name="path" value="{{ vb.path }}"><input type="hidden" name="back" value="{{ vb.back }}">
+        <button class="pin{% if v.pinned %} pinned{% endif %}" title="{% if v.pinned %}Убрать из меню{% else %}Закрепить в меню{% endif %}" aria-label="{% if v.pinned %}Убрать из меню{% else %}Закрепить в меню{% endif %}">★</button>
+      </form>
+      {% if v.may_edit %}
+      <details class="view-menu" data-view-menu="{{ v.id }}">
+        <summary title="Действия с видом">⋯</summary>
+        <div class="view-menu-body">
+          <form hx-post="/admin/views/{{ v.id }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="false">
+            <input type="hidden" name="path" value="{{ vb.path }}"><input type="hidden" name="back" value="{{ vb.back }}">
+            <input type="text" name="name" value="{{ v.name }}" maxlength="100" aria-label="Название вида">
+            <button class="btn sm">Переименовать</button>
+          </form>
+          {% if v.can_toggle_shared %}
+          <form hx-post="/admin/views/{{ v.id }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="false">
+            <input type="hidden" name="path" value="{{ vb.path }}"><input type="hidden" name="back" value="{{ vb.back }}">
+            <input type="hidden" name="shared" value="{% if v.shared %}0{% else %}1{% endif %}">
+            <button class="btn ghost sm">{% if v.shared %}Сделать личным{% else %}Сделать общим{% endif %}</button>
+          </form>
+          {% endif %}
+          <form hx-post="/admin/views/{{ v.id }}/delete" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="false">
+            <input type="hidden" name="path" value="{{ vb.path }}"><input type="hidden" name="back" value="{{ vb.back }}">
+            <details class="confirm"><summary class="btn ghost sm danger-text">Удалить</summary>
+              <button class="btn sm danger">Да, удалить вид</button>
+            </details>
+          </form>
+        </div>
+      </details>
+      {% endif %}
+    </span>
+    {% endfor %}
+    {% if vb.dirty %}
+    <span class="view-dirty">
+      <span class="dirty"><span class="dot"></span>Вид изменён</span>
+      {% if vb.open and vb.open.may_edit %}
+      <form class="inline" data-view-save hx-post="/admin/views/{{ vb.open.id }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="false">
+        <input type="hidden" name="path" value="{{ vb.path }}"><input type="hidden" name="query" value="{{ vb.query }}">
+        <button class="btn ghost sm">Сохранить</button>
+      </form>
+      {% endif %}
+      <details class="view-saveas" data-view-save-as>
+        <summary class="btn ghost sm">Сохранить как…</summary>
+        <form class="view-menu-body" hx-post="/admin/views" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="false">
+          <input type="hidden" name="list_key" value="{{ vb.list_key }}"><input type="hidden" name="path" value="{{ vb.path }}">
+          <input type="hidden" name="query" value="{{ vb.query }}"><input type="hidden" name="back" value="{{ vb.back }}">
+          <input type="text" name="name" placeholder="Название вида" maxlength="100" aria-label="Название вида" required>
+          {% if vb.can_share %}<label class="only"><input type="checkbox" name="shared" value="1"> Общий</label>{% endif %}
+          <button class="btn primary sm">Создать вид</button>
+        </form>
+      </details>
+      <a class="btn ghost sm" href="{{ vb.reset_url }}" hx-get="{{ vb.reset_url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">Сбросить</a>
+    </span>
+    {% endif %}
+  </div>
   {% for n in notices %}<div class="list-notice">{{ n }}</div>{% endfor %}
   {% if chips %}
   <div class="list-bar">

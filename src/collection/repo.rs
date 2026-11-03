@@ -119,6 +119,10 @@ pub async fn delete_collection(db: &PgPool, id: i64) -> Result<(), UnlinkError> 
     .bind(id)
     .execute(&mut *tx)
     .await?;
+    sqlx::query("DELETE FROM admin_views WHERE list_key = 'collection:' || $1::text")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM collections WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)

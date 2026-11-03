@@ -22,7 +22,7 @@ use crate::{
         collection::{collection_spec, section_scope},
         render::{Action, ListPage, run_list},
         state::{self as list_state, SectionSel},
-        tree,
+        tree, views,
     },
     catalog::{self, PurchaseInput},
     collection::{
@@ -925,7 +925,9 @@ pub async fn list(
         .await?
         .ok_or(AppError::NotFound)?;
     let spec = collection_spec(&state.db, &user, &collection).await?;
-    let mut parsed = list_state::parse(&spec, raw.as_deref().unwrap_or(""));
+    let resolved =
+        views::resolve(&state.db, user.user.id, &spec, raw.as_deref().unwrap_or("")).await?;
+    let (mut parsed, notices) = (resolved.parsed, resolved.notices);
     let sections = repo::list_sections(&state.db, id).await?;
     // Удалённый или чужой раздел в адресе отбрасывается вместе с «только этот раздел»
     if let Some(SectionSel::Id(sid)) = parsed.state.section
@@ -1020,15 +1022,7 @@ pub async fn list(
         section_name: current.as_ref().map(|s| s.name.clone()),
     };
     run_list(
-        &state,
-        &user,
-        &headers,
-        &path,
-        &spec,
-        parsed,
-        scope,
-        page,
-        Vec::new(),
+        &state, &user, &headers, &path, &spec, parsed, scope, page, notices,
     )
     .await
 }
