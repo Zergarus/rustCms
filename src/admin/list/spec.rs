@@ -128,26 +128,35 @@ pub(crate) fn test_spec() -> ListSpec {
             currency_expr: None,
         }
     }
+    let mut columns = vec![
+        col("id", FieldType::Number, false),
+        col("name", FieldType::Text, true),
+        col("price", FieldType::Money, false),
+        col("updated", FieldType::Date, false),
+    ];
+    columns[2].expr = "p1.value".into();
+    columns[2].join = Some("price_1".into());
+    let mut filters = vec![
+        filter("name", FieldType::Text, &[]),
+        filter("price", FieldType::Money, &[]),
+        filter("qty", FieldType::Number, &[]),
+        filter("updated", FieldType::Date, &[]),
+        filter("status", FieldType::Enum, &["N", "P", "F"]),
+        filter("paid", FieldType::Bool, &[]),
+        filter("link", FieldType::Link, &[]),
+    ];
+    filters[1].sql = FilterSql::Expr("p1.value".into());
+    filters[1].join = Some("price_1".into());
     ListSpec {
         key: "test".into(),
         id_expr: "t.id".into(),
         from: "FROM t WHERE true".into(),
-        joins: vec![],
-        columns: vec![
-            col("id", FieldType::Number, false),
-            col("name", FieldType::Text, true),
-            col("price", FieldType::Money, false),
-            col("updated", FieldType::Date, false),
-        ],
-        filters: vec![
-            filter("name", FieldType::Text, &[]),
-            filter("price", FieldType::Money, &[]),
-            filter("qty", FieldType::Number, &[]),
-            filter("updated", FieldType::Date, &[]),
-            filter("status", FieldType::Enum, &["N", "P", "F"]),
-            filter("paid", FieldType::Bool, &[]),
-            filter("link", FieldType::Link, &[]),
-        ],
+        joins: vec![Join {
+            code: "price_1".into(),
+            sql: " LEFT JOIN prices p1 ON p1.item_id = t.id AND p1.type_id = 1".into(),
+        }],
+        columns,
+        filters,
         default_sort: Sort {
             code: "id".into(),
             desc: true,
