@@ -63,15 +63,15 @@
     {% endif %}
   </div>
   {% for n in notices %}<div class="list-notice">{{ n }}</div>{% endfor %}
-  {% if chips %}
   <div class="list-bar">
     {% for c in chips %}
-    <span class="chip{% if c.section %} section{% endif %}"><span class="chip-main"><span class="lbl">{{ c.label }}</span>{% if c.op %}<span class="op">{{ c.op }}</span>{% endif %}<span class="val">{{ c.value }}</span></span><a class="chip-x" href="{{ c.url }}" hx-get="{{ c.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true" aria-label="Убрать: {{ c.label }}">✕</a></span>
+    <span class="chip{% if c.section %} section{% endif %}"><span class="chip-main"{% if c.code %} data-chip="{{ c.code }}"{% endif %}><span class="lbl">{{ c.label }}</span>{% if c.op %}<span class="op">{{ c.op }}</span>{% endif %}<span class="val">{{ c.value }}</span></span><a class="chip-x" data-chip-remove href="{{ c.url }}" hx-get="{{ c.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true" aria-label="Убрать: {{ c.label }}">✕</a></span>
     {% endfor %}
+    <button type="button" class="add-filter js-only" id="list-add-filter" data-hotkey="/" aria-haspopup="dialog">+ Фильтр <kbd>F</kbd></button>
     {% if only_toggle %}<label class="only"><input type="checkbox"{% if only_toggle.checked %} checked{% endif %} hx-get="{{ only_toggle.url }}" hx-trigger="change" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true"> только этот раздел</label>{% endif %}
-    <a class="btn ghost sm" href="{{ reset_url }}" hx-get="{{ reset_url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">Сбросить всё</a>
+    {% if chips %}<a class="btn ghost sm" href="{{ reset_url }}" hx-get="{{ reset_url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">Сбросить всё</a>{% endif %}
+    <button type="button" class="btn ghost sm js-only cols-btn" id="list-cols" aria-haspopup="dialog">Колонки</button>
   </div>
-  {% endif %}
   {% if rows %}
   <div class="card table-wrap">
     <table class="list-table">

@@ -532,3 +532,31 @@ textarea.bc-text[hidden] { display: none; }
 .chip.section { border-color: var(--accent-line); background: var(--accent-soft); }
 .list-bar .only { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; margin-left: auto; }
 @media (max-width: 800px) { .list-layout { flex-direction: column; } .list-tree, .list-layout.tree-collapsed .list-tree { width: 100%; } }
+
+/* поповеры фильтров и колонок, текущая строка (list.js) */
+.js-only { display: none; }
+.list-js .js-only { display: inline-flex; align-items: center; }
+.add-filter { gap: 6px; border: 1px dashed var(--border-strong); background: none; color: var(--muted); border-radius: 7px; height: 28px; padding: 0 10px; cursor: pointer; font-size: 13px; font-family: inherit; }
+.add-filter:hover { color: var(--text); border-color: var(--muted); }
+.list-bar .cols-btn { margin-left: auto; }
+.list-bar .only + .cols-btn { margin-left: 0; }
+.chip-main[data-chip] { cursor: pointer; }
+.list-js .chip-main[data-chip]:hover { background: var(--hover); }
+.list-table tbody tr.cur { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.pop { position: fixed; z-index: 50; min-width: 240px; max-width: min(320px, calc(100vw - 16px)); background: var(--panel); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, .3); padding: 6px; font-size: 13px; }
+.pop input[type=text], .pop input[type=number], .pop input[type=date] { width: 100%; min-width: 0; height: 32px; border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); border-radius: 7px; padding: 0 10px; font: inherit; }
+.pop .item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; background: none; color: var(--text); border-radius: 6px; cursor: pointer; text-align: left; font: inherit; }
+.pop .item:hover { background: var(--hover); }
+.pop .item.muted { color: var(--muted); cursor: default; }
+.pop .item .kind { margin-left: auto; font-size: 11px; color: var(--muted); }
+.pop .sec { font-size: 11px; color: var(--muted); padding: 8px 8px 2px; text-transform: uppercase; letter-spacing: .04em; }
+.pop .row { display: flex; gap: 6px; align-items: center; padding: 4px; }
+.pop .ops { display: flex; gap: 4px; flex-wrap: wrap; padding: 4px; }
+.pop .ops button { border: 1px solid var(--border-strong); background: none; color: var(--text); border-radius: 6px; padding: 2px 8px; cursor: pointer; font: inherit; }
+.pop .ops button.on { background: var(--accent-soft); border-color: var(--accent-line); }
+.pop .list { max-height: 220px; overflow-y: auto; }
+.pop .actions { display: flex; justify-content: flex-end; gap: 6px; padding: 6px 4px 2px; border-top: 1px solid var(--border); margin-top: 4px; }
+.pop .title { font-weight: 600; padding: 6px 8px 4px; }
+.pop .drag { cursor: grab; color: var(--muted); }
+.pop label.item { justify-content: flex-start; text-align: left; margin: 0; }
+.pop input[type=checkbox] { width: auto; height: auto; flex: none; margin: 0; }

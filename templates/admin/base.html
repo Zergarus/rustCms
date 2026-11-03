@@ -11,6 +11,7 @@
   <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"403","swap":true,"error":false},{"code":"[45]..","swap":false,"error":true}]}'>
   <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
   <script src="/admin/static/admin.js" defer></script>
+  <script src="/admin/static/list.js" defer></script>
 </head>
 <body hx-boost="true"{% if shell %} class="with-shell" data-tabs="{{ 'on' if shell.prefs.tabs else 'off' }}"{% endif %}{% if no_tab %} data-no-tab{% endif %}>
   {% if shell %}
@@ -96,6 +97,12 @@
       <dt><kbd class="kbd">G</kbd> <kbd class="kbd">U</kbd></dt><dd>Пользователи</dd>
       <dt><kbd class="kbd">Ctrl</kbd> <kbd class="kbd">S</kbd></dt><dd>Сохранить</dd>
       <dt><kbd class="kbd">[</kbd> <kbd class="kbd">]</kbd></dt><dd>Вкладки карточки</dd>
+      <dt><kbd class="kbd">J</kbd> <kbd class="kbd">K</kbd></dt><dd>Список: следующая и предыдущая строка</dd>
+      <dt><kbd class="kbd">Enter</kbd></dt><dd>Список: открыть запись</dd>
+      <dt><kbd class="kbd">Space</kbd></dt><dd>Список: быстрый просмотр</dd>
+      <dt><kbd class="kbd">F</kbd></dt><dd>Список: добавить фильтр</dd>
+      <dt><kbd class="kbd">/</kbd></dt><dd>Список: поиск по названию</dd>
+      <dt><kbd class="kbd">{</kbd> <kbd class="kbd">}</kbd></dt><dd>Список: страницы</dd>
       <dt><kbd class="kbd">Esc</kbd></dt><dd>Закрыть окно</dd>
     </dl>
     <form method="dialog"><button class="btn">Закрыть</button></form>

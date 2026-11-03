@@ -127,6 +127,8 @@ struct HeadView {
 struct ChipView {
     /// Чип раздела, а не фильтра.
     section: bool,
+    /// Код фильтра (для правки чипа в JS); у чипа раздела пусто.
+    code: String,
     label: String,
     op: String,
     value: String,
@@ -231,6 +233,7 @@ fn chip(spec: &ListSpec, path: &str, st: &ListState, c: &Cond) -> Option<ChipVie
     next.page = 1;
     Some(ChipView {
         section: false,
+        code: f.code.clone(),
         label: f.label.clone(),
         op,
         value,
@@ -453,6 +456,7 @@ pub async fn run_list(
                 0,
                 ChipView {
                     section: true,
+                    code: String::new(),
                     label: "Раздел:".into(),
                     op: String::new(),
                     value,
