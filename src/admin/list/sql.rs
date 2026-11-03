@@ -33,6 +33,7 @@ pub(crate) fn like_pattern(v: &str) -> String {
 }
 
 /// Делит `FROM … WHERE …` по первому `WHERE` вне скобок: join'ы идут между ними.
+/// Соглашение: в `spec.from` `WHERE` пишется заглавными и после пробела/перевода строки.
 fn split_from(from: &str) -> (&str, &str) {
     let mut depth = 0i32;
     for (i, ch) in from.char_indices() {
@@ -47,6 +48,7 @@ fn split_from(from: &str) -> (&str, &str) {
             _ => {}
         }
     }
+    debug_assert!(false, "в spec.from нет WHERE: {from}");
     (from, "WHERE TRUE")
 }
 
@@ -71,32 +73,34 @@ fn filter_joins<'a>(spec: &'a ListSpec, st: &'a ListState) -> Vec<&'a str> {
         .collect()
 }
 
-fn json_value(ty: FieldType, v: &str, multiple: bool) -> serde_json::Value {
-    let one = if ty == FieldType::Link {
-        v.parse::<i64>()
-            .map(serde_json::Value::from)
-            .unwrap_or_else(|_| v.into())
-    } else {
-        v.into()
-    };
-    if multiple {
+/// Значения в `field_values`: id варианта списка и id связи хранятся числами
+/// (скаляр или массив при `multiple`). Нечисловое значение не подходит.
+fn json_value(v: &str, multiple: bool) -> Option<serde_json::Value> {
+    let one = serde_json::Value::from(v.parse::<i64>().ok()?);
+    Some(if multiple {
         serde_json::Value::Array(vec![one])
     } else {
         one
-    }
+    })
 }
 
-fn push_json(qb: &mut QueryBuilder<Postgres>, c: &Cond, ty: FieldType, key: &str, multiple: bool) {
+fn push_json(qb: &mut QueryBuilder<Postgres>, c: &Cond, key: &str, multiple: bool) {
     let contains = |qb: &mut QueryBuilder<Postgres>, vals: &[String]| {
+        let jsons: Vec<serde_json::Value> = vals
+            .iter()
+            .filter_map(|v| json_value(v, multiple))
+            .collect();
+        if jsons.is_empty() {
+            qb.push("FALSE");
+            return;
+        }
         qb.push("(");
-        for (i, v) in vals.iter().enumerate() {
+        for (i, j) in jsons.into_iter().enumerate() {
             if i > 0 {
                 qb.push(" OR ");
             }
             qb.push("ci.field_values @> ");
-            qb.push_bind(sqlx::types::Json(
-                serde_json::json!({ key: json_value(ty, v, multiple) }),
-            ));
+            qb.push_bind(sqlx::types::Json(serde_json::json!({ key: j })));
         }
         qb.push(")");
     };
@@ -114,7 +118,7 @@ fn push_json(qb: &mut QueryBuilder<Postgres>, c: &Cond, ty: FieldType, key: &str
     };
     match c.op {
         Op::In | Op::Eq if !vals.is_empty() => contains(qb, &vals),
-        Op::Nin | Op::Ne if !vals.is_empty() => {
+        Op::Nin | Op::Ne if vals.iter().any(|v| json_value(v, multiple).is_some()) => {
             qb.push("NOT ");
             contains(qb, &vals);
         }
@@ -123,8 +127,10 @@ fn push_json(qb: &mut QueryBuilder<Postgres>, c: &Cond, ty: FieldType, key: &str
             qb.push("NOT ");
             empty(qb);
         }
+        // Сюда не попадаем: разбор состояния отбрасывает неподходящие пары
+        // оператор/тип и пустые значения. Лучше ноль строк, чем чужие.
         _ => {
-            qb.push("TRUE");
+            qb.push("FALSE");
         }
     }
 }
@@ -208,7 +214,8 @@ fn push_expr(qb: &mut QueryBuilder<Postgres>, c: &Cond, ty: FieldType, e: &str) 
                 qb.push("::date + 1)");
             }
             if a.is_empty() && b.is_empty() {
-                qb.push("TRUE");
+                // Разбор такого не пропускает; на всякий случай — ноль строк.
+                qb.push("FALSE");
             }
             qb.push(")");
         }
@@ -223,8 +230,9 @@ fn push_expr(qb: &mut QueryBuilder<Postgres>, c: &Cond, ty: FieldType, e: &str) 
                 qb.push(")");
             }
         }
+        // Разбор состояния не пропускает другие пары оператор/значение.
         _ => {
-            qb.push("TRUE");
+            qb.push("FALSE");
         }
     }
 }
@@ -237,7 +245,7 @@ fn push_where(qb: &mut QueryBuilder<Postgres>, spec: &ListSpec, st: &ListState, 
         qb.push(" AND (");
         match &f.sql {
             FilterSql::Expr(e) => push_expr(qb, c, f.ty, e),
-            FilterSql::JsonField { key, multiple } => push_json(qb, c, f.ty, key, *multiple),
+            FilterSql::JsonField { key, multiple } => push_json(qb, c, key, *multiple),
         }
         qb.push(")");
     }
@@ -386,7 +394,7 @@ mod tests {
             )
         };
         // price видна по умолчанию
-        assert!(mk("").0.contains("price_1") || mk("").0.contains("prices p1"));
+        assert!(mk("").0.contains("prices p1 ON"));
         // скрыта, нет фильтра и сортировки
         let (s, c) = mk("cols=id,name");
         assert!(!s.contains("prices p1"), "{s}");
@@ -453,8 +461,12 @@ mod tests {
     #[sqlx::test]
     async fn json_field_conditions_run(db: sqlx::PgPool) {
         let mut spec = test_spec();
-        spec.from = "FROM (VALUES (1, '{\"st\":\"A\",\"ln\":5,\"tg\":[\"x\"]}'::jsonb, 7), \
-            (2, '{\"st\":null}'::jsonb, NULL), (3, '{}'::jsonb, 7)) AS ci(id, field_values, section_id) WHERE TRUE"
+        spec.from = "FROM (VALUES \
+            (1, '{\"st\":12,\"ln\":5,\"tg\":[3,4]}'::jsonb, 7), \
+            (2, '{\"st\":13,\"tg\":[5]}'::jsonb, NULL), \
+            (3, '{}'::jsonb, 7), \
+            (4, '{\"st\":null,\"ln\":null,\"tg\":[]}'::jsonb, 8)) \
+            AS ci(id, field_values, section_id) WHERE TRUE"
             .into();
         spec.id_expr = "ci.id".into();
         spec.joins.clear();
@@ -464,6 +476,7 @@ mod tests {
             c.join = None;
         }
         spec.default_sort.code = "id".into();
+        spec.default_sort.desc = false;
         for (code, key, ty, multiple) in [
             ("status", "st", FieldType::Enum, false),
             ("link", "ln", FieldType::Link, false),
@@ -476,6 +489,12 @@ mod tests {
                 multiple,
             };
             f.join = None;
+            f.options = (1..=20)
+                .map(|i| crate::admin::list::spec::EnumOption {
+                    value: i.to_string(),
+                    label: i.to_string(),
+                })
+                .collect();
         }
         let ids = |q: &str, scope: Scope| {
             let st = parse(&spec, q).state;
@@ -486,11 +505,23 @@ mod tests {
                 rows.iter().map(|r| r.id).collect::<Vec<_>>()
             }
         };
-        assert_eq!(ids("f.status=in:N", Scope::All).await, Vec::<i64>::new());
+        // enum, скаляр
+        assert_eq!(ids("f.status=in:12", Scope::All).await, vec![1]);
+        assert_eq!(ids("f.status=in:12,13", Scope::All).await, vec![1, 2]);
+        assert_eq!(ids("f.status=in:20", Scope::All).await, Vec::<i64>::new());
+        assert_eq!(ids("f.status=nin:12", Scope::All).await, vec![2, 3, 4]);
+        assert_eq!(ids("f.status=nin:12,13", Scope::All).await, vec![3, 4]);
+        // enum multiple: вхождение в массив
+        assert_eq!(ids("f.qty=in:3", Scope::All).await, vec![1]);
+        assert_eq!(ids("f.qty=in:4,5", Scope::All).await, vec![1, 2]);
+        assert_eq!(ids("f.qty=nin:3", Scope::All).await, vec![2, 3, 4]);
+        // link
         assert_eq!(ids("f.link=eq:5", Scope::All).await, vec![1]);
-        assert_eq!(ids("f.link=empty&sort=id", Scope::All).await, vec![2, 3]);
+        assert_eq!(ids("f.link=empty", Scope::All).await, vec![2, 3, 4]);
         assert_eq!(ids("f.link=notempty", Scope::All).await, vec![1]);
-        assert_eq!(ids("sort=id", Scope::Sections(vec![7])).await, vec![1, 3]);
-        assert_eq!(ids("sort=id", Scope::Without).await, vec![2]);
+        // scope
+        assert_eq!(ids("", Scope::Sections(vec![7])).await, vec![1, 3]);
+        assert_eq!(ids("", Scope::Sections(vec![7, 8])).await, vec![1, 3, 4]);
+        assert_eq!(ids("", Scope::Without).await, vec![2]);
     }
 }
