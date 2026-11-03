@@ -34,6 +34,9 @@
       <span class="grow">{{ it.label }}</span>
       {% if it.count %}<span class="nav-count">{{ it.count }}</span>{% endif %}
     </a>
+    {% for v in it.views %}
+    <a class="nav sub{% if v.active %} on{% endif %}" href="{{ v.url|safe }}"{% if v.active %} aria-current="page"{% endif %}><span class="star" aria-hidden="true">★</span><span class="grow">{{ v.label }}</span></a>
+    {% endfor %}
     {% endfor %}
     {% if g.code == "content" and nav.more_collections %}
     <a class="nav more" href="/admin/collections">{{ ui.icon("plus") }}<span class="grow">Ещё…</span></a>

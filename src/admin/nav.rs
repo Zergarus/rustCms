@@ -362,6 +362,9 @@ pub(crate) struct NavItem {
     pub url: String,
     pub count: Option<i64>,
     pub active: bool,
+    /// Закреплённые виды списка (вложенные пункты).
+    #[serde(default)]
+    pub views: Vec<NavItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -433,6 +436,11 @@ pub(crate) async fn build(
     ctx: &NavCtx,
     path: &str,
 ) -> sqlx::Result<Nav> {
+    // `path` может нести строку запроса: по ней определяется активный вид
+    let query = path.split_once('?').map_or("", |(_, q)| q);
+    let view_id: Option<i64> = form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == "view")
+        .and_then(|(_, v)| v.parse().ok());
     let path = without_query(path);
     let mode = mode_for(path);
     let all = sections(user, ctx);
@@ -477,6 +485,7 @@ pub(crate) async fn build(
                 url: s.url.clone(),
                 count,
                 active: false,
+                views: Vec::new(),
             },
         ));
     }
@@ -509,6 +518,24 @@ pub(crate) async fn build(
         shown[i].1.active = true;
     }
 
+    // закреплённые виды: один запрос; виды скрытых пунктов отбрасываются
+    for pin in super::list::views::pinned_for_menu(db, user.user.id).await? {
+        let Some(list_path) = super::list::views::list_path(&pin.list_key) else {
+            continue;
+        };
+        let Some((_, item)) = shown.iter_mut().find(|(s, _)| s.code == pin.list_key) else {
+            continue;
+        };
+        item.views.push(NavItem {
+            code: format!("view:{}", pin.id),
+            label: pin.name,
+            url: format!("{list_path}?view={}", pin.id),
+            count: None,
+            active: path == list_path && view_id == Some(pin.id),
+            views: Vec::new(),
+        });
+    }
+
     let defs: &[(&str, &str)] = if mode == Mode::Cms {
         &CMS_GROUPS
     } else {
@@ -536,6 +563,7 @@ pub(crate) async fn build(
                 url: first.url.clone(),
                 count: orders_count,
                 active: false,
+                views: Vec::new(),
             })
     } else {
         None
@@ -663,6 +691,80 @@ mod tests {
                 .shop
                 .is_none()
         );
+    }
+
+    #[sqlx::test]
+    async fn pinned_views_in_nav(db: PgPool) {
+        let user = access(&db, "root", None).await;
+        let other = access(&db, "other", None).await;
+        let col: i64 = sqlx::query_scalar(
+            "INSERT INTO collections (code, name) VALUES ('news', 'Новости') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let mut ids = Vec::new();
+        for (key, name, owner, shared) in [
+            (format!("collection:{col}"), "Мои новости", user.user.id, false),
+            ("orders".to_string(), "Новые", user.user.id, true),
+            ("orders".to_string(), "Чужие", other.user.id, true),
+        ] {
+            let id: i64 = sqlx::query_scalar(
+                "INSERT INTO admin_views (list_key, owner_id, name, query, shared) VALUES ($1, $2, $3, '', $4) RETURNING id",
+            )
+            .bind(key)
+            .bind(owner)
+            .bind(name)
+            .bind(shared)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            ids.push(id);
+        }
+        for id in &ids {
+            sqlx::query("INSERT INTO admin_view_pins (user_id, view_id, sort) VALUES ($1, $2, 0)")
+                .bind(user.user.id)
+                .bind(id)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let ctx = load_ctx(&db, &user).await.unwrap();
+        let find = |nav: &Nav, code: &str| {
+            nav.groups
+                .iter()
+                .flat_map(|g| g.items.iter())
+                .find(|i| i.code == code)
+                .cloned()
+                .unwrap()
+        };
+        let url = format!("/admin/shop/orders?view={}", ids[1]);
+        let shop = build(&db, &user, &ctx, &url).await.unwrap();
+        let orders = find(&shop, "orders");
+        assert_eq!(orders.views.len(), 2);
+        assert_eq!(orders.views[0].label, "Новые");
+        assert_eq!(orders.views[0].url, url);
+        assert!(orders.views[0].active);
+        assert!(!orders.views[1].active);
+        assert_eq!(orders.views[0].count, None);
+        let cms = build(&db, &user, &ctx, "/admin").await.unwrap();
+        let news = find(&cms, &format!("collection:{col}"));
+        assert_eq!(news.views.len(), 1);
+        assert_eq!(
+            news.views[0].url,
+            format!("/admin/collections/{col}/items?view={}", ids[0])
+        );
+        assert!(!news.views[0].active);
+
+        // владелец «Чужие» снимает общий доступ: вид пропадает из меню
+        sqlx::query("UPDATE admin_views SET shared = FALSE WHERE id = $1")
+            .bind(ids[2])
+            .execute(&db)
+            .await
+            .unwrap();
+        let shop = build(&db, &user, &ctx, "/admin/shop/orders").await.unwrap();
+        let labels: Vec<_> = find(&shop, "orders").views.into_iter().map(|v| v.label).collect();
+        assert_eq!(labels, ["Новые"]);
     }
 
     #[sqlx::test]

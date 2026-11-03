@@ -485,7 +485,8 @@ async fn build_shell(
         Vec::new()
     };
     Ok(shell::Shell {
-        nav: nav::build(&state.db, access, ctx, path).await?,
+        // с query: по ней определяется активный закреплённый вид
+        nav: nav::build(&state.db, access, ctx, url).await?,
         prefs,
         flash: flash::read(jar),
         tabs,

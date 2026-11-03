@@ -110,6 +110,8 @@ kbd, .kbd { font: 11px/1.4 inherit; font-family: inherit; padding: 1px 6px; bord
 }
 .nav:hover { background: var(--hover); color: var(--text); text-decoration: none; }
 .nav.on { background: var(--selected); color: var(--text); }
+.nav.sub { padding-left: 30px; min-height: 28px; font-size: 13px; }
+.nav .star { color: var(--warn); font-size: 11px; }
 .nav.more { color: var(--muted); }
 .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .search-btn { border: 1px solid var(--border); margin-bottom: 10px; }

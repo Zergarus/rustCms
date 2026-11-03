@@ -53,6 +53,27 @@ pub async fn visible(db: &PgPool, user_id: i64, list_key: &str) -> sqlx::Result<
     .await
 }
 
+/// Закреплённое пользователем в меню: только видимые ему виды, в порядке закрепления.
+pub async fn pinned_for_menu(db: &PgPool, user_id: i64) -> sqlx::Result<Vec<MenuPin>> {
+    sqlx::query_as(
+        "SELECT v.list_key, v.id, v.name
+         FROM admin_view_pins p
+         JOIN admin_views v ON v.id = p.view_id
+         WHERE p.user_id = $1 AND (v.shared OR v.owner_id = $1)
+         ORDER BY p.sort, v.id",
+    )
+    .bind(user_id)
+    .fetch_all(db)
+    .await
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct MenuPin {
+    pub list_key: String,
+    pub id: i64,
+    pub name: String,
+}
+
 pub async fn get_visible(db: &PgPool, user_id: i64, id: i64) -> sqlx::Result<Option<View>> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "{SELECT} WHERE v.id = $2 AND (v.shared OR v.owner_id = $1)"
