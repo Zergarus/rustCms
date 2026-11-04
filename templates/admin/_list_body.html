@@ -83,9 +83,9 @@
       </tr></thead>
       <tbody>
         {% for r in rows %}
-        <tr data-id="{{ r.id }}"{% if r.muted %} class="inactive"{% endif %} data-open="{{ r.open }}"{% if r.peek %} data-peek="{{ r.peek }}"{% endif %}>
+        <tr data-id="{{ r.id }}"{% if r.version %} data-version="{{ r.version }}"{% endif %}{% if r.muted %} class="inactive"{% endif %} data-open="{{ r.open }}"{% if r.peek %} data-peek="{{ r.peek }}"{% endif %}>
           {% if has_bulk %}<td class="sel"><input type="checkbox" data-bulk aria-label="Выбрать строку"></td>{% endif %}
-          {% for c in r.cells %}<td{% if c.num %} class="num"{% endif %}>{% if c.first %}<a href="{{ r.open }}">{{ c.text }}</a>{% elif c.flag == "ok" %}<span class="badge ok">{{ c.text }}</span>{% elif c.flag == "none" %}<span class="muted">{{ c.text }}</span>{% else %}{{ c.text }}{% endif %}</td>{% endfor %}
+          {% for c in r.cells %}<td{% if c.num %} class="num"{% endif %}{% if c.edit %} data-edit="{{ c.code }}" data-kind="{{ c.edit }}" data-value="{{ c.value }}"{% if c.first %} data-first="1"{% endif %} title="Двойной клик — изменить"{% endif %}>{% if c.first %}<a href="{{ r.open }}">{{ c.text }}</a>{% elif c.flag == "ok" %}<span class="badge ok">{{ c.text }}</span>{% elif c.flag == "none" %}<span class="muted">{{ c.text }}</span>{% else %}{{ c.text }}{% endif %}</td>{% endfor %}
         </tr>
         {% endfor %}
       </tbody>

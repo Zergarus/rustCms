@@ -292,6 +292,12 @@ pub fn select(spec: &ListSpec, st: &ListState, scope: &Scope) -> QueryBuilder<Po
         if let Some(cur) = &c.currency_expr {
             pairs.push(format!("'{}__cur', {}", lit(&c.code), cur));
         }
+        if let Some(edit) = &c.edit_expr {
+            pairs.push(format!("'{}__edit', {}", lit(&c.code), edit));
+        }
+    }
+    if let Some(version) = &spec.version_expr {
+        pairs.push(format!("'__version', {version}"));
     }
     if let Some(m) = &spec.muted_expr {
         pairs.push(format!("'__muted', {m}"));

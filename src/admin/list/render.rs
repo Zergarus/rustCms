@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use super::{
     bulk::{BulkParam, Confirm},
-    spec::{FieldType, Filter, ListSpec},
+    spec::{EditKind, FieldType, Filter, ListSpec},
     sql::{COUNT_CAP, Scope, fetch},
     state::{Cond, ListState, Op, Parsed, SectionSel, Val, to_query},
 };
@@ -99,6 +99,27 @@ pub fn format_cell(ty: &FieldType, v: &Value, currency: Option<&str>) -> String 
     }
 }
 
+/// Вид редактора для JS.
+fn edit_kind(kind: EditKind) -> &'static str {
+    match kind {
+        EditKind::Text => "text",
+        EditKind::Number => "number",
+        EditKind::Bool => "bool",
+        EditKind::Date => "date",
+        EditKind::List => "list",
+    }
+}
+
+/// Сырое значение для редактора: `null` — пусто, флаг — `true`/`false`, остальное — текст.
+fn edit_value(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::Bool(b) => b.to_string(),
+        Value::String(s) => s.clone(),
+        _ => v.to_string(),
+    }
+}
+
 #[derive(Serialize)]
 struct CellView {
     text: String,
@@ -106,6 +127,10 @@ struct CellView {
     first: bool,
     /// `ok` для истинного флага, `none` для ложного, пусто для остальных.
     flag: &'static str,
+    /// Вид редактора (`text`, `number`, …); `None` — ячейка не редактируется.
+    edit: Option<&'static str>,
+    /// Сырое значение для редактора.
+    value: String,
 }
 
 #[derive(Serialize)]
@@ -114,6 +139,8 @@ struct RowView {
     open: String,
     peek: Option<String>,
     muted: bool,
+    /// `updated_at` записи для защиты от параллельной правки.
+    version: Option<String>,
     cells: Vec<CellView>,
 }
 
@@ -317,6 +344,19 @@ fn spec_json(spec: &ListSpec, st: &ListState, path: &str, query: &str) -> String
             serde_json::json!({"code": c.code, "title": c.title, "required": c.required, "default": c.default})
         })
         .collect();
+    let edit_columns: Vec<Value> = spec
+        .columns
+        .iter()
+        .filter_map(|c| {
+            let edit = c.editable.as_ref()?;
+            Some(serde_json::json!({
+                "code": c.code,
+                "kind": edit_kind(edit.kind),
+                "required": edit.required,
+                "options": edit.options.iter().map(|o| serde_json::json!({"value": o.value, "label": o.label})).collect::<Vec<_>>(),
+            }))
+        })
+        .collect();
     let bulk_actions: Vec<Value> = spec
         .bulk_actions
         .iter()
@@ -339,6 +379,7 @@ fn spec_json(spec: &ListSpec, st: &ListState, path: &str, query: &str) -> String
         .collect();
     serde_json::json!({
         "filters": filters, "columns": columns, "per": st.per, "cols": st.cols,
+        "edit_columns": edit_columns,
         "bulk_actions": bulk_actions, "list_key": spec.key, "path": path, "query": query,
     })
     .to_string()
@@ -457,6 +498,11 @@ pub async fn run_list(
                         .cells
                         .get(&format!("{}__cur", c.code))
                         .and_then(Value::as_str);
+                    let raw = r
+                        .cells
+                        .get(&format!("{}__edit", c.code))
+                        .cloned()
+                        .unwrap_or(Value::Null);
                     let flag = match (c.ty, &v) {
                         (FieldType::Bool, Value::Bool(true)) => "ok",
                         (FieldType::Bool, Value::Bool(false)) => "none",
@@ -467,6 +513,8 @@ pub async fn run_list(
                         num: matches!(c.ty, FieldType::Number | FieldType::Money),
                         first: i == 0,
                         flag,
+                        edit: c.editable.as_ref().map(|e| edit_kind(e.kind)),
+                        value: edit_value(&raw),
                     }
                 })
                 .collect();
@@ -478,6 +526,11 @@ pub async fn run_list(
                     .peek_url
                     .as_ref()
                     .map(|u| u.replace("{id}", &r.id.to_string())),
+                version: r
+                    .cells
+                    .get("__version")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 cells,
             }
         })
@@ -653,5 +706,23 @@ mod tests {
         assert_eq!(format_cell(&FieldType::Number, &json!(5.0), None), "5");
         assert_eq!(format_cell(&FieldType::Number, &json!(5.25), None), "5,25");
         assert_eq!(format_cell(&FieldType::Text, &json!("a<b"), None), "a<b");
+    }
+
+    #[test]
+    fn spec_json_has_edit_columns() {
+        use crate::admin::list::spec::{CellEdit, EditKind, EditTarget, StdField, test_spec};
+        let mut spec = test_spec();
+        spec.columns[1].editable = Some(CellEdit {
+            target: EditTarget::Standard(StdField::Name),
+            kind: EditKind::Text,
+            required: true,
+            options: vec![],
+        });
+        let st = crate::admin::list::state::parse(&spec, "").state;
+        let json = spec_json(&spec, &st, "/p", "");
+        assert!(json.contains("\"edit_columns\""));
+        assert!(json.contains("\"kind\":\"text\""));
+        let json = spec_json(&test_spec(), &st, "/p", "");
+        assert!(json.contains("\"edit_columns\":[]"));
     }
 }

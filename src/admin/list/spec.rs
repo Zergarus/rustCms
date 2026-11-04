@@ -20,6 +20,43 @@ pub struct EnumOption {
     pub label: String,
 }
 
+/// Редактор значения в ячейке.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditKind {
+    Text,
+    Number,
+    Bool,
+    Date,
+    List,
+}
+
+/// Стандартная колонка записи, доступная для правки.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdField {
+    Name,
+    Code,
+    Sort,
+    Active,
+}
+
+/// Что именно правит ячейка: стандартную колонку или поле коллекции (`id` поля).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditTarget {
+    Standard(StdField),
+    Field(i64),
+}
+
+#[derive(Debug, Clone)]
+pub struct CellEdit {
+    /// Куда писать значение; читается обработчиком сохранения ячейки.
+    #[allow(dead_code)]
+    pub target: EditTarget,
+    pub kind: EditKind,
+    pub required: bool,
+    /// Варианты поля-списка; у остальных видов пусто.
+    pub options: Vec<EnumOption>,
+}
+
 /// `" LEFT JOIN … "` целиком.
 #[derive(Debug, Clone)]
 pub struct Join {
@@ -46,6 +83,10 @@ pub struct Column {
     pub required: bool,
     pub join: Option<String>,
     pub currency_expr: Option<String>,
+    /// Дескриптор редактора ячейки; `None` — колонка не редактируется.
+    pub editable: Option<CellEdit>,
+    /// SQL-выражение сырого значения для редактора (не подпись из `expr`).
+    pub edit_expr: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +121,8 @@ pub struct ListSpec {
     pub muted_expr: Option<String>,
     /// SQL-выражение подписи записи для итога массовых действий (номер заказа, название).
     pub label_expr: String,
+    /// SQL-выражение `updated_at` для защиты от параллельной правки; `None` — список не редактируется.
+    pub version_expr: Option<String>,
     /// Массовые действия, разрешённые пользователю; пусто — нет чекбоксов и панели.
     pub bulk_actions: Vec<BulkAction>,
 }
@@ -132,6 +175,8 @@ pub(crate) fn test_spec() -> ListSpec {
             required,
             join: None,
             currency_expr: None,
+            editable: None,
+            edit_expr: None,
         }
     }
     let mut columns = vec![
@@ -174,6 +219,7 @@ pub(crate) fn test_spec() -> ListSpec {
         can_share: false,
         muted_expr: None,
         label_expr: "t.id::text".into(),
+        version_expr: None,
         bulk_actions: Vec::new(),
     }
 }

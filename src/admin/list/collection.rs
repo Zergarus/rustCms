@@ -4,7 +4,10 @@ use sqlx::PgPool;
 
 use super::{
     bulk::{BulkAction, BulkParam, Confirm},
-    spec::{Column, EnumOption, FieldType, Filter, FilterSql, Join, ListSpec},
+    spec::{
+        CellEdit, Column, EditKind, EditTarget, EnumOption, FieldType, Filter, FilterSql, Join,
+        ListSpec, StdField,
+    },
     sql::Scope,
     state::{SectionSel, Sort},
 };
@@ -51,6 +54,8 @@ fn col(code: &str, title: &str, expr: &str, ty: FieldType) -> Column {
         required: false,
         join: None,
         currency_expr: None,
+        editable: None,
+        edit_expr: None,
     }
 }
 
@@ -96,6 +101,7 @@ fn date_expr(v: &str) -> String {
 fn field_entries(
     f: &Field,
     options: &[EnumOption],
+    can_edit: bool,
     out_cols: &mut Vec<Column>,
     out_filters: &mut Vec<Filter>,
 ) {
@@ -107,6 +113,35 @@ fn field_entries(
         let mut c = col(code, &f.name, &expr, ty);
         c.default = false;
         c.sortable = sortable;
+        c
+    };
+    // Редактор — только у одиночных полей поддерживаемых видов; у остальных `editable` пуст.
+    let edit = if can_edit && !f.multiple {
+        match f.kind.as_str() {
+            "string" => Some(EditKind::Text),
+            "number" => Some(EditKind::Number),
+            "date" => Some(EditKind::Date),
+            "boolean" => Some(EditKind::Bool),
+            "list" => Some(EditKind::List),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let editable = |mut c: Column| -> Column {
+        if let Some(kind) = edit {
+            c.editable = Some(CellEdit {
+                target: EditTarget::Field(f.id),
+                kind,
+                required: f.is_required,
+                options: if kind == EditKind::List {
+                    options.to_vec()
+                } else {
+                    vec![]
+                },
+            });
+            c.edit_expr = Some(text.clone());
+        }
         c
     };
     // Элементы массива через запятую; устаревший скаляр (строка или число, записанный до того,
@@ -122,7 +157,11 @@ fn field_entries(
     match f.kind.as_str() {
         "string" | "text" => {
             let expr = if f.multiple { joined("") } else { text.clone() };
-            out_cols.push(column(FieldType::Text, expr.clone(), single_sortable));
+            out_cols.push(editable(column(
+                FieldType::Text,
+                expr.clone(),
+                single_sortable,
+            )));
             out_filters.push(fl(FieldType::Text, &expr));
         }
         // Множественные числа и даты: только колонка со значениями через запятую.
@@ -132,7 +171,7 @@ fn field_entries(
             } else {
                 let expr =
                     format!("CASE WHEN jsonb_typeof({raw}) = 'number' THEN {text}::numeric END");
-                out_cols.push(column(FieldType::Number, expr.clone(), true));
+                out_cols.push(editable(column(FieldType::Number, expr.clone(), true)));
                 out_filters.push(fl(FieldType::Number, &expr));
             }
         }
@@ -141,13 +180,13 @@ fn field_entries(
                 out_cols.push(column(FieldType::Text, joined(""), false));
             } else {
                 let expr = date_expr(&text);
-                out_cols.push(column(FieldType::Date, expr.clone(), true));
+                out_cols.push(editable(column(FieldType::Date, expr.clone(), true)));
                 out_filters.push(fl(FieldType::Date, &expr));
             }
         }
         "boolean" => {
             let expr = format!("COALESCE({raw} = 'true'::jsonb, FALSE)");
-            out_cols.push(column(FieldType::Bool, expr.clone(), true));
+            out_cols.push(editable(column(FieldType::Bool, expr.clone(), true)));
             out_filters.push(fl(FieldType::Bool, &expr));
         }
         "list" => {
@@ -157,7 +196,7 @@ fn field_entries(
                 f.id,
                 ids_subquery(&raw)
             );
-            out_cols.push(column(FieldType::Enum, labels, single_sortable));
+            out_cols.push(editable(column(FieldType::Enum, labels, single_sortable)));
             let mut flt = fl(FieldType::Enum, "");
             flt.sql = FilterSql::JsonField {
                 key: code.into(),
@@ -193,6 +232,9 @@ fn field_entries(
 
 pub async fn collection_spec(db: &PgPool, user: &Access, c: &Collection) -> sqlx::Result<ListSpec> {
     let id = c.id;
+    let can_edit = user.collection_level(id) >= Level::Write
+        && c.product_collection_id
+            .is_none_or(|p| user.collection_level(p) >= Level::Write);
     let mut columns = vec![
         col("id", "ID", "ci.id", FieldType::Number),
         {
@@ -221,6 +263,28 @@ pub async fn collection_spec(db: &PgPool, user: &Access, c: &Collection) -> sqlx
     columns[4].default = false;
     columns[5].sortable = false;
     columns[6].default = false;
+    if can_edit {
+        let std_edit = |target: StdField, kind: EditKind, required: bool, expr: &str| {
+            (
+                CellEdit {
+                    target: EditTarget::Standard(target),
+                    kind,
+                    required,
+                    options: vec![],
+                },
+                expr.to_string(),
+            )
+        };
+        for (column, (edit, expr)) in columns[1..=4].iter_mut().zip([
+            std_edit(StdField::Name, EditKind::Text, true, "ci.name"),
+            std_edit(StdField::Code, EditKind::Text, false, "ci.code"),
+            std_edit(StdField::Active, EditKind::Bool, false, "ci.active"),
+            std_edit(StdField::Sort, EditKind::Number, false, "ci.sort"),
+        ]) {
+            column.editable = Some(edit);
+            column.edit_expr = Some(expr);
+        }
+    }
     let mut filters = vec![
         filter("name", "Название", STD_GROUP, FieldType::Text, "ci.name"),
         filter("code", "Код", STD_GROUP, FieldType::Text, "ci.code"),
@@ -256,7 +320,7 @@ pub async fn collection_spec(db: &PgPool, user: &Access, c: &Collection) -> sqlx
             })
             .collect();
         let (mut cs, mut fs) = (vec![], vec![]);
-        field_entries(f, &opts, &mut cs, &mut fs);
+        field_entries(f, &opts, can_edit, &mut cs, &mut fs);
         columns.extend(cs);
         for mut f in fs {
             f.group = FIELDS_GROUP.into();
@@ -333,10 +397,7 @@ pub async fn collection_spec(db: &PgPool, user: &Access, c: &Collection) -> sqlx
         }
     }
 
-    let parent_ok = c
-        .product_collection_id
-        .is_none_or(|p| user.collection_level(p) >= Level::Write);
-    let bulk_actions = if user.collection_level(id) >= Level::Write && parent_ok {
+    let bulk_actions = if can_edit {
         bulk_actions(db, id).await?
     } else {
         Vec::new()
@@ -359,6 +420,7 @@ pub async fn collection_spec(db: &PgPool, user: &Access, c: &Collection) -> sqlx
         can_share: user.collection_level(id) >= Level::Write || user.can(COLLECTIONS_MANAGE),
         muted_expr: Some("NOT ci.active".into()),
         label_expr: "ci.name".into(),
+        version_expr: can_edit.then(|| "ci.updated_at".to_string()),
         bulk_actions,
     })
 }
@@ -756,5 +818,45 @@ mod tests {
             parse(&spec, "f.color=in:1").dropped,
             vec!["color".to_string()]
         );
+    }
+
+    #[sqlx::test]
+    async fn editable_columns_by_kind(db: PgPool) {
+        let f = content_fixture(&db).await;
+        let c = f.collection_id;
+        field(&db, c, "s", "string", false).await;
+        field(&db, c, "s_multi", "string", true).await;
+        field(&db, c, "t", "text", false).await;
+        field(&db, c, "n", "number", false).await;
+        field(&db, c, "b", "boolean", false).await;
+        field(&db, c, "d", "date", false).await;
+        let spec = spec_of(&db, c).await;
+        let edit = |code: &str| spec.column(code).and_then(|c| c.editable.as_ref());
+        assert!(spec.version_expr.is_some());
+        for code in [
+            "name", "code", "sort", "active", "s", "n", "b", "d", "color",
+        ] {
+            assert!(edit(code).is_some(), "{code}");
+        }
+        assert!(edit("s_multi").is_none());
+        assert!(edit("t").is_none());
+        assert!(edit("link").is_none());
+        assert!(edit("id").is_none());
+        assert!(edit("published_at").is_none());
+        assert_eq!(edit("color").unwrap().options[0].label, "Красный");
+        assert!(spec.column("color").unwrap().edit_expr.is_some());
+        assert!(spec.column("t").unwrap().edit_expr.is_none());
+    }
+
+    #[sqlx::test]
+    async fn edit_and_version_cells(db: PgPool) {
+        let f = content_fixture(&db).await;
+        let spec = spec_of(&db, f.collection_id).await;
+        let st = parse(&spec, "cols=name,color&sort=id").state;
+        let (rows, _) = fetch(&db, &spec, &st, &Scope::All).await.unwrap();
+        let row = rows.iter().find(|r| r.id == f.item_id).unwrap();
+        assert_eq!(row.cells["name__edit"], json!("Первая новость"));
+        assert_eq!(row.cells["color__edit"], json!(f.option_id.to_string()));
+        assert!(row.cells["__version"].as_str().is_some());
     }
 }

@@ -31,6 +31,8 @@ fn col(code: &str, title: &str, expr: &str, ty: FieldType) -> Column {
         required: false,
         join: None,
         currency_expr: None,
+        editable: None,
+        edit_expr: None,
     }
 }
 
@@ -192,6 +194,7 @@ pub(crate) async fn build_spec(db: &PgPool, can_share: bool) -> sqlx::Result<Lis
         can_share,
         muted_expr: Some("o.canceled".into()),
         label_expr: "COALESCE(o.account_number, o.id::text)".into(),
+        version_expr: None,
         bulk_actions,
     })
 }
