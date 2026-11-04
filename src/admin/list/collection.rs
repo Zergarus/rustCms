@@ -382,11 +382,11 @@ async fn bulk_actions(db: &PgPool, collection_id: i64) -> sqlx::Result<Vec<BulkA
         notify: false,
     };
     Ok(vec![
-        action("activate", "Включить", BulkParam::None, Confirm::Never),
-        action("deactivate", "Отключить", BulkParam::None, Confirm::Never),
+        action("activate", "Активировать", BulkParam::None, Confirm::Never),
+        action("deactivate", "Деактивировать", BulkParam::None, Confirm::Never),
         action(
             "move",
-            "Перенести в раздел",
+            "Перенести в раздел…",
             BulkParam::Choice(options),
             Confirm::Always,
         ),

@@ -162,11 +162,11 @@ pub(crate) async fn build_spec(db: &PgPool, can_share: bool) -> sqlx::Result<Lis
         vec![
             action(
                 "status",
-                "Сменить статус",
+                "Сменить статус…",
                 BulkParam::Choice(statuses.clone()),
                 true,
             ),
-            action("paid", "Отметить оплаченными", BulkParam::None, true),
+            action("paid", "Отметить оплаченным", BulkParam::None, true),
             action("unpaid", "Снять оплату", BulkParam::None, false),
             action("cancel", "Отменить", BulkParam::Reason, true),
             action("uncancel", "Снять отмену", BulkParam::None, false),
