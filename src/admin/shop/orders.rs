@@ -20,6 +20,7 @@ use crate::{
     admin::{
         flash::{self, FlashKind},
         list::{
+            bulk::mails_to_send,
             orders::{BUYER_SQL, orders_spec},
             render::{ListPage, run_list},
             sql::Scope,
@@ -1039,12 +1040,46 @@ pub async fn save_shipment(
 
 /// Массовое действие над заказом (реестр действий — `list::bulk`).
 pub(crate) async fn bulk_run(
-    _ctx: &crate::admin::list::bulk::BulkCtx<'_>,
-    _action: &str,
-    _param: &str,
-    _id: i64,
+    ctx: &crate::admin::list::bulk::BulkCtx<'_>,
+    action: &str,
+    param: &str,
+    id: i64,
 ) -> Result<(), String> {
-    Err("неизвестное действие".into())
+    match apply(ctx, action, param, id).await {
+        Ok(event) => {
+            if let Some(event) = mails_to_send(event, ctx.notify) {
+                send(ctx.state, &event, id);
+            }
+            Ok(())
+        }
+        Err(ActionError::Rejected(text)) => Err(text),
+        Err(ActionError::NotFound) => Err("заказ не найден".into()),
+        Err(ActionError::Db(e)) => {
+            tracing::error!("массовое действие над заказом {id}: {e}");
+            Err("ошибка сервера".into())
+        }
+    }
+}
+
+/// Изменение заказа без отправки письма: какое письмо положено, решает вызывающий.
+pub(crate) async fn apply(
+    ctx: &crate::admin::list::bulk::BulkCtx<'_>,
+    action: &str,
+    param: &str,
+    id: i64,
+) -> Result<Option<MailEvent>, ActionError> {
+    if require_orders(ctx.user).is_err() {
+        return Err(ActionError::Rejected("нет права".into()));
+    }
+    let db = &ctx.state.db;
+    match action {
+        "status" => actions::change_status(db, id, param, Some(ctx.user.user.id), "").await,
+        "paid" => actions::change_paid(db, id, true).await,
+        "unpaid" => actions::change_paid(db, id, false).await,
+        "cancel" => actions::change_canceled(db, id, true, param).await,
+        "uncancel" => actions::change_canceled(db, id, false, "").await,
+        _ => Err(ActionError::Rejected("неизвестное действие".into())),
+    }
 }
 
 #[cfg(test)]
@@ -1055,6 +1090,188 @@ mod tests {
     use crate::test_support::{
         admin_cookie, get_raw, order_fixture, permitted_cookie, place_order, test_state,
     };
+
+    use crate::admin::list::bulk::BulkCtx;
+    use crate::sale::actions::{ActionError, MailEvent};
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use tower::ServiceExt;
+
+    async fn bulk_post(app: &axum::Router, cookie: &str, body: &str) -> (StatusCode, String) {
+        let req = Request::post("/admin/lists/bulk")
+            .header(header::COOKIE, cookie)
+            .header(header::HOST, "127.0.0.1:3000")
+            .header(header::ORIGIN, "http://127.0.0.1:3000")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header("hx-request", "true")
+            .header("hx-target", "list-body")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn orders_form(action: &str, param: &str, ids: &[i64]) -> String {
+        let ids: Vec<String> = ids.iter().map(i64::to_string).collect();
+        format!(
+            "list_key=orders&path=%2Fadmin%2Fshop%2Forders&query=&action={action}&param={param}&scope=ids&ids={}",
+            ids.join(",")
+        )
+    }
+
+    async fn add_statuses(db: &sqlx::PgPool) {
+        sqlx::query(
+            "INSERT INTO order_statuses (code, name, notify) VALUES ('P', 'Оплачен', TRUE)",
+        )
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    async fn bulk_status_change(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        add_statuses(&db).await;
+        let ids = [
+            place_order(&db, &f, None).await,
+            place_order(&db, &f, None).await,
+            place_order(&db, &f, None).await,
+        ];
+        let cookie = admin_cookie(&db).await;
+        let app = crate::app(test_state(db.clone()));
+        let (st, body) = bulk_post(&app, &cookie, &orders_form("status", "P", &ids)).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(!body.contains("bulk-summary"), "{body}");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE status = 'P'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 3);
+        // статус не из справочника — 422
+        let (st, _) = bulk_post(&app, &cookie, &orders_form("status", "nope", &ids)).await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[sqlx::test]
+    async fn bulk_cancel_skips_shipped(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let shipped = place_order(&db, &f, None).await;
+        let a = place_order(&db, &f, None).await;
+        let b = place_order(&db, &f, None).await;
+        sqlx::query("UPDATE shipments SET deducted = TRUE WHERE order_id = $1")
+            .bind(shipped)
+            .execute(&db)
+            .await
+            .unwrap();
+        let cookie = admin_cookie(&db).await;
+        let app = crate::app(test_state(db.clone()));
+        let (st, body) = bulk_post(
+            &app,
+            &cookie,
+            &orders_form("cancel", "ошибка", &[shipped, a, b]),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(body.contains("bulk-summary"), "{body}");
+        let canceled: Vec<(i64, bool)> =
+            sqlx::query_as("SELECT id, canceled FROM orders ORDER BY id")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        for (id, c) in canceled {
+            assert_eq!(c, id != shipped, "заказ {id}");
+        }
+    }
+
+    #[sqlx::test]
+    async fn bulk_repeat_is_harmless(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let state = test_state(db.clone());
+        let user = crate::access::Access::load(
+            &db,
+            crate::auth::create_user(&db, "boss", "password123".into(), true)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let ctx = BulkCtx {
+            state: &state,
+            user: &user,
+            notify: true,
+            collection_id: None,
+        };
+        assert!(matches!(
+            super::apply(&ctx, "cancel", "", id).await,
+            Ok(Some(MailEvent::Canceled))
+        ));
+        assert!(matches!(
+            super::apply(&ctx, "cancel", "", id).await,
+            Ok(None)
+        ));
+        assert!(matches!(
+            super::apply(&ctx, "paid", "", id).await,
+            Ok(Some(MailEvent::Paid))
+        ));
+        assert!(matches!(super::apply(&ctx, "paid", "", id).await, Ok(None)));
+        assert_eq!(super::bulk_run(&ctx, "paid", "", id).await, Ok(()));
+        assert_eq!(super::bulk_run(&ctx, "cancel", "", id).await, Ok(()));
+        assert_eq!(super::bulk_run(&ctx, "uncancel", "", id).await, Ok(()));
+        assert_eq!(super::bulk_run(&ctx, "unpaid", "", id).await, Ok(()));
+        // без «Уведомить» письма нет даже при изменении
+        let quiet = BulkCtx {
+            notify: false,
+            ..ctx
+        };
+        assert!(matches!(
+            super::apply(&quiet, "paid", "", id).await,
+            Ok(Some(MailEvent::Paid))
+        ));
+        assert!(crate::admin::list::bulk::mails_to_send(Some(MailEvent::Paid), false).is_none());
+        assert!(matches!(
+            super::apply(&quiet, "bogus", "", id).await,
+            Err(ActionError::Rejected(_))
+        ));
+        assert_eq!(
+            super::bulk_run(&quiet, "paid", "", id + 999).await,
+            Err("заказ не найден".to_string())
+        );
+    }
+
+    #[sqlx::test]
+    async fn bulk_reason_too_long_422(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let cookie = admin_cookie(&db).await;
+        let app = crate::app(test_state(db.clone()));
+        let long = "а".repeat(501);
+        let (st, _) = bulk_post(&app, &cookie, &orders_form("cancel", &long, &[id])).await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+        let ok = "а".repeat(500);
+        let (st, _) = bulk_post(&app, &cookie, &orders_form("cancel", &ok, &[id])).await;
+        assert_eq!(st, StatusCode::OK);
+    }
+
+    #[sqlx::test]
+    async fn bulk_orders_without_permission_403(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        let id = place_order(&db, &f, None).await;
+        let cookie = permitted_cookie(&db, "nobody", &[]).await;
+        let app = crate::app(test_state(db.clone()));
+        let (st, _) = bulk_post(&app, &cookie, &orders_form("paid", "", &[id])).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let paid: bool = sqlx::query_scalar("SELECT paid FROM orders WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert!(!paid);
+    }
 
     #[sqlx::test]
     async fn card_shows_1c_block_and_xml_export(db: sqlx::PgPool) {

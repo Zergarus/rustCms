@@ -29,7 +29,6 @@ const REASON_MAX: usize = 500;
 pub enum BulkParam {
     None,
     Choice(Vec<EnumOption>),
-    #[allow(dead_code)] // собирают действия заказов
     Reason,
 }
 
@@ -157,7 +156,6 @@ pub fn summarize(
 }
 
 /// Письмо уходит, только если оно есть и пользователь не снял «Уведомить».
-#[allow(dead_code)] // использует действие заказов
 pub fn mails_to_send<T>(event: Option<T>, notify: bool) -> Option<T> {
     event.filter(|_| notify)
 }
@@ -165,7 +163,6 @@ pub fn mails_to_send<T>(event: Option<T>, notify: bool) -> Option<T> {
 pub struct BulkCtx<'a> {
     pub state: &'a AppState,
     pub user: &'a Access,
-    #[allow(dead_code)] // читают действия заказов
     pub notify: bool,
     /// Коллекция для списков записей.
     pub collection_id: Option<i64>,

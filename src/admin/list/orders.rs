@@ -3,6 +3,7 @@
 use sqlx::PgPool;
 
 use super::{
+    bulk::{BulkAction, BulkParam, Confirm},
     spec::{Column, EnumOption, FieldType, Filter, FilterSql, ListSpec},
     state::Sort,
 };
@@ -111,7 +112,13 @@ pub(crate) async fn build_spec(db: &PgPool, can_share: bool) -> sqlx::Result<Lis
             "o.account_number",
             vec![],
         ),
-        filter("status", "Статус", FieldType::Enum, "o.status", statuses),
+        filter(
+            "status",
+            "Статус",
+            FieldType::Enum,
+            "o.status",
+            statuses.clone(),
+        ),
         filter(
             "created_at",
             "Дата",
@@ -144,6 +151,29 @@ pub(crate) async fn build_spec(db: &PgPool, can_share: bool) -> sqlx::Result<Lis
             deliveries,
         ),
     ];
+    let bulk_actions = if can_share {
+        let action = |code, label: &str, param, notify| BulkAction {
+            code,
+            label: label.into(),
+            param,
+            confirm: Confirm::Always,
+            notify,
+        };
+        vec![
+            action(
+                "status",
+                "Сменить статус",
+                BulkParam::Choice(statuses.clone()),
+                true,
+            ),
+            action("paid", "Отметить оплаченными", BulkParam::None, true),
+            action("unpaid", "Снять оплату", BulkParam::None, false),
+            action("cancel", "Отменить", BulkParam::Reason, true),
+            action("uncancel", "Снять отмену", BulkParam::None, false),
+        ]
+    } else {
+        Vec::new()
+    };
     Ok(ListSpec {
         key: "orders".into(),
         id_expr: "o.id".into(),
@@ -162,7 +192,7 @@ pub(crate) async fn build_spec(db: &PgPool, can_share: bool) -> sqlx::Result<Lis
         can_share,
         muted_expr: Some("o.canceled".into()),
         label_expr: "COALESCE(o.account_number, o.id::text)".into(),
-        bulk_actions: Vec::new(),
+        bulk_actions,
     })
 }
 
