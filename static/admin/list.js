@@ -524,6 +524,17 @@
   function submitBulk(a, param, notify, btn, snap) {
     var s = bulkSpec(), body = $('#list-body');
     if (!s || !body || busy || !window.htmx || !snap || !snap.n) return;
+    // выбор мог остаться от другого списка: действуем только над строками, отмеченными в этом
+    var ids = snap.ids;
+    if (!snap.all) {
+      var checked = {};
+      bulkRows().forEach(function (r) { var b = rowBox(r); if (b && b.checked) checked[r.dataset.id] = true; });
+      ids = snap.ids.filter(function (id) { return checked[id]; });
+      if (!ids.length) { clearSel(); return; }
+    } else if ((body.dataset.query || '') !== snap.query) {
+      clearSel();
+      return;
+    }
     busy = true;
     var label = btn && btn.textContent;
     if (btn) { btn.disabled = true; btn.textContent = 'Выполняется…'; }
@@ -531,7 +542,9 @@
     var values = {
       list_key: s.list_key, path: s.path, query: snap.query,
       action: a.code, param: param, notify: notify ? '1' : '0',
-      scope: snap.all ? 'filter' : 'ids', ids: snap.all ? '' : snap.ids.join(',')
+      scope: snap.all ? 'filter' : 'ids', ids: snap.all ? '' : ids.join(','),
+      // число, показанное в подтверждении: сервер откажет, если по фильтру теперь другое
+      expect: snap.all ? String(snap.n) : ''
     };
     function done() {
       // список заменён — выбор уже сброшен; иначе (4xx, сбой сети) выбор и подтверждение остаются
@@ -707,6 +720,37 @@
       }
     }
   }, true);
+
+  // Выбор живёт только на странице списка: подмена всего body (переход hx-boost, возврат по истории) его сбрасывает
+  function resetBulk() {
+    busy = false;
+    if (pop && pop.classList.contains('pop-bulk')) closePop();
+    sel.clear();
+    lastId = null;
+    allFilter = false;
+    barSig = '';
+    var bar = $('#bulk-bar');
+    if (bar) bar.remove();
+    document.body.classList.remove('has-bulk-bar');
+    syncBulk();
+  }
+  document.addEventListener('htmx:afterSwap', function (e) {
+    var t = e.detail && e.detail.target;
+    if (!t || t.id === 'list-body' || !t.querySelector) return;
+    if (t === document.body || t === document.documentElement || t.querySelector('#list-body')) resetBulk();
+  });
+  document.addEventListener('htmx:historyRestore', resetBulk);
+  // снимок страницы для истории без панели и отметок строк
+  document.addEventListener('htmx:beforeHistorySave', function () {
+    if (!sel.size) return;
+    var bar = $('#bulk-bar');
+    if (bar) bar.remove();
+    document.body.classList.remove('has-bulk-bar');
+    if (pop && pop.classList.contains('pop-bulk')) closePop();
+    bulkRows().forEach(function (r) { r.classList.remove('sel'); });
+    // страница осталась на месте (снимок без перехода) — вернуть панель
+    setTimeout(syncBulk, 0);
+  });
 
   // после замены списка текущая строка и открытые «⋯» сбрасываются сами (новый DOM); поповер закрываем
   document.addEventListener('htmx:afterSwap', function (e) {
