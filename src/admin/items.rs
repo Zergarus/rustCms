@@ -1681,11 +1681,14 @@ pub(crate) async fn bulk_run(
         .map_err(db_err)?
         .filter(|i| i.collection_id == collection_id)
         .ok_or_else(|| NOT_FOUND.to_string())?;
-    let collection = repo::get_collection(db, collection_id)
+    let collection = ctx
+        .collection
+        .get_or_try_init(|| repo::get_collection(db, collection_id))
         .await
         .map_err(db_err)?
+        .as_ref()
         .ok_or_else(|| NOT_FOUND.to_string())?;
-    require_parent_write(ctx.user, &collection).map_err(|_| "нет права".to_string())?;
+    require_parent_write(ctx.user, collection).map_err(|_| "нет права".to_string())?;
     match action {
         "activate" | "deactivate" => {
             ctx.user
@@ -3137,6 +3140,7 @@ mod list_tests {
             user: &user,
             notify: false,
             collection_id: Some(c),
+            collection: Default::default(),
         };
         let r = super::bulk_run(&ctx, "move", &foreign.to_string(), fx.item_id).await;
         assert_eq!(r, Err("раздел не найден".to_string()));
@@ -3217,6 +3221,7 @@ mod list_tests {
             user: &user,
             notify: false,
             collection_id: Some(offers),
+            collection: Default::default(),
         };
         for (action, param) in [("deactivate", ""), ("move", "none"), ("delete", "")] {
             assert_eq!(
@@ -3306,6 +3311,7 @@ mod list_tests {
             user: &user,
             notify: false,
             collection_id: Some(c),
+            collection: Default::default(),
         };
         // запись удалена между выбором и выполнением
         sqlx::query("DELETE FROM collection_items WHERE id = $1")

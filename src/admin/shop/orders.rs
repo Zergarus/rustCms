@@ -1205,6 +1205,7 @@ mod tests {
             user: &user,
             notify: true,
             collection_id: None,
+            collection: Default::default(),
         };
         assert!(matches!(
             super::apply(&ctx, "cancel", "", id).await,

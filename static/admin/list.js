@@ -470,7 +470,8 @@
 
   // Охват и число в момент показа подтверждения: действие не может отличаться от прочитанного в нём
   function snapshot() {
-    return { all: allFilter, ids: Array.from(sel), n: selCount() };
+    var body = $('#list-body');
+    return { all: allFilter, ids: Array.from(sel), n: selCount(), query: body ? body.dataset.query || '' : '' };
   }
 
   function confirmPop(a, anchor) {
@@ -528,7 +529,7 @@
     if (btn) { btn.disabled = true; btn.textContent = 'Выполняется…'; }
     drawBar();
     var values = {
-      list_key: s.list_key, path: s.path, query: body.dataset.query || '',
+      list_key: s.list_key, path: s.path, query: snap.query,
       action: a.code, param: param, notify: notify ? '1' : '0',
       scope: snap.all ? 'filter' : 'ids', ids: snap.all ? '' : snap.ids.join(',')
     };

@@ -164,6 +164,8 @@ pub struct BulkCtx<'a> {
     pub notify: bool,
     /// Коллекция для списков записей.
     pub collection_id: Option<i64>,
+    /// Коллекция загружается один раз на запрос.
+    pub collection: tokio::sync::OnceCell<Option<crate::collection::Collection>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -305,6 +307,7 @@ pub async fn handle(
         user: &user,
         notify,
         collection_id,
+        collection: Default::default(),
     };
     let mut outcome = Outcome::default();
     for &id in &ids {
