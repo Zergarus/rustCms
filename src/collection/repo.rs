@@ -567,6 +567,29 @@ pub async fn delete_item(db: &PgPool, id: i64) -> sqlx::Result<Option<i64>> {
     Ok(row.map(|(collection_id,)| collection_id))
 }
 
+/// Включает/отключает запись. `false` — записи нет.
+pub async fn set_item_active(db: &PgPool, id: i64, active: bool) -> sqlx::Result<bool> {
+    let r =
+        sqlx::query("UPDATE collection_items SET active = $2, updated_at = now() WHERE id = $1")
+            .bind(id)
+            .bind(active)
+            .execute(db)
+            .await?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// Переносит запись в раздел (`None` — без раздела). `false` — записи нет.
+pub async fn move_item(db: &PgPool, id: i64, section_id: Option<i64>) -> sqlx::Result<bool> {
+    let r = sqlx::query(
+        "UPDATE collection_items SET section_id = $2, updated_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(section_id)
+    .execute(db)
+    .await?;
+    Ok(r.rows_affected() > 0)
+}
+
 // ---------------------------------------------------------------------------
 // Торговые предложения
 // ---------------------------------------------------------------------------

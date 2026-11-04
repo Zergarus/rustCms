@@ -1,6 +1,6 @@
 //! Массовые действия над записями списка: описание, отбор id движком, выполнение, итог.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::{Extension, Form, body::Body, extract::State, http::StatusCode, response::Response};
 use serde::Serialize;
@@ -26,15 +26,14 @@ const LINKS_MAX: usize = 20;
 const REASON_MAX: usize = 500;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // `Choice` собирают действия записей и заказов
 pub enum BulkParam {
     None,
     Choice(Vec<EnumOption>),
+    #[allow(dead_code)] // собирают действия заказов
     Reason,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // значения выбирают действия записей и заказов
 pub enum Confirm {
     Never,
     Always,
@@ -42,11 +41,12 @@ pub enum Confirm {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // `label`/`confirm` читает панель интерфейса
 pub struct BulkAction {
     pub code: &'static str,
+    #[allow(dead_code)] // читает панель интерфейса
     pub label: String,
     pub param: BulkParam,
+    #[allow(dead_code)] // читает панель интерфейса
     pub confirm: Confirm,
     pub notify: bool,
 }
@@ -79,11 +79,12 @@ impl BulkForm {
         };
         let mut ids: Vec<i64> = Vec::new();
         if scope == BulkScope::Ids {
+            let mut seen: HashSet<i64> = HashSet::new();
             for id in get("ids")
                 .split(|c: char| c == ',' || c.is_whitespace())
                 .filter_map(|s| s.parse::<i64>().ok())
             {
-                if !ids.contains(&id) {
+                if seen.insert(id) {
                     ids.push(id);
                 }
             }
@@ -161,10 +162,10 @@ pub fn mails_to_send<T>(event: Option<T>, notify: bool) -> Option<T> {
     event.filter(|_| notify)
 }
 
-#[allow(dead_code)] // поля читают действия записей и заказов
 pub struct BulkCtx<'a> {
     pub state: &'a AppState,
     pub user: &'a Access,
+    #[allow(dead_code)] // читают действия заказов
     pub notify: bool,
     /// Коллекция для списков записей.
     pub collection_id: Option<i64>,
@@ -254,6 +255,12 @@ pub async fn handle(
     Form(form): Form<HashMap<String, String>>,
 ) -> AppResult<Response> {
     let f = BulkForm::parse(&form);
+    if f.ids.len() as i64 > BULK_LIMIT {
+        return Ok(reject(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            SelectError::TooMany.message(),
+        ));
+    }
     #[cfg_attr(not(test), allow(unused_mut))]
     let mut spec = views::spec_for_key(&state.db, &user, &f.list_key).await?;
     #[cfg(test)]
@@ -421,6 +428,16 @@ mod tests {
     }
 
     #[test]
+    fn form_parse_keeps_first_seen_order_with_many_ids() {
+        let ids: Vec<String> = (0..50_000).map(|i| (i % 20_000).to_string()).collect();
+        let mut m: HashMap<String, String> = HashMap::new();
+        m.insert("ids".into(), ids.join(","));
+        let f = BulkForm::parse(&m);
+        assert_eq!(f.ids.len(), 20_000);
+        assert_eq!(&f.ids[..3], &[0, 1, 2]);
+    }
+
+    #[test]
     fn mails_to_send_respects_notify() {
         assert_eq!(mails_to_send(Some(1), true), Some(1));
         assert_eq!(mails_to_send(Some(1), false), None);
@@ -495,22 +512,46 @@ mod tests {
         ids
     }
 
+    /// Заказы, пока среди id не наберётся по `min` нечётных и чётных (результат `noop` зависит от чётности).
+    async fn orders_mixed(db: &PgPool, min: usize) -> Vec<i64> {
+        let f = order_fixture(db).await;
+        sqlx::query("INSERT INTO order_statuses (code, name) VALUES ('F', 'Выполнен')")
+            .execute(db)
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        while odd(&ids).len() < min || ids.len() - odd(&ids).len() < min {
+            ids.push(place_order(db, &f, None).await);
+        }
+        ids.sort_unstable();
+        ids
+    }
+
     fn odd(ids: &[i64]) -> Vec<i64> {
         ids.iter().copied().filter(|i| i % 2 != 0).collect()
     }
 
     #[sqlx::test]
     async fn ids_intersect_with_filter(db: PgPool) {
-        let ids = orders(&db, 4).await;
-        sqlx::query("UPDATE orders SET status = 'F' WHERE id = $1")
-            .bind(ids[1])
+        let all = orders_mixed(&db, 2).await;
+        let odds = odd(&all);
+        let evens: Vec<i64> = all.iter().copied().filter(|i| i % 2 == 0).collect();
+        // видимы (статус N): два нечётных и один чётный; остальные скрыты фильтром
+        let visible = [odds[0], odds[1], evens[0]];
+        let hidden: Vec<i64> = all
+            .iter()
+            .copied()
+            .filter(|i| !visible.contains(i))
+            .collect();
+        sqlx::query("UPDATE orders SET status = 'F' WHERE id = ANY($1)")
+            .bind(&hidden)
             .execute(&db)
             .await
             .unwrap();
         let app = app(&db);
         let cookie = admin_cookie(&db).await;
-        // скрытый фильтром и несуществующий id отбрасываются: обработаны 3 заказа
-        let mut sent = ids.clone();
+        // скрытые фильтром и несуществующий id отбрасываются: обработаны 3 заказа, 2 нечётных не выполнены
+        let mut sent = all.clone();
         sent.push(999_999);
         let (st, _, body) = post(
             &app,
@@ -518,15 +559,10 @@ mod tests {
             &orders_form("noop", "ids", &sent, "f.status=in%3AN"),
         )
         .await;
-        let visible = [ids[0], ids[2], ids[3]];
-        let failed = odd(&visible);
         assert_eq!(st, StatusCode::OK, "{body}");
-        if failed.is_empty() {
-            assert!(!body.contains("bulk-summary"), "{body}");
-        } else {
-            let want = format!("Выполнено {} из 3", 3 - failed.len());
-            assert!(body.contains(&want), "{want}: {body}");
-            assert!(!body.contains(&format!("data-id=\"{}\"", ids[1])), "{body}");
+        assert!(body.contains("Выполнено 1 из 3"), "{body}");
+        for id in &hidden {
+            assert!(!body.contains(&format!("data-id=\"{id}\"")), "{body}");
         }
     }
 
@@ -539,7 +575,7 @@ mod tests {
         .fetch_one(&db)
         .await
         .unwrap();
-        let mk = |coll: i64, section: Option<i64>, code: &'static str| {
+        let mk = |coll: i64, section: Option<i64>, code: String| {
             let db = db.clone();
             async move {
                 sqlx::query_scalar::<_, i64>(
@@ -554,9 +590,16 @@ mod tests {
                 .unwrap()
             }
         };
-        let in_sec = mk(c.collection_id, Some(c.section_id), "in-sec").await;
-        let loose = mk(c.collection_id, None, "loose").await;
-        let foreign = mk(other, None, "foreign").await;
+        // сдвигаем счётчик id так, чтобы запись раздела получила нечётный id
+        for n in 0.. {
+            if mk(other, None, format!("filler{n}")).await % 2 == 0 {
+                break;
+            }
+        }
+        let in_sec = mk(c.collection_id, Some(c.section_id), "in-sec".into()).await;
+        assert!(in_sec % 2 != 0);
+        let loose = mk(c.collection_id, None, "loose".into()).await;
+        let foreign = mk(other, None, "foreign".into()).await;
         let app = app(&db);
         let cookie = admin_cookie(&db).await;
         let key = format!("collection:{}", c.collection_id);
@@ -592,12 +635,11 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{body}");
         let bad = [c.item_id, in_sec].iter().filter(|i| *i % 2 != 0).count();
-        if bad > 0 {
-            assert!(
-                body.contains(&format!("Выполнено {} из 2", 2 - bad)),
-                "{body}"
-            );
-        }
+        assert!(bad > 0);
+        assert!(
+            body.contains(&format!("Выполнено {} из 2", 2 - bad)),
+            "{body}"
+        );
     }
 
     fn series_spec(n: i64) -> ListSpec {
@@ -643,6 +685,16 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn too_many_ids_422(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let many: Vec<i64> = (1..=BULK_LIMIT + 1).collect();
+        let (st, h, _) = post(&app, &cookie, &orders_form("noop", "ids", &many, "")).await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(h["hx-trigger"].to_str().unwrap().contains("toast"));
+    }
+
+    #[sqlx::test]
     async fn empty_selection_422(db: PgPool) {
         orders(&db, 2).await;
         let app = app(&db);
@@ -654,9 +706,11 @@ mod tests {
 
     #[sqlx::test]
     async fn edited_view_uses_query(db: PgPool) {
-        let ids = orders(&db, 4).await;
-        sqlx::query("UPDATE orders SET status = 'F' WHERE id = ANY($1)")
-            .bind(&ids[..3])
+        let ids = orders_mixed(&db, 1).await;
+        // в статусе N остаётся один заказ с нечётным id, остальные — F
+        let kept = odd(&ids)[0];
+        sqlx::query("UPDATE orders SET status = 'F' WHERE id <> $1")
+            .bind(kept)
             .execute(&db)
             .await
             .unwrap();
@@ -687,11 +741,7 @@ mod tests {
         let q = format!("view={view}&edited=1&f.status=in%3AN");
         let (st, _, body) = post(&app, &cookie, &orders_form("noop", "filter", &[], &q)).await;
         assert_eq!(st, StatusCode::OK, "{body}");
-        if ids[3] % 2 != 0 {
-            assert!(body.contains("Выполнено 0 из 1"), "{body}");
-        } else {
-            assert!(!body.contains("bulk-summary"), "{body}");
-        }
+        assert!(body.contains("Выполнено 0 из 1"), "{body}");
     }
 
     #[sqlx::test]
@@ -729,7 +779,7 @@ mod tests {
 
     #[sqlx::test]
     async fn summary_block_rendered(db: PgPool) {
-        let ids = orders(&db, 4).await;
+        let ids = orders_mixed(&db, 2).await;
         let app = app(&db);
         let cookie = admin_cookie(&db).await;
         let (st, h, body) = post(&app, &cookie, &orders_form("noop", "ids", &ids, "")).await;
@@ -738,7 +788,11 @@ mod tests {
         let failed = odd(&ids);
         assert!(!failed.is_empty());
         assert!(
-            body.contains(&format!("Выполнено {} из 4", 4 - failed.len())),
+            body.contains(&format!(
+                "Выполнено {} из {}",
+                ids.len() - failed.len(),
+                ids.len()
+            )),
             "{body}"
         );
         assert!(body.contains("нечётный"), "{body}");
@@ -755,11 +809,10 @@ mod tests {
         );
         // всё выполнено — только уведомление
         let even: Vec<i64> = ids.iter().copied().filter(|i| i % 2 == 0).collect();
-        if !even.is_empty() {
-            let (st, h, body) = post(&app, &cookie, &orders_form("noop", "ids", &even, "")).await;
-            assert_eq!(st, StatusCode::OK);
-            assert!(!body.contains("bulk-summary"), "{body}");
-            assert!(h.contains_key("hx-trigger"));
-        }
+        assert!(!even.is_empty());
+        let (st, h, body) = post(&app, &cookie, &orders_form("noop", "ids", &even, "")).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(!body.contains("bulk-summary"), "{body}");
+        assert!(h.contains_key("hx-trigger"));
     }
 }

@@ -3,13 +3,16 @@
 use sqlx::PgPool;
 
 use super::{
+    bulk::{BulkAction, BulkParam, Confirm},
     spec::{Column, EnumOption, FieldType, Filter, FilterSql, Join, ListSpec},
     sql::Scope,
     state::{SectionSel, Sort},
 };
 use crate::{
     access::{Access, COLLECTIONS_MANAGE, Level},
-    collection::{Collection, Field, Section, is_valid_code, repo, section_subtree_ids},
+    collection::{
+        Collection, Field, Section, is_valid_code, repo, section_subtree_ids, section_tree,
+    },
 };
 
 const STD_GROUP: &str = "Запись";
@@ -330,6 +333,11 @@ pub async fn collection_spec(db: &PgPool, user: &Access, c: &Collection) -> sqlx
         }
     }
 
+    let bulk_actions = if user.collection_level(id) >= Level::Write {
+        bulk_actions(db, id).await?
+    } else {
+        Vec::new()
+    };
     Ok(ListSpec {
         key: format!("collection:{id}"),
         id_expr: "ci.id".into(),
@@ -348,8 +356,39 @@ pub async fn collection_spec(db: &PgPool, user: &Access, c: &Collection) -> sqlx
         can_share: user.collection_level(id) >= Level::Write || user.can(COLLECTIONS_MANAGE),
         muted_expr: Some("NOT ci.active".into()),
         label_expr: "ci.name".into(),
-        bulk_actions: Vec::new(),
+        bulk_actions,
     })
+}
+
+/// Массовые действия записей: включить, отключить, перенести, удалить.
+async fn bulk_actions(db: &PgPool, collection_id: i64) -> sqlx::Result<Vec<BulkAction>> {
+    let mut options = vec![EnumOption {
+        value: "none".into(),
+        label: "Без раздела".into(),
+    }];
+    let sections = section_tree(repo::list_sections(db, collection_id).await?);
+    options.extend(sections.into_iter().map(|s| EnumOption {
+        value: s.id.to_string(),
+        label: format!("{}{}", "— ".repeat(s.depth_level.max(0) as usize), s.name),
+    }));
+    let action = |code, label: &str, param, confirm| BulkAction {
+        code,
+        label: label.into(),
+        param,
+        confirm,
+        notify: false,
+    };
+    Ok(vec![
+        action("activate", "Включить", BulkParam::None, Confirm::Never),
+        action("deactivate", "Отключить", BulkParam::None, Confirm::Never),
+        action(
+            "move",
+            "Перенести в раздел",
+            BulkParam::Choice(options),
+            Confirm::Always,
+        ),
+        action("delete", "Удалить", BulkParam::None, Confirm::Danger),
+    ])
 }
 
 /// Область по выбранному разделу. Раздел с потомками, либо только он (`only`);

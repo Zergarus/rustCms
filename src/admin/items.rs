@@ -1634,26 +1634,32 @@ pub async fn set_active(
     peek_panel(&state, &user, item, Some((text, FlashKind::Ok)), true).await
 }
 
+/// Удаление записи с проверкой прав; возвращает удалённую запись (для редиректа).
+pub async fn delete_one(
+    db: &sqlx::PgPool,
+    user: &Access,
+    id: i64,
+) -> AppResult<crate::collection::Item> {
+    let element = repo::get_item(db, id).await?.ok_or(AppError::NotFound)?;
+    user.require_collection(element.collection_id, Level::Write)?;
+    if let Some(collection) = repo::get_collection(db, element.collection_id).await? {
+        require_parent_write(user, &collection)?;
+    }
+    repo::delete_item(db, id).await?.ok_or(AppError::NotFound)?;
+    Ok(element)
+}
+
 pub async fn delete(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
 ) -> AppResult<Redirect> {
-    let element = repo::get_item(&state.db, id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    user.require_collection(element.collection_id, Level::Write)?;
-    if let Some(collection) = repo::get_collection(&state.db, element.collection_id).await? {
-        require_parent_write(&user, &collection)?;
-    }
-    let collection_id = repo::delete_item(&state.db, id)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    let element = delete_one(&state.db, &user, id).await?;
     if let Some(product) = element.product_id {
         // Предложение: назад на вкладку предложений товара
         return Ok(Redirect::to(&format!("/admin/items/{product}?tab=offers")));
     }
-    let mut url = format!("/admin/collections/{collection_id}/items");
+    let mut url = format!("/admin/collections/{}/items", element.collection_id);
     if let Some(section) = element.section_id {
         url.push_str(&format!("?section={section}"));
     }
@@ -1662,12 +1668,66 @@ pub async fn delete(
 
 /// Массовое действие над записью коллекции (реестр действий — `list::bulk`).
 pub(crate) async fn bulk_run(
-    _ctx: &crate::admin::list::bulk::BulkCtx<'_>,
-    _action: &str,
-    _param: &str,
-    _id: i64,
+    ctx: &crate::admin::list::bulk::BulkCtx<'_>,
+    action: &str,
+    param: &str,
+    id: i64,
 ) -> Result<(), String> {
-    Err("неизвестное действие".into())
+    const NOT_FOUND: &str = "запись не найдена";
+    let db = &ctx.state.db;
+    let db_err = |e: sqlx::Error| {
+        tracing::error!("массовое действие над записью {id}: {e}");
+        "ошибка сервера".to_string()
+    };
+    let collection_id = ctx.collection_id.ok_or_else(|| NOT_FOUND.to_string())?;
+    let item = repo::get_item(db, id)
+        .await
+        .map_err(db_err)?
+        .filter(|i| i.collection_id == collection_id)
+        .ok_or_else(|| NOT_FOUND.to_string())?;
+    match action {
+        "activate" | "deactivate" => {
+            ctx.user
+                .require_collection(collection_id, Level::Write)
+                .map_err(|_| "нет права".to_string())?;
+            repo::set_item_active(db, item.id, action == "activate")
+                .await
+                .map_err(db_err)?
+                .then_some(())
+                .ok_or_else(|| NOT_FOUND.to_string())
+        }
+        "move" => {
+            ctx.user
+                .require_collection(collection_id, Level::Write)
+                .map_err(|_| "нет права".to_string())?;
+            let section = if param == "none" {
+                None
+            } else {
+                let sid: i64 = param.parse().map_err(|_| "раздел не найден".to_string())?;
+                let found = repo::get_section(db, sid).await.map_err(db_err)?;
+                if found.is_none_or(|s| s.collection_id != collection_id) {
+                    return Err("раздел не найден".into());
+                }
+                Some(sid)
+            };
+            repo::move_item(db, item.id, section)
+                .await
+                .map_err(db_err)?
+                .then_some(())
+                .ok_or_else(|| NOT_FOUND.to_string())
+        }
+        "delete" => match delete_one(db, ctx.user, item.id).await {
+            Ok(_) => Ok(()),
+            Err(AppError::NotFound) => Err(NOT_FOUND.into()),
+            Err(AppError::Forbidden) => Err("нет права".into()),
+            Err(AppError::Db(e)) => Err(db_err(e)),
+            Err(e) => {
+                tracing::error!("массовое удаление записи {id}: {e}");
+                Err("ошибка сервера".into())
+            }
+        },
+        _ => Err("неизвестное действие".into()),
+    }
 }
 
 #[cfg(test)]
@@ -2894,7 +2954,7 @@ mod list_tests {
     use sqlx::PgPool;
 
     use crate::test_support::{
-        admin_cookie, content_fixture, get_raw, htmx_get, test_state, user_cookie,
+        admin_cookie, content_fixture, get_raw, htmx_get, permitted_cookie, test_state, user_cookie,
     };
 
     async fn section(db: &PgPool, col: i64, parent: Option<i64>, name: &str) -> i64 {
@@ -2921,6 +2981,296 @@ mod list_tests {
         .fetch_one(db)
         .await
         .unwrap()
+    }
+
+    // ---------- массовые действия ----------
+
+    use crate::admin::list::bulk::BulkCtx;
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, header},
+    };
+    use tower::ServiceExt;
+
+    async fn bulk_post(app: &axum::Router, cookie: &str, body: &str) -> (StatusCode, String) {
+        let req = Request::post("/admin/lists/bulk")
+            .header(header::COOKIE, cookie)
+            .header(header::HOST, "127.0.0.1:3000")
+            .header(header::ORIGIN, "http://127.0.0.1:3000")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header("hx-request", "true")
+            .header("hx-target", "list-body")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn bulk_form(col: i64, action: &str, param: &str, scope: &str, ids: &[i64]) -> String {
+        let ids: Vec<String> = ids.iter().map(i64::to_string).collect();
+        format!(
+            "list_key=collection%3A{col}&path=%2Fadmin%2Fcollections%2F{col}%2Fitems&query=&action={action}&param={param}&scope={scope}&ids={}",
+            ids.join(",")
+        )
+    }
+
+    async fn state_of(db: &PgPool, id: i64) -> (bool, Option<i64>) {
+        sqlx::query_as("SELECT active, section_id FROM collection_items WHERE id = $1")
+            .bind(id)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn bulk_activate_deactivate_move(db: PgPool) {
+        let fx = content_fixture(&db).await;
+        let c = fx.collection_id;
+        let sec = section(&db, c, None, "Второй").await;
+        let a = item(&db, c, None, "A").await;
+        let b = item(&db, c, None, "B").await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        // по ids, дважды (идемпотентно)
+        for _ in 0..2 {
+            let (st, body) = bulk_post(
+                &app,
+                &cookie,
+                &bulk_form(c, "deactivate", "", "ids", &[a, b]),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            assert!(!body.contains("bulk-summary"), "{body}");
+            assert!(!state_of(&db, a).await.0 && !state_of(&db, b).await.0);
+        }
+        assert!(state_of(&db, fx.item_id).await.0);
+        for _ in 0..2 {
+            let (st, body) =
+                bulk_post(&app, &cookie, &bulk_form(c, "activate", "", "ids", &[a])).await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            assert!(state_of(&db, a).await.0 && !state_of(&db, b).await.0);
+        }
+        let (st, body) = bulk_post(
+            &app,
+            &cookie,
+            &bulk_form(c, "move", &sec.to_string(), "ids", &[a, b]),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(state_of(&db, a).await.1, Some(sec));
+        assert_eq!(state_of(&db, b).await.1, Some(sec));
+        let (st, _) = bulk_post(&app, &cookie, &bulk_form(c, "move", "none", "ids", &[a])).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(state_of(&db, a).await.1, None);
+        // по фильтру: все записи коллекции
+        let (st, body) = bulk_post(
+            &app,
+            &cookie,
+            &bulk_form(c, "deactivate", "", "filter", &[]),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        for id in [a, b, fx.item_id] {
+            assert!(!state_of(&db, id).await.0);
+        }
+        let (st, _) = bulk_post(&app, &cookie, &bulk_form(c, "activate", "", "filter", &[])).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(state_of(&db, fx.item_id).await.0);
+    }
+
+    #[sqlx::test]
+    async fn bulk_move_foreign_section_422(db: PgPool) {
+        let fx = content_fixture(&db).await;
+        let other: i64 = sqlx::query_scalar(
+            "INSERT INTO collections (code, name) VALUES ('o', 'O') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let foreign = section(&db, other, None, "Чужой").await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let c = fx.collection_id;
+        for param in [foreign.to_string(), "999999".into(), "abc".into()] {
+            let (st, _) = bulk_post(
+                &app,
+                &cookie,
+                &bulk_form(c, "move", &param, "ids", &[fx.item_id]),
+            )
+            .await;
+            assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{param}");
+        }
+        assert_eq!(state_of(&db, fx.item_id).await.1, Some(fx.section_id));
+        // повторная проверка в самом действии
+        let state = test_state(db.clone());
+        let (_, user) = user_access(&db, &state).await;
+        let ctx = BulkCtx {
+            state: &state,
+            user: &user,
+            notify: false,
+            collection_id: Some(c),
+        };
+        let r = super::bulk_run(&ctx, "move", &foreign.to_string(), fx.item_id).await;
+        assert_eq!(r, Err("раздел не найден".to_string()));
+    }
+
+    async fn user_access(
+        db: &PgPool,
+        _state: &crate::state::AppState,
+    ) -> (i64, crate::access::Access) {
+        let user = crate::auth::create_user(db, "bulk-admin", "password123".into(), true)
+            .await
+            .unwrap();
+        (
+            user.id,
+            crate::access::Access::load(db, user).await.unwrap(),
+        )
+    }
+
+    #[sqlx::test]
+    async fn bulk_delete_like_single(db: PgPool) {
+        let fx = content_fixture(&db).await;
+        let c = fx.collection_id;
+        let offers: i64 = sqlx::query_scalar(
+            "INSERT INTO collections (code, name, product_collection_id) VALUES ('offs', 'Предложения', $1) RETURNING id",
+        )
+        .bind(c)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let mut products = Vec::new();
+        for name in ["P1", "P2"] {
+            let p = item(&db, c, None, name).await;
+            for n in 0..2 {
+                let o = item(&db, offers, None, &format!("{name}-o{n}")).await;
+                sqlx::query("UPDATE collection_items SET product_id = $2 WHERE id = $1")
+                    .bind(o)
+                    .bind(p)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+            }
+            products.push(p);
+        }
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (st, _, _) = crate::test_support::post_form_raw(
+            &app,
+            &format!("/admin/items/{}/delete", products[0]),
+            &cookie,
+            "",
+        )
+        .await;
+        assert!(st.is_redirection(), "{st}");
+        let (st, body) = bulk_post(
+            &app,
+            &cookie,
+            &bulk_form(c, "delete", "", "ids", &[products[1]]),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let left = |name: &'static str| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM collection_items WHERE name LIKE $1",
+                )
+                .bind(format!("{name}%"))
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!((left("P1").await, left("P2").await), (0, 0));
+        assert!(state_of(&db, fx.item_id).await.0);
+    }
+
+    #[sqlx::test]
+    async fn bulk_delete_missing_record(db: PgPool) {
+        let fx = content_fixture(&db).await;
+        let c = fx.collection_id;
+        let a = item(&db, c, None, "A").await;
+        let b = item(&db, c, None, "B").await;
+        let other: i64 = sqlx::query_scalar(
+            "INSERT INTO collections (code, name) VALUES ('o', 'O') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let foreign = item(&db, other, None, "F").await;
+        let state = test_state(db.clone());
+        let (_, user) = user_access(&db, &state).await;
+        let ctx = BulkCtx {
+            state: &state,
+            user: &user,
+            notify: false,
+            collection_id: Some(c),
+        };
+        // запись удалена между выбором и выполнением
+        sqlx::query("DELETE FROM collection_items WHERE id = $1")
+            .bind(a)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            super::bulk_run(&ctx, "delete", "", a).await,
+            Err("запись не найдена".to_string())
+        );
+        // перемещена в другую коллекцию
+        assert_eq!(
+            super::bulk_run(&ctx, "delete", "", foreign).await,
+            Err("запись не найдена".to_string())
+        );
+        assert_eq!(super::bulk_run(&ctx, "delete", "", b).await, Ok(()));
+        let left: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM collection_items WHERE id = ANY($1)")
+                .bind([a, b, foreign])
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(left, 1);
+        assert_eq!(
+            super::bulk_run(&ctx, "nope", "", fx.item_id).await,
+            Err("неизвестное действие".to_string())
+        );
+    }
+
+    #[sqlx::test]
+    async fn bulk_readonly_user(db: PgPool) {
+        let fx = content_fixture(&db).await;
+        let c = fx.collection_id;
+        let cookie = permitted_cookie(&db, "reader", &[]).await;
+        let uid: i64 = sqlx::query_scalar("SELECT id FROM users WHERE login = 'reader'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+            .bind(uid)
+            .bind(fx.group_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE collection_access SET level = 'read' WHERE group_id = $1")
+            .bind(fx.group_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let (s, _, b) = get_raw(&app, &format!("/admin/collections/{c}/items"), &cookie).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(!String::from_utf8_lossy(&b).contains("data-bulk"));
+        for action in ["delete", "deactivate"] {
+            let (st, _) = bulk_post(
+                &app,
+                &cookie,
+                &bulk_form(c, action, "", "ids", &[fx.item_id]),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{action}");
+        }
+        assert!(state_of(&db, fx.item_id).await.0);
     }
 
     #[sqlx::test]
