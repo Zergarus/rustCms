@@ -333,7 +333,10 @@ pub async fn collection_spec(db: &PgPool, user: &Access, c: &Collection) -> sqlx
         }
     }
 
-    let bulk_actions = if user.collection_level(id) >= Level::Write {
+    let parent_ok = c
+        .product_collection_id
+        .is_none_or(|p| user.collection_level(p) >= Level::Write);
+    let bulk_actions = if user.collection_level(id) >= Level::Write && parent_ok {
         bulk_actions(db, id).await?
     } else {
         Vec::new()

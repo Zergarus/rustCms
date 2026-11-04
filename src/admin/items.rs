@@ -1611,11 +1611,7 @@ pub async fn set_active(
 ) -> AppResult<Response> {
     peek_item(&state, &user, id, Level::Write).await?;
     let active = form.active == "on";
-    sqlx::query("UPDATE collection_items SET active = $2, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(active)
-        .execute(&state.db)
-        .await?;
+    repo::set_item_active(&state.db, id, active).await?;
     if !is_peek(&headers) {
         return Ok(flash::redirect(
             &format!("/admin/items/{id}"),
@@ -1685,6 +1681,11 @@ pub(crate) async fn bulk_run(
         .map_err(db_err)?
         .filter(|i| i.collection_id == collection_id)
         .ok_or_else(|| NOT_FOUND.to_string())?;
+    let collection = repo::get_collection(db, collection_id)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| NOT_FOUND.to_string())?;
+    require_parent_write(ctx.user, &collection).map_err(|_| "нет права".to_string())?;
     match action {
         "activate" | "deactivate" => {
             ctx.user
@@ -2953,6 +2954,7 @@ mod list_tests {
     use axum::http::StatusCode;
     use sqlx::PgPool;
 
+    use crate::collection::repo;
     use crate::test_support::{
         admin_cookie, content_fixture, get_raw, htmx_get, permitted_cookie, test_state, user_cookie,
     };
@@ -3052,18 +3054,42 @@ mod list_tests {
             assert_eq!(st, StatusCode::OK, "{body}");
             assert!(state_of(&db, a).await.0 && !state_of(&db, b).await.0);
         }
+        let stamp = |id: i64| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+                    "SELECT updated_at FROM collection_items WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            }
+        };
+        let before = stamp(a).await;
         let (st, body) = bulk_post(
             &app,
             &cookie,
             &bulk_form(c, "move", &sec.to_string(), "ids", &[a, b]),
         )
         .await;
+        assert!(stamp(a).await > before);
         assert_eq!(st, StatusCode::OK, "{body}");
         assert_eq!(state_of(&db, a).await.1, Some(sec));
         assert_eq!(state_of(&db, b).await.1, Some(sec));
         let (st, _) = bulk_post(&app, &cookie, &bulk_form(c, "move", "none", "ids", &[a])).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(state_of(&db, a).await.1, None);
+        let (st, body) = bulk_post(
+            &app,
+            &cookie,
+            &bulk_form(c, "move", &sec.to_string(), "filter", &[]),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        for id in [a, b, fx.item_id] {
+            assert_eq!(state_of(&db, id).await.1, Some(sec));
+        }
         // по фильтру: все записи коллекции
         let (st, body) = bulk_post(
             &app,
@@ -3127,6 +3153,79 @@ mod list_tests {
             user.id,
             crate::access::Access::load(db, user).await.unwrap(),
         )
+    }
+
+    #[sqlx::test]
+    async fn bulk_offers_need_parent_write(db: PgPool) {
+        let fx = content_fixture(&db).await;
+        let offers: i64 = sqlx::query_scalar(
+            "INSERT INTO collections (code, name, product_collection_id) VALUES ('offs', 'Предложения', $1) RETURNING id",
+        )
+        .bind(fx.collection_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let o = item(&db, offers, None, "O1").await;
+        let cookie = permitted_cookie(&db, "offerer", &[]).await;
+        let gid: i64 = sqlx::query_scalar("SELECT id FROM groups WHERE code = 'g_offerer'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        for (coll, level) in [(offers, "write"), (fx.collection_id, "read")] {
+            sqlx::query("INSERT INTO collection_access (collection_id, group_id, level) VALUES ($1, $2, $3)")
+                .bind(coll)
+                .bind(gid)
+                .bind(level)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let app = crate::app(test_state(db.clone()));
+        let coll = repo::get_collection(&db, offers).await.unwrap().unwrap();
+        let user = {
+            let uid: i64 = sqlx::query_scalar("SELECT id FROM users WHERE login = 'offerer'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            let u: crate::auth::User = sqlx::query_as(
+                "SELECT id, login, email, is_admin, active FROM users WHERE id = $1",
+            )
+            .bind(uid)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            crate::access::Access::load(&db, u).await.unwrap()
+        };
+        let spec = crate::admin::list::collection::collection_spec(&db, &user, &coll)
+            .await
+            .unwrap();
+        assert!(spec.bulk_actions.is_empty());
+        for (action, param) in [("deactivate", ""), ("move", "none"), ("delete", "")] {
+            let (st, _) = bulk_post(
+                &app,
+                &cookie,
+                &bulk_form(offers, action, param, "ids", &[o]),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{action}");
+        }
+        assert_eq!(state_of(&db, o).await, (true, None));
+        // и в самом действии
+        let state = test_state(db.clone());
+        let ctx = BulkCtx {
+            state: &state,
+            user: &user,
+            notify: false,
+            collection_id: Some(offers),
+        };
+        for (action, param) in [("deactivate", ""), ("move", "none"), ("delete", "")] {
+            assert_eq!(
+                super::bulk_run(&ctx, action, param, o).await,
+                Err("нет права".to_string()),
+                "{action}"
+            );
+        }
+        assert_eq!(state_of(&db, o).await, (true, None));
     }
 
     #[sqlx::test]
