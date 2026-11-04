@@ -609,6 +609,403 @@
     syncBulk();
   }
 
+  /* ---------- Правка ячейки ---------- */
+
+  var editing = null;    // {cell, editor, original, title, minWidth, kind, phase: edit|saving}
+  var pending = null;    // {next} — ждём замену #list-body после сохранения
+  var failStatus = 0;    // код 4xx текущего сохранения (ставится в htmx:responseError)
+  var viewKeep = null;   // {y, cur} — позиция и текущая строка до замены списка
+  var firstTimer = null; // отложенный переход по ссылке первой ячейки
+  var firstAnchor = null;
+  var firstRowId = null;
+  var firstPass = false; // программный клик после задержки не перехватывается
+  var boolAt = 0;        // защита от двойного переключения «да/нет» двойным кликом
+
+  function editDef(code) {
+    var s = spec();
+    return s && s.edit_columns ? s.edit_columns.filter(function (c) { return c.code === code; })[0] : null;
+  }
+
+  function colTitle(code) {
+    var s = spec();
+    var c = s && s.columns.filter(function (x) { return x.code === code; })[0];
+    return (c && c.title) || code;
+  }
+
+  // Правку не начинаем при открытом поповере/диалоге и во время массового действия.
+  function canEdit() {
+    return listPage() && !busy && !pop && !$('dialog[open]');
+  }
+
+  function inListBody(el) {
+    var b = $('#list-body');
+    return !!b && !!el && b.contains(el);
+  }
+
+  function cancelFirst() {
+    if (firstTimer) { window.clearTimeout(firstTimer); firstTimer = null; }
+    firstAnchor = null;
+    firstRowId = null;
+  }
+
+  /* Позиция страницы и текущая строка: после замены #list-body их нужно вернуть */
+
+  function captureView() {
+    var row = curRow();
+    return { y: window.scrollY || 0, cur: row ? row.dataset.id : null };
+  }
+
+  function restoreView(keep) {
+    if (keep.cur) {
+      var row = rowsOf().filter(function (r) { return r.dataset.id === keep.cur; })[0];
+      if (row) row.classList.add('cur');
+    }
+    window.scrollTo(0, keep.y);
+  }
+
+  /* ---------- Редактор ---------- */
+
+  function setFieldState(td, field, saving) {
+    td.classList.toggle('saving', saving);
+    if (saving) td.setAttribute('aria-busy', 'true'); else td.removeAttribute('aria-busy');
+    if (!field) return;
+    field.disabled = saving;
+    var wrap = field.parentNode;
+    var spin = wrap ? $('.cell-spin', wrap) : null;
+    if (saving && !spin && wrap) {
+      spin = document.createElement('span');
+      spin.className = 'cell-spin';
+      spin.setAttribute('aria-hidden', 'true');
+      wrap.appendChild(spin);
+    } else if (!saving && spin) {
+      spin.remove();
+    }
+  }
+
+  function openEditor(td) {
+    if (!td || !canEdit() || editing || td.classList.contains('cell-editing')) return;
+    if (!inListBody(td)) return;
+    var def = editDef(td.dataset.edit);
+    if (!def) return;
+    var kind = td.dataset.kind || def.kind || 'text';
+    if (kind === 'bool') return;
+    cancelFirst();
+    var raw = td.dataset.value || '';
+    var wrap = document.createElement('div');
+    wrap.className = 'cell-edit';
+    var field;
+    if (kind === 'list') {
+      field = document.createElement('select');
+      var found = false;
+      (def.options || []).forEach(function (o) {
+        var opt = document.createElement('option');
+        opt.value = o.value;
+        opt.textContent = o.label;
+        field.appendChild(opt);
+        if (o.value === raw) found = true;
+      });
+      // вариант удалён из справочника, но значение ещё в записи — показываем как есть
+      if (raw !== '' && !found) {
+        var own = document.createElement('option');
+        own.value = raw;
+        own.textContent = raw;
+        field.insertBefore(own, field.firstChild);
+        found = true;
+      }
+      if (!def.required) {
+        var empty = document.createElement('option');
+        empty.value = '';
+        empty.textContent = '—';
+        field.insertBefore(empty, field.firstChild);
+        if (raw === '') found = true;
+      }
+      // обязательный список без значения: не подставляем первый вариант молча
+      if (!found) {
+        var ph = document.createElement('option');
+        ph.value = '';
+        ph.textContent = 'Выберите…';
+        ph.disabled = true;
+        field.insertBefore(ph, field.firstChild);
+      }
+      field.value = found ? raw : '';
+    } else {
+      field = document.createElement('input');
+      // число — текстом: сервер принимает и запятую («1,5»)
+      field.type = kind === 'date' ? 'date' : 'text';
+      if (kind === 'number') field.inputMode = 'decimal';
+      field.value = raw;
+    }
+    field.className = 'cell-input';
+    field.setAttribute('aria-label', colTitle(td.dataset.edit));
+    field.setAttribute('autocomplete', 'off');
+    wrap.appendChild(field);
+
+    editing = {
+      cell: td,
+      editor: field,
+      // исходные узлы: при отмене возвращаем их же, не теряя обработчики htmx на ссылке
+      original: Array.prototype.slice.call(td.childNodes),
+      title: td.getAttribute('title'),
+      minWidth: td.style.minWidth,
+      kind: kind,
+      phase: 'edit'
+    };
+    // колонка не должна прыгать при замене текста редактором
+    td.style.minWidth = td.offsetWidth + 'px';
+    td.removeAttribute('title');
+    td.textContent = '';
+    td.appendChild(wrap);
+    td.classList.add('cell-editing');
+    field.addEventListener('keydown', onEditorKey);
+    field.addEventListener('blur', function () { onEditorBlur(field); });
+    field.focus();
+    if (kind === 'text' || kind === 'number') {
+      try { field.select(); } catch (e) { /* выделение не критично */ }
+    }
+  }
+
+  function onEditorBlur(field) {
+    // blur мог прийти от уже убранного из DOM поля, когда открыт следующий редактор
+    if (!editing || editing.phase !== 'edit' || editing.editor !== field) return;
+    saveEdit(null);
+  }
+
+  function nextCell(td, back) {
+    var cells = $$('#list-body td[data-edit]').filter(function (c) { return c.dataset.kind !== 'bool'; });
+    var i = cells.indexOf(td);
+    if (i < 0) return null;
+    var next = cells[i + (back ? -1 : 1)];
+    if (!next) return null;
+    var row = next.closest('tr');
+    return row ? { id: row.dataset.id, code: next.dataset.edit } : null;
+  }
+
+  function onEditorKey(e) {
+    if (!editing || editing.phase !== 'edit' || e.isComposing || e.keyCode === 229) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      saveEdit(null);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeEdit();
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      e.stopPropagation();
+      saveEdit(nextCell(editing.cell, e.shiftKey));
+    }
+  }
+
+  function closeEdit() {
+    if (!editing) return;
+    var td = editing.cell;
+    var original = editing.original;
+    var title = editing.title;
+    var minWidth = editing.minWidth;
+    // сначала снимаем состояние: blur от удаления поля не должен запустить сохранение
+    editing = null;
+    pending = null;
+    failStatus = 0;
+    if (!td || !td.isConnected) return;
+    if (original) {
+      while (td.firstChild) td.removeChild(td.firstChild);
+      original.forEach(function (n) { td.appendChild(n); });
+    }
+    td.classList.remove('cell-editing', 'saving');
+    td.removeAttribute('aria-busy');
+    td.style.minWidth = minWidth;
+    if (title !== null) td.setAttribute('title', title);
+  }
+
+  // 4xx без замены списка: 422 — правим дальше, 409/404 — список устарел
+  function resumeEdit() {
+    pending = null;
+    viewKeep = null;
+    failStatus = 0;
+    if (!editing) return;
+    var td = editing.cell;
+    if (!td || !td.isConnected) { editing = null; return; }
+    if (!editing.editor) { // «да/нет»: редактора нет, просто снимаем блокировку
+      setFieldState(td, null, false);
+      editing = null;
+      return;
+    }
+    editing.phase = 'edit';
+    setFieldState(td, editing.editor, false);
+    editing.editor.focus();
+  }
+
+  function saveEdit(next) {
+    if (!editing || editing.phase !== 'edit') return;
+    var td = editing.cell;
+    if (!td || !td.isConnected || !inListBody(td)) { closeEdit(); return; }
+    var value = editing.editor ? String(editing.editor.value) : '';
+    if (value === (td.dataset.value || '')) {
+      // значение не изменилось — запрос не нужен, но Tab всё равно ведёт дальше
+      closeEdit();
+      if (next) openCell(next);
+      return;
+    }
+    editing.phase = 'saving';
+    viewKeep = captureView();
+    pending = { next: next || null };
+    failStatus = 0;
+    setFieldState(td, editing.editor, true);
+    postCell(td, value);
+  }
+
+  function postCell(td, value) {
+    var s = spec(), body = $('#list-body'), row = td.closest('tr');
+    if (!s || !body || !row || !window.htmx) { resumeEdit(); return; }
+    var values = {
+      list_key: s.list_key || '',
+      path: s.path || '',
+      // текущий запрос — из тела списка: он обновляется при каждой замене
+      query: body.dataset.query || '',
+      row: row.dataset.id || '',
+      column: td.dataset.edit || '',
+      value: value,
+      version: row.dataset.version || ''
+    };
+    window.htmx.ajax('POST', '/admin/lists/cell', {
+      target: '#list-body', swap: 'outerHTML', values: values
+    }).then(afterSave, afterSaveFail);
+  }
+
+  function afterSave() {
+    // замену уже разобрал htmx:afterSwap
+    if (!pending) return;
+    var status = failStatus;
+    pending = null;
+    failStatus = 0;
+    if (status === 409 || status === 404) {
+      closeEdit();
+      if (window.htmx) window.htmx.trigger(document.body, 'list:refresh');
+    } else {
+      resumeEdit();
+    }
+  }
+
+  function afterSaveFail() {
+    pending = null;
+    resumeEdit();
+  }
+
+  function openCell(ref) {
+    if (!ref) return;
+    var row = rowsOf().filter(function (r) { return r.dataset.id === ref.id; })[0];
+    if (!row) return;
+    var td = $$('td[data-edit]', row).filter(function (c) { return c.dataset.edit === ref.code; })[0];
+    if (!td) return;
+    openEditor(td);
+    if (td.scrollIntoView) td.scrollIntoView({ block: 'nearest' });
+  }
+
+  function toggleBool(td) {
+    var def = editDef(td.dataset.edit);
+    if (!def || def.kind !== 'bool') return;
+    var raw = (td.dataset.value || '').toLowerCase();
+    var value = raw === 'true' ? 'false' : 'true';
+    editing = { cell: td, editor: null, original: null, title: null, minWidth: '', kind: 'bool', phase: 'saving' };
+    viewKeep = captureView();
+    pending = { next: null };
+    failStatus = 0;
+    setFieldState(td, null, true);
+    postCell(td, value);
+  }
+
+  /* ---------- События правки ---------- */
+
+  // Ошибку запроса запоминаем до промиса: htmx.ajax резолвится и на 4xx
+  document.addEventListener('htmx:responseError', function (e) {
+    if (!editing || editing.phase !== 'saving') return;
+    var d = e.detail || {};
+    var path = (d.pathInfo && d.pathInfo.requestPath) || (d.xhr && d.xhr.responseURL) || '';
+    if (String(path).indexOf('/admin/lists/cell') < 0) return;
+    failStatus = (d.xhr && d.xhr.status) || 0;
+  });
+
+  // После замены списка возвращаем позицию и текущую строку; Tab открывает следующую ячейку
+  document.addEventListener('htmx:afterSwap', function (e) {
+    var t = e.detail && e.detail.target;
+    if (!t || t.id !== 'list-body' || t.isConnected) return;
+    if (viewKeep) { restoreView(viewKeep); viewKeep = null; }
+    var p = pending;
+    pending = null;
+    failStatus = 0;
+    // ячейка редактора осталась в старом DOM — состояние не должно зависать
+    if (editing && (!editing.cell || !editing.cell.isConnected)) editing = null;
+    if (!p) return;
+    editing = null;
+    if (p.next) openCell(p.next);
+  });
+
+  // Любая замена могла унести ячейку редактора (переход по истории, замена body): состояние не зависает
+  document.addEventListener('htmx:afterSwap', function () {
+    if (editing && (!editing.cell || !editing.cell.isConnected)) editing = null;
+  });
+
+  // Перехват в capture: ссылку htmx-boost обрабатывает на самом <a>, до всплытия
+  document.addEventListener('click', function (e) {
+    var t = e.target;
+    if (!t || !t.closest || !t.isConnected) return;
+    var td = t.closest('td[data-edit]');
+    if (!td || !inListBody(td)) return;
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+
+    if (td.dataset.kind === 'bool') {
+      if (e.detail === 0) return; // клавиатура/программный клик: работает обычная ссылка
+      e.preventDefault();
+      e.stopPropagation();
+      closeDetails(td);
+      if (!canEdit()) { if (pop) closePop(); return; }
+      if (editing || Date.now() - boolAt < 300) return; // второй клик двойного — не переключаем
+      boolAt = Date.now();
+      toggleBool(td);
+      return;
+    }
+
+    var a = t.closest('td[data-first] a[href]');
+    if (!a) return;
+    if (firstPass || e.detail === 0) return; // программный клик после задержки идёт как обычно
+    e.preventDefault();
+    e.stopPropagation();
+    if (pop) closePop();
+    closeDetails(a);
+    // второй клик двойного отменяет переход: дальше сработает dblclick и откроет редактор
+    if (firstTimer && firstAnchor === a) { cancelFirst(); return; }
+    // одиночный клик открывает карточку с задержкой: двойной успевает отменить переход
+    cancelFirst();
+    var row = a.closest('tr');
+    firstAnchor = a;
+    firstRowId = row ? row.dataset.id : null;
+    firstTimer = window.setTimeout(function () {
+      firstTimer = null;
+      var anchor = firstAnchor;
+      var rowId = firstRowId;
+      firstAnchor = null;
+      firstRowId = null;
+      // список мог перерисоваться (например, уход фокуса сохранил ячейку) — ищем ссылку той же строки
+      if (!anchor || !anchor.isConnected) {
+        if (!rowId) return;
+        var fresh = rowsOf().filter(function (r) { return r.dataset.id === rowId; })[0];
+        anchor = fresh ? $('td[data-first] a[href]', fresh) : null;
+      }
+      if (!anchor || !anchor.isConnected) return;
+      firstPass = true;
+      try { anchor.click(); } finally { firstPass = false; }
+    }, 200);
+  }, true);
+
+  document.addEventListener('dblclick', function (e) {
+    var td = e.target.closest && e.target.closest('td[data-edit]');
+    if (!td || !inListBody(td) || td.dataset.kind === 'bool') return;
+    if (!canEdit() || editing) return;
+    e.preventDefault();
+    openEditor(td);
+  });
+
   /* ---------- Клавиши ---------- */
 
   function typing(el) {
