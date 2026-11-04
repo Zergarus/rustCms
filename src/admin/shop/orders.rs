@@ -30,7 +30,12 @@ use crate::{
     },
     error::{AppError, AppResult},
     files,
-    sale::{self, OrderProperty, mail, repo, validate::validate_properties},
+    sale::{
+        self, OrderProperty,
+        actions::{self, ActionError, MailEvent},
+        mail, repo,
+        validate::validate_properties,
+    },
     state::AppState,
     stock::{self, StockError},
 };
@@ -567,8 +572,9 @@ pub async fn xml1c(
         .into_response())
 }
 
-fn send(state: &AppState, event: String, order_id: i64) {
+fn send(state: &AppState, event: &MailEvent, order_id: i64) {
     let state = state.clone();
+    let event = event.event_name();
     tokio::spawn(async move { mail::notify(&state, &event, order_id).await });
 }
 
@@ -658,38 +664,26 @@ pub async fn set_status(
 ) -> AppResult<Response> {
     require_orders(&user)?;
     let from_peek = is_peek(&headers);
-    let notify: Option<bool> =
-        sqlx::query_scalar("SELECT notify FROM order_statuses WHERE code = $1")
-            .bind(&form.status)
-            .fetch_optional(&state.db)
-            .await?;
-    let Some(notify) = notify else {
-        if from_peek {
-            let toast = Some(("Нет такого статуса", FlashKind::Error));
-            return peek_panel(&state, id, toast, false).await;
-        }
-        return card(
-            &state,
-            user,
-            id,
-            "",
-            Some("Нет такого статуса".into()),
-            None,
-            false,
-        )
-        .await;
-    };
-    if repo::set_status(
+    match actions::change_status(
         &state.db,
         id,
         &form.status,
         Some(user.user.id),
         form.comment.trim(),
     )
-    .await?
-        && notify
+    .await
     {
-        send(&state, format!("SALE_STATUS_CHANGED_{}", form.status), id);
+        Ok(Some(event)) => send(&state, &event, id),
+        // Заказа нет — как раньше: без письма
+        Ok(None) | Err(ActionError::NotFound) => {}
+        Err(ActionError::Rejected(message)) => {
+            if from_peek {
+                let toast = Some((message.as_str(), FlashKind::Error));
+                return peek_panel(&state, id, toast, false).await;
+            }
+            return card(&state, user, id, "", Some(message), None, false).await;
+        }
+        Err(ActionError::Db(e)) => return Err(e.into()),
     }
     if from_peek {
         return peek_panel(&state, id, Some(("Статус изменён", FlashKind::Ok)), true).await;
@@ -714,8 +708,13 @@ pub async fn set_paid(
 ) -> AppResult<Response> {
     require_orders(&user)?;
     let paid = form.value == "Y";
-    if repo::set_paid(&state.db, id, paid).await? && paid {
-        send(&state, "SALE_ORDER_PAID".into(), id);
+    match actions::change_paid(&state.db, id, paid).await {
+        Ok(Some(event)) => send(&state, &event, id),
+        Ok(None) | Err(ActionError::NotFound) => {}
+        Err(ActionError::Rejected(message)) => {
+            return card(&state, user, id, "", Some(message), None, false).await;
+        }
+        Err(ActionError::Db(e)) => return Err(e.into()),
     }
     if is_peek(&headers) {
         return peek_panel(&state, id, Some(("Оплата сохранена", FlashKind::Ok)), true).await;
@@ -731,18 +730,19 @@ pub async fn set_canceled(
 ) -> AppResult<Response> {
     require_orders(&user)?;
     let cancel = form.value == "Y";
-    match repo::set_canceled(&state.db, id, cancel, form.reason.trim()).await {
-        Ok(changed) => {
-            if changed && cancel {
-                send(&state, "SALE_ORDER_CANCEL".into(), id);
+    match actions::change_canceled(&state.db, id, cancel, form.reason.trim()).await {
+        Ok(event) => {
+            if let Some(event) = event {
+                send(&state, &event, id);
             }
             Ok(back(id, "", "Отмена заказа сохранена"))
         }
+        Err(ActionError::NotFound) => Ok(back(id, "", "Отмена заказа сохранена")),
         // Отгруженный заказ не отменяется — ошибка в карточке
-        Err(StockError::Rejected(messages)) => {
-            card(&state, user, id, "", Some(messages.join("; ")), None, false).await
+        Err(ActionError::Rejected(message)) => {
+            card(&state, user, id, "", Some(message), None, false).await
         }
-        Err(StockError::Db(e)) => Err(e.into()),
+        Err(ActionError::Db(e)) => Err(e.into()),
     }
 }
 

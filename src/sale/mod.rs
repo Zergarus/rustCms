@@ -1,6 +1,7 @@
 //! Оформление и заказы (аналог модуля `sale`): справочники оформления, форма,
 //! проверки, остатки, заказ, письма.
 
+pub mod actions;
 pub mod form;
 pub mod guest;
 pub mod history;
