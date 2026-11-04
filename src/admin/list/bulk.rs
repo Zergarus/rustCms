@@ -42,10 +42,8 @@ pub enum Confirm {
 #[derive(Debug, Clone)]
 pub struct BulkAction {
     pub code: &'static str,
-    #[allow(dead_code)] // читает панель интерфейса
     pub label: String,
     pub param: BulkParam,
-    #[allow(dead_code)] // читает панель интерфейса
     pub confirm: Confirm,
     pub notify: bool,
 }
@@ -223,7 +221,11 @@ pub fn check_param(action: &BulkAction, raw: &str) -> Result<String, &'static st
 }
 
 fn reject(status: StatusCode, text: &str) -> Response {
-    views::with_toast(Response::new(Body::empty()), status, text, FlashKind::Error)
+    let mut resp = views::with_toast(Response::new(Body::empty()), status, text, FlashKind::Error);
+    // 403 htmx подставляет в страницу (см. htmx-config в base.html): список остаётся как был
+    resp.headers_mut()
+        .insert("HX-Reswap", axum::http::HeaderValue::from_static("none"));
+    resp
 }
 
 /// Реестр выполнения по списку.
@@ -746,8 +748,12 @@ mod tests {
         let ids = orders(&db, 2).await;
         let app = app(&db);
         let cookie = admin_cookie(&db).await;
-        let (st, _, _) = post(&app, &cookie, &orders_form("nope", "ids", &ids, "")).await;
+        let (st, hx_headers, _) = post(&app, &cookie, &orders_form("nope", "ids", &ids, "")).await;
         assert_eq!(st, StatusCode::FORBIDDEN);
+        assert_eq!(
+            hx_headers.get("HX-Reswap").map(|v| v.to_str().unwrap()),
+            Some("none")
+        );
         let bad_path = orders_form("noop", "ids", &ids, "").replace("shop%2Forders", "users");
         let (st, _, _) = post(&app, &cookie, &bad_path).await;
         assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);

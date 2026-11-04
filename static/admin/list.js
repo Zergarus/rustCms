@@ -328,7 +328,7 @@
     var t = e.target;
     // цель могла исчезнуть из DOM при перерисовке поповера (клик по пункту) — это не клик снаружи
     if (!t.closest || !t.isConnected) return;
-    if (pop && !pop.contains(t) && !t.closest('#list-add-filter, [data-chip], #list-cols')) closePop();
+    if (pop && !pop.contains(t) && !t.closest('#list-add-filter, [data-chip], #list-cols, #bulk-bar')) closePop();
     closeDetails(t);
     if (!listPage()) return;
     var add = t.closest('#list-add-filter');
@@ -338,6 +338,251 @@
     var cols = t.closest('#list-cols');
     if (cols) { if (pop && pop.classList.contains('pop-cols')) closePop(); else colsPicker(cols); return; }
   });
+
+  /* ---------- Выбор строк и массовые действия ---------- */
+
+  var sel = new Set();      // id отмеченных строк текущей страницы
+  var lastId = null;        // последняя отмеченная строка: начало диапазона
+  var allFilter = false;    // выбраны все записи по фильтру
+  var busy = false;         // массовое действие выполняется
+
+  function bulkSpec() {
+    var s = spec();
+    return s && s.bulk_actions && s.bulk_actions.length ? s : null;
+  }
+  function bulkRows() { return $$('#list-body tbody tr[data-id]'); }
+  function bodyData(k) { var b = $('#list-body'); return b ? b.dataset[k] : undefined; }
+  function totalCount() { return parseInt(bodyData('total'), 10) || 0; }
+  function fmt(n) { return Number(n).toLocaleString('ru-RU'); }
+  function plural(n, one, few, many) {
+    var m = n % 100, d = n % 10;
+    if (m > 10 && m < 20) return many;
+    return d === 1 ? one : (d >= 2 && d <= 4 ? few : many);
+  }
+  function selCount() { return allFilter ? totalCount() : sel.size; }
+
+  function rowBox(row) { return $('input[data-bulk]', row); }
+
+  function setRow(row, on) {
+    var box = rowBox(row);
+    if (!box) return;
+    box.checked = on;
+    row.classList.toggle('sel', on);
+    if (on) sel.add(row.dataset.id); else { sel.delete(row.dataset.id); allFilter = false; }
+  }
+
+  // Диапазон от прежней отмеченной строки до этой: всем состояние `on`
+  function setRange(fromId, row, on) {
+    var rows = bulkRows();
+    var a = -1, b = rows.indexOf(row);
+    rows.forEach(function (r, k) { if (r.dataset.id === fromId) a = k; });
+    if (a < 0 || b < 0) { setRow(row, on); return; }
+    for (var k = Math.min(a, b); k <= Math.max(a, b); k++) setRow(rows[k], on);
+  }
+
+  function syncBulk() {
+    var rows = bulkRows();
+    var present = {};
+    rows.forEach(function (r) { present[r.dataset.id] = true; });
+    sel.forEach(function (id) { if (!present[id]) sel.delete(id); });
+    rows.forEach(function (r) {
+      var on = sel.has(r.dataset.id), box = rowBox(r);
+      if (box) box.checked = on;
+      r.classList.toggle('sel', on);
+    });
+    var head = $('#list-body input[data-bulk-all]');
+    if (head) {
+      head.checked = rows.length > 0 && sel.size === rows.length;
+      head.indeterminate = sel.size > 0 && sel.size < rows.length;
+    }
+    drawBar();
+  }
+
+  function clearSel() {
+    sel.clear();
+    lastId = null;
+    allFilter = false;
+    syncBulk();
+  }
+
+  function drawBar() {
+    var bar = $('#bulk-bar');
+    if (!sel.size) {
+      if (bar) bar.remove();
+      if (pop && pop.classList.contains('pop-bulk')) closePop();
+      return;
+    }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'bulk-bar';
+      bar.className = 'bulk-bar';
+      bar.setAttribute('role', 'region');
+      bar.setAttribute('aria-label', 'Массовые действия');
+      document.body.appendChild(bar);
+    }
+    var rows = bulkRows(), total = totalCount();
+    var h = '<span class="bulk-n">' + (allFilter ? 'Выбраны все ' + fmt(total) + ' по фильтру' : 'Выбрано: ' + sel.size) + '</span>';
+    if (allFilter) {
+      h += '<button type="button" class="btn ghost sm" data-bulk-page>Только эта страница</button>';
+    } else if (rows.length > 0 && sel.size === rows.length && total > rows.length) {
+      h += bodyData('capped') === '1'
+        ? '<span class="muted">Больше 10 000 — уточните фильтр</span>'
+        : '<button type="button" class="btn ghost sm" data-bulk-filter>Выбрать все ' + fmt(total) + ' по фильтру</button>';
+    }
+    h += '<button type="button" class="btn sm" id="bulk-actions-btn" aria-haspopup="dialog"' + (busy ? ' disabled' : '') + '>' +
+      (busy ? 'Выполняется…' : 'Действия ▾') + '</button>' +
+      '<button type="button" class="btn ghost sm" data-bulk-clear aria-label="Снять выбор" title="Снять выбор (Esc)"' + (busy ? ' disabled' : '') + '>✕</button>';
+    bar.innerHTML = h;
+  }
+
+  // Поповер над панелью: снизу ему не хватит места
+  function popAbove(anchor) {
+    if (!pop) return;
+    var r = anchor.getBoundingClientRect();
+    pop.style.top = Math.max(8, r.top - pop.offsetHeight - 6) + 'px';
+  }
+
+  function actionsMenu(anchor) {
+    var s = bulkSpec();
+    if (!s) return;
+    var p = openPop(anchor, '<div class="list">' + s.bulk_actions.map(function (a) {
+      return '<button type="button" class="item" data-act="' + esc(a.code) + '">' + esc(a.label) + '</button>';
+    }).join('') + '</div>', 'pop-bulk');
+    popAbove(anchor);
+    p.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-act]');
+      if (!b) return;
+      var a = s.bulk_actions.filter(function (x) { return x.code === b.dataset.act; })[0];
+      if (a) startAction(a, anchor);
+    });
+  }
+
+  function startAction(a, anchor) {
+    if (allFilter || a.confirm !== 'never' || a.param.kind !== 'none') confirmPop(a, anchor);
+    else { closePop(); submitBulk(a, '', false, null); }
+  }
+
+  function confirmPop(a, anchor) {
+    var n = selCount(), danger = a.confirm === 'danger';
+    var what = allFilter ? 'все ' + fmt(n) + ' по фильтру' : fmt(n) + ' ' + plural(n, 'запись', 'записи', 'записей');
+    var h = '<div class="title">' + esc(danger ? a.label + ' ' + what + '? Это нельзя отменить' : a.label) + '</div>';
+    if (!danger) h += '<div class="pop-note muted">' + esc(allFilter ? 'Будет затронуто: все ' + fmt(n) + ' по фильтру' : 'Выбрано: ' + n) + '</div>';
+    if (a.param.kind === 'choice') {
+      h += '<div class="row"><select data-param aria-label="' + esc(a.label) + '"><option value="">Выберите…</option>' +
+        a.param.options.map(function (o) { return '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>'; }).join('') + '</select></div>';
+    } else if (a.param.kind === 'reason') {
+      h += '<div class="row"><input type="text" data-param maxlength="500" placeholder="Причина (необязательно)" autocomplete="off" aria-label="Причина"></div>';
+    }
+    if (a.notify) h += '<label class="item"><input type="checkbox" data-notify checked>Уведомить покупателей</label>';
+    h += '<div class="actions"><button type="button" class="btn ghost sm" data-cancel>Отмена</button>' +
+      '<button type="button" class="btn sm ' + (danger ? 'danger' : 'primary') + '" data-go>' +
+      esc(danger ? a.label + ' ' + fmt(n) : 'Применить') + '</button></div>';
+    var p = openPop(anchor, h, 'pop-bulk');
+    popAbove(anchor);
+    var go = $('[data-go]', p), param = $('[data-param]', p);
+    if (param) param.focus(); else go.focus();
+    function apply() {
+      if (busy) return;
+      var v = param ? param.value : '';
+      if (a.param.kind === 'choice' && !v) {
+        if (!$('.pop-hint', p)) {
+          var hint = document.createElement('div');
+          hint.className = 'pop-hint';
+          hint.setAttribute('role', 'alert');
+          hint.textContent = 'Выберите значение';
+          p.insertBefore(hint, $('.actions', p));
+          popAbove(anchor);
+        }
+        param.focus();
+        return;
+      }
+      var nt = $('[data-notify]', p);
+      submitBulk(a, v.trim(), !!(nt && nt.checked), go);
+    }
+    p.addEventListener('click', function (e) {
+      if (e.target.closest('[data-cancel]')) closePop();
+      else if (e.target.closest('[data-go]')) apply();
+    });
+    p.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && e.target.tagName === 'INPUT' && e.target.type === 'text') { e.preventDefault(); apply(); }
+    });
+  }
+
+  function submitBulk(a, param, notify, btn) {
+    var s = bulkSpec(), body = $('#list-body');
+    if (!s || !body || busy || !window.htmx || !selCount()) return;
+    busy = true;
+    var label = btn && btn.textContent;
+    if (btn) { btn.disabled = true; btn.textContent = 'Выполняется…'; }
+    drawBar();
+    var values = {
+      list_key: s.list_key, path: s.path, query: body.dataset.query || '',
+      action: a.code, param: param, notify: notify ? '1' : '0',
+      scope: allFilter ? 'filter' : 'ids', ids: allFilter ? '' : Array.from(sel).join(',')
+    };
+    function done() {
+      // список заменён — выбор уже сброшен; иначе (4xx, сбой сети) выбор и подтверждение остаются
+      if (!body.isConnected) return;
+      busy = false;
+      if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = label; }
+      drawBar();
+    }
+    window.htmx.ajax('POST', '/admin/lists/bulk', { target: '#list-body', swap: 'outerHTML', values: values }).then(done, done);
+  }
+
+  // Клик по ячейке выбора: не открывает строку и быстрый просмотр
+  document.addEventListener('click', function (e) {
+    var cell = e.target.closest && e.target.closest('td.sel, th.sel');
+    if (!cell || !$('#list-body') || !$('#list-body').contains(cell)) return;
+    e.stopPropagation();
+    if (pop) closePop();
+    var box = $('input[type=checkbox]', cell);
+    if (!box || busy) { e.preventDefault(); return; }
+    if (e.target !== box) box.checked = !box.checked;
+    if (box.hasAttribute('data-bulk-all')) {
+      bulkRows().forEach(function (r) { setRow(r, box.checked); });
+      lastId = null;
+    } else {
+      var row = cell.closest('tr');
+      if (e.shiftKey && lastId !== null) setRange(lastId, row, box.checked); else setRow(row, box.checked);
+      lastId = row.dataset.id;
+    }
+    syncBulk();
+    // фокус на чекбоксе отключил бы клавиши списка (X, J/K, Esc)
+    box.blur();
+  }, true);
+  document.addEventListener('mousedown', function (e) {
+    if (e.shiftKey && e.target.closest && e.target.closest('td.sel')) e.preventDefault();
+  }, true);
+
+  document.addEventListener('click', function (e) {
+    var t = e.target;
+    if (!t.closest || !t.isConnected || !t.closest('#bulk-bar')) return;
+    if (t.closest('[data-bulk-filter]')) { allFilter = true; drawBar(); }
+    else if (t.closest('[data-bulk-page]')) { allFilter = false; drawBar(); }
+    else if (t.closest('[data-bulk-clear]')) clearSel();
+    else {
+      var b = t.closest('#bulk-actions-btn');
+      if (b && !busy) { if (pop && pop.classList.contains('pop-bulk')) closePop(); else actionsMenu(b); }
+    }
+  });
+
+  // X / Shift+X: отметить текущую строку / диапазон от последней отмеченной
+  function toggleCur(range) {
+    var row = curRow();
+    var box = row && rowBox(row);
+    if (!box || busy) return;
+    var on = !box.checked;
+    if (range && lastId !== null) {
+      var from = bulkRows().filter(function (r) { return r.dataset.id === lastId; })[0];
+      on = from && rowBox(from) ? rowBox(from).checked : true;
+      setRange(lastId, row, on);
+    } else {
+      setRow(row, on);
+    }
+    lastId = row.dataset.id;
+    syncBulk();
+  }
 
   /* ---------- Клавиши ---------- */
 
@@ -397,6 +642,7 @@
     if (e.key === 'Escape') {
       if (pop) { e.preventDefault(); e.stopImmediatePropagation(); closePop(); }
       else if (detailsOpen() && !$('dialog[open]')) { e.stopImmediatePropagation(); closeDetails(); }
+      else if (sel.size && !busy && !$('dialog[open]') && !typing(e.target)) { e.stopImmediatePropagation(); clearSel(); }
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return;
@@ -404,6 +650,11 @@
 
     var onAction = e.target.closest && e.target.closest('a, button, summary');
 
+    if (e.code === 'KeyX' && bulkSpec() && $('#list-body input[data-bulk]')) {
+      e.preventDefault(); e.stopImmediatePropagation();
+      if (!e.repeat) toggleCur(e.shiftKey);
+      return;
+    }
     if (e.shiftKey) {
       // Shift допустим только для { }
       if (e.code === 'BracketLeft' || e.code === 'BracketRight') {
@@ -448,6 +699,11 @@
   // после замены списка текущая строка и открытые «⋯» сбрасываются сами (новый DOM); поповер закрываем
   document.addEventListener('htmx:afterSwap', function (e) {
     var t = e.detail && e.detail.target;
-    if (t && t.id === 'list-body' && pop && !pop.classList.contains('pop-cols')) closePop();
+    // HX-Reswap: none (отказ сервера) оставляет прежний список: поповер и выбор тоже остаются
+    if (!t || t.id !== 'list-body' || t.isConnected) return;
+    if (pop && !pop.classList.contains('pop-cols')) closePop();
+    // любая замена списка сбрасывает выбор: строки и итоги уже другие
+    busy = false;
+    clearSel();
   });
 })();

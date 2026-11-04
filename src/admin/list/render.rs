@@ -10,6 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::{
+    bulk::{BulkParam, Confirm},
     spec::{FieldType, Filter, ListSpec},
     sql::{COUNT_CAP, Scope, fetch},
     state::{Cond, ListState, Op, Parsed, SectionSel, Val, to_query},
@@ -297,7 +298,7 @@ fn pager(
 }
 
 /// Описание спеки для JS (поповеры, клавиши); `<` экранируется, чтобы не закрыть `<script>`.
-fn spec_json(spec: &ListSpec, st: &ListState) -> String {
+fn spec_json(spec: &ListSpec, st: &ListState, path: &str, query: &str) -> String {
     let ty = |t: FieldType| format!("{t:?}").to_lowercase();
     let filters: Vec<Value> = spec
         .filters
@@ -316,9 +317,32 @@ fn spec_json(spec: &ListSpec, st: &ListState) -> String {
             serde_json::json!({"code": c.code, "title": c.title, "required": c.required, "default": c.default})
         })
         .collect();
-    serde_json::json!({"filters": filters, "columns": columns, "per": st.per, "cols": st.cols})
-        .to_string()
-        .replace('<', "\\u003c")
+    let bulk_actions: Vec<Value> = spec
+        .bulk_actions
+        .iter()
+        .map(|a| {
+            let param = match &a.param {
+                BulkParam::None => serde_json::json!({"kind": "none", "options": []}),
+                BulkParam::Reason => serde_json::json!({"kind": "reason", "options": []}),
+                BulkParam::Choice(opts) => serde_json::json!({
+                    "kind": "choice",
+                    "options": opts.iter().map(|o| serde_json::json!({"value": o.value, "label": o.label})).collect::<Vec<_>>(),
+                }),
+            };
+            let confirm = match a.confirm {
+                Confirm::Never => "never",
+                Confirm::Always => "always",
+                Confirm::Danger => "danger",
+            };
+            serde_json::json!({"code": a.code, "label": a.label, "param": param, "confirm": confirm, "notify": a.notify})
+        })
+        .collect();
+    serde_json::json!({
+        "filters": filters, "columns": columns, "per": st.per, "cols": st.cols,
+        "bulk_actions": bulk_actions, "list_key": spec.key, "path": path, "query": query,
+    })
+    .to_string()
+    .replace('<', "\\u003c")
 }
 
 /// Запоминает колонки, сортировку и размер страницы, если они отличаются от сохранённых.
@@ -521,6 +545,10 @@ pub async fn run_list(
     if remember_state && let Err(e) = remember(state, user, spec, &st, &stored).await {
         tracing::warn!(error = ?e, list = %spec.key, "не удалось сохранить состояние списка");
     }
+    let bulk_query = url_of(spec, path, &st)
+        .split_once('?')
+        .map(|x| x.1.to_string())
+        .unwrap_or_default();
     let tree_collapsed = stored.get("tree_collapsed").and_then(Value::as_bool) == Some(true);
     let ctx = context! {
         tree_collapsed,
@@ -541,7 +569,9 @@ pub async fn run_list(
         only_toggle,
         full,
         vb => super::views::bar(&state.db, user.user.id, spec, path, &st, &url_of(spec, path, &st)).await?,
-        spec_json => spec_json(spec, &st),
+        spec_json => spec_json(spec, &st, path, &bulk_query),
+        has_bulk => !spec.bulk_actions.is_empty(),
+        bulk_query,
     };
     let name = if full {
         "_list.html"

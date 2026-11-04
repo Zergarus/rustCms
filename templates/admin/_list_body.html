@@ -2,7 +2,7 @@
 {#- Дерево разделов обновляется вместе со списком (out-of-band): выбранный узел и счётчики -#}
 {% if not full %}<span class="muted count" id="list-count" hx-swap-oob="true">{% if capped %}10 000+{% else %}{{ total }}{% endif %}</span>{% endif %}
 {% if page.tree and not full %}<aside id="list-tree" class="list-tree" hx-swap-oob="true">{% set tree = page.tree %}{% include "_tree.html" %}</aside>{% endif %}
-<div id="list-body" class="list-body" hx-get="{{ current_url }}" hx-trigger="list:refresh from:body" hx-target="this" hx-swap="outerHTML" hx-push-url="false" hx-disinherit="hx-target hx-swap hx-push-url">
+<div id="list-body" class="list-body" hx-get="{{ current_url }}" hx-trigger="list:refresh from:body" hx-target="this" hx-swap="outerHTML" hx-push-url="false" hx-disinherit="hx-target hx-swap hx-push-url" data-total="{{ total }}" data-capped="{% if capped %}1{% else %}0{% endif %}" data-query="{{ bulk_query }}">
     {% if page.bulk %}{% include "_bulk.html" %}{% endif %}
     <div class="list-views" id="list-views">
     <a class="view{% if vb.all_current %} on{% endif %}" href="{{ vb.all_url }}" hx-get="{{ vb.all_url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">Все</a>
@@ -78,11 +78,13 @@
   <div class="card table-wrap">
     <table class="list-table">
       <thead><tr>
+        {% if has_bulk %}<th class="sel"><input type="checkbox" data-bulk-all aria-label="Выбрать все на странице"></th>{% endif %}
         {% for h in heads %}<th{% if h.num %} class="num"{% endif %}>{% if h.sortable %}<a class="sort" href="{{ h.url }}" hx-get="{{ h.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">{{ h.title }}{% if h.arrow %}<span class="arr">{{ h.arrow }}</span>{% endif %}</a>{% else %}{{ h.title }}{% endif %}</th>{% endfor %}
       </tr></thead>
       <tbody>
         {% for r in rows %}
         <tr data-id="{{ r.id }}"{% if r.muted %} class="inactive"{% endif %} data-open="{{ r.open }}"{% if r.peek %} data-peek="{{ r.peek }}"{% endif %}>
+          {% if has_bulk %}<td class="sel"><input type="checkbox" data-bulk aria-label="Выбрать строку"></td>{% endif %}
           {% for c in r.cells %}<td{% if c.num %} class="num"{% endif %}>{% if c.first %}<a href="{{ r.open }}">{{ c.text }}</a>{% elif c.flag == "ok" %}<span class="badge ok">{{ c.text }}</span>{% elif c.flag == "none" %}<span class="muted">{{ c.text }}</span>{% else %}{{ c.text }}{% endif %}</td>{% endfor %}
         </tr>
         {% endfor %}

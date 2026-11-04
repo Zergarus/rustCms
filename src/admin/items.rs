@@ -3373,6 +3373,28 @@ mod list_tests {
     }
 
     #[sqlx::test]
+    async fn bulk_checkbox_column_only_with_actions(db: PgPool) {
+        let fx = content_fixture(&db).await;
+        let c = fx.collection_id;
+        item(&db, c, None, "Запись").await;
+        let app = crate::app(test_state(db.clone()));
+        let admin = admin_cookie(&db).await;
+        let (s, _, b) = get_raw(&app, &format!("/admin/collections/{c}/items"), &admin).await;
+        assert_eq!(s, StatusCode::OK);
+        let html = String::from_utf8_lossy(&b);
+        assert!(html.contains("data-bulk-all"), "шапка с чекбоксом");
+        assert!(
+            html.contains("<input type=\"checkbox\" data-bulk "),
+            "чекбокс строки"
+        );
+        assert!(
+            html.contains("\"bulk_actions\":[{"),
+            "действия в описании списка"
+        );
+        assert!(html.contains("data-query=\""), "состояние в теле списка");
+    }
+
+    #[sqlx::test]
     async fn items_list_shows_subsection_items(db: PgPool) {
         let fx = content_fixture(&db).await;
         let sub = section(&db, fx.collection_id, Some(fx.section_id), "Подраздел Б").await;

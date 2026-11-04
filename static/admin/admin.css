@@ -573,3 +573,16 @@ textarea.bc-text[hidden] { display: none; }
 .pop input[type=checkbox] { width: auto; height: auto; flex: none; margin: 0; }
 .pop .item[hidden] { display: none; }
 .pop-hint { margin: 4px; padding: 4px 8px; border-radius: 6px; font-size: 12px; color: var(--danger); background: rgba(248, 113, 113, .1); }
+
+/* выбор строк и панель массовых действий */
+.list-table th.sel, .list-table td.sel { width: 34px; padding-right: 0; text-align: center; cursor: default; }
+.list-table td.sel input, .list-table th.sel input { margin: 0; cursor: pointer; }
+.list-table tbody tr.sel:not(.cur) { background: var(--selected); }
+.list-table tbody tr.sel td.sel { box-shadow: inset 2px 0 0 var(--accent); }
+.bulk-bar { position: fixed; z-index: 40; bottom: 16px; left: calc(var(--sidebar-w) + 16px); right: 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: 0 6px 24px rgba(0, 0, 0, .3); font-size: 13px; }
+.bulk-bar .bulk-n { font-weight: 600; }
+.bulk-bar #bulk-actions-btn { margin-left: auto; }
+@media (max-width: 900px) { .bulk-bar { left: 8px; right: 8px; bottom: 8px; } }
+.pop-bulk { max-width: min(360px, calc(100vw - 16px)); }
+.pop select { width: 100%; min-width: 0; height: 32px; border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); border-radius: 6px; padding: 0 8px; font: inherit; }
+.pop .pop-note { padding: 0 8px 4px; font-size: 12px; }
