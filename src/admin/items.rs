@@ -3392,6 +3392,28 @@ mod list_tests {
             "действия в описании списка"
         );
         assert!(html.contains("data-query=\""), "состояние в теле списка");
+        // пользователь с правом только на чтение: ни колонки, ни действий
+        let cookie = permitted_cookie(&db, "reader2", &[]).await;
+        let uid: i64 = sqlx::query_scalar("SELECT id FROM users WHERE login = 'reader2'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+            .bind(uid)
+            .bind(fx.group_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE collection_access SET level = 'read' WHERE group_id = $1")
+            .bind(fx.group_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let (s, _, b) = get_raw(&app, &format!("/admin/collections/{c}/items"), &cookie).await;
+        assert_eq!(s, StatusCode::OK);
+        let html = String::from_utf8_lossy(&b);
+        assert!(!html.contains("data-bulk"));
+        assert!(html.contains("\"bulk_actions\":[]"));
     }
 
     #[sqlx::test]

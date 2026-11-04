@@ -592,7 +592,7 @@
     var row = e.target.closest && e.target.closest('tr[data-peek]');
     if (!row || e.button) return;
     if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
-    if (e.target.closest('a, button, input, select, label, textarea')) return;
+    if (e.target.closest('a, button, input, select, label, textarea, td.sel')) return;
     var sel = window.getSelection && window.getSelection();
     if (sel && String(sel).trim() !== '') return;
     peekShow(row);

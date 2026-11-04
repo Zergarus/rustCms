@@ -586,3 +586,4 @@ textarea.bc-text[hidden] { display: none; }
 .pop-bulk { max-width: min(360px, calc(100vw - 16px)); }
 .pop select { width: 100%; min-width: 0; height: 32px; border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); border-radius: 6px; padding: 0 8px; font: inherit; }
 .pop .pop-note { padding: 0 8px 4px; font-size: 12px; }
+body.has-bulk-bar .list-layout { padding-bottom: 96px; }

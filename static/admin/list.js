@@ -345,6 +345,7 @@
   var lastId = null;        // последняя отмеченная строка: начало диапазона
   var allFilter = false;    // выбраны все записи по фильтру
   var busy = false;         // массовое действие выполняется
+  var barSig = '';          // размер выбора и охват, под которые нарисована панель
 
   function bulkSpec() {
     var s = spec();
@@ -407,6 +408,11 @@
 
   function drawBar() {
     var bar = $('#bulk-bar');
+    // изменился объём выбора: открытое подтверждение говорило о прежнем
+    var sig = sel.size + ':' + allFilter;
+    if (sig !== barSig && pop && pop.classList.contains('pop-bulk') && !busy) closePop();
+    barSig = sig;
+    document.body.classList.toggle('has-bulk-bar', sel.size > 0);
     if (!sel.size) {
       if (bar) bar.remove();
       if (pop && pop.classList.contains('pop-bulk')) closePop();
@@ -459,14 +465,20 @@
 
   function startAction(a, anchor) {
     if (allFilter || a.confirm !== 'never' || a.param.kind !== 'none') confirmPop(a, anchor);
-    else { closePop(); submitBulk(a, '', false, null); }
+    else { closePop(); submitBulk(a, '', false, null, snapshot()); }
+  }
+
+  // Охват и число в момент показа подтверждения: действие не может отличаться от прочитанного в нём
+  function snapshot() {
+    return { all: allFilter, ids: Array.from(sel), n: selCount() };
   }
 
   function confirmPop(a, anchor) {
-    var n = selCount(), danger = a.confirm === 'danger';
-    var what = allFilter ? 'все ' + fmt(n) + ' по фильтру' : fmt(n) + ' ' + plural(n, 'запись', 'записи', 'записей');
+    var snap = snapshot();
+    var n = snap.n, all = snap.all, danger = a.confirm === 'danger';
+    var what = all ? 'все ' + fmt(n) + ' по фильтру' : fmt(n) + ' ' + plural(n, 'запись', 'записи', 'записей');
     var h = '<div class="title">' + esc(danger ? a.label + ' ' + what + '? Это нельзя отменить' : a.label) + '</div>';
-    if (!danger) h += '<div class="pop-note muted">' + esc(allFilter ? 'Будет затронуто: все ' + fmt(n) + ' по фильтру' : 'Выбрано: ' + n) + '</div>';
+    if (!danger) h += '<div class="pop-note muted">' + esc(all ? 'Будет затронуто: все ' + fmt(n) + ' по фильтру' : 'Выбрано: ' + n) + '</div>';
     if (a.param.kind === 'choice') {
       h += '<div class="row"><select data-param aria-label="' + esc(a.label) + '"><option value="">Выберите…</option>' +
         a.param.options.map(function (o) { return '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>'; }).join('') + '</select></div>';
@@ -497,7 +509,7 @@
         return;
       }
       var nt = $('[data-notify]', p);
-      submitBulk(a, v.trim(), !!(nt && nt.checked), go);
+      submitBulk(a, v.trim(), !!(nt && nt.checked), go, snap);
     }
     p.addEventListener('click', function (e) {
       if (e.target.closest('[data-cancel]')) closePop();
@@ -508,9 +520,9 @@
     });
   }
 
-  function submitBulk(a, param, notify, btn) {
+  function submitBulk(a, param, notify, btn, snap) {
     var s = bulkSpec(), body = $('#list-body');
-    if (!s || !body || busy || !window.htmx || !selCount()) return;
+    if (!s || !body || busy || !window.htmx || !snap || !snap.n) return;
     busy = true;
     var label = btn && btn.textContent;
     if (btn) { btn.disabled = true; btn.textContent = 'Выполняется…'; }
@@ -518,7 +530,7 @@
     var values = {
       list_key: s.list_key, path: s.path, query: body.dataset.query || '',
       action: a.code, param: param, notify: notify ? '1' : '0',
-      scope: allFilter ? 'filter' : 'ids', ids: allFilter ? '' : Array.from(sel).join(',')
+      scope: snap.all ? 'filter' : 'ids', ids: snap.all ? '' : snap.ids.join(',')
     };
     function done() {
       // список заменён — выбор уже сброшен; иначе (4xx, сбой сети) выбор и подтверждение остаются
@@ -534,7 +546,6 @@
   document.addEventListener('click', function (e) {
     var cell = e.target.closest && e.target.closest('td.sel, th.sel');
     if (!cell || !$('#list-body') || !$('#list-body').contains(cell)) return;
-    e.stopPropagation();
     if (pop) closePop();
     var box = $('input[type=checkbox]', cell);
     if (!box || busy) { e.preventDefault(); return; }
