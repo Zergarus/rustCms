@@ -72,12 +72,13 @@ pub(crate) async fn load_prefs(db: &PgPool, user_id: i64) -> sqlx::Result<Prefs>
 
 /// Сохранённое состояние списка (`admin_prefs.lists.<key>`); нет записи — `Null`.
 pub(crate) async fn list_prefs(db: &PgPool, user_id: i64, list_key: &str) -> sqlx::Result<Value> {
-    let v: Option<Option<Value>> =
-        sqlx::query_scalar("SELECT admin_prefs #> ARRAY['lists', $2::text] FROM users WHERE id = $1")
-            .bind(user_id)
-            .bind(list_key)
-            .fetch_optional(db)
-            .await?;
+    let v: Option<Option<Value>> = sqlx::query_scalar(
+        "SELECT admin_prefs #> ARRAY['lists', $2::text] FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .bind(list_key)
+    .fetch_optional(db)
+    .await?;
     Ok(v.flatten().unwrap_or(Value::Null))
 }
 

@@ -705,7 +705,12 @@ mod tests {
         .unwrap();
         let mut ids = Vec::new();
         for (key, name, owner, shared) in [
-            (format!("collection:{col}"), "Мои новости", user.user.id, false),
+            (
+                format!("collection:{col}"),
+                "Мои новости",
+                user.user.id,
+                false,
+            ),
             ("orders".to_string(), "Новые", user.user.id, true),
             ("orders".to_string(), "Чужие", other.user.id, true),
         ] {
@@ -763,7 +768,11 @@ mod tests {
             .await
             .unwrap();
         let shop = build(&db, &user, &ctx, "/admin/shop/orders").await.unwrap();
-        let labels: Vec<_> = find(&shop, "orders").views.into_iter().map(|v| v.label).collect();
+        let labels: Vec<_> = find(&shop, "orders")
+            .views
+            .into_iter()
+            .map(|v| v.label)
+            .collect();
         assert_eq!(labels, ["Новые"]);
     }
 
