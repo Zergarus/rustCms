@@ -3016,7 +3016,7 @@ mod list_tests {
     fn bulk_form(col: i64, action: &str, param: &str, scope: &str, ids: &[i64]) -> String {
         let ids: Vec<String> = ids.iter().map(i64::to_string).collect();
         format!(
-            "list_key=collection%3A{col}&path=%2Fadmin%2Fcollections%2F{col}%2Fitems&query=&action={action}&param={param}&scope={scope}&ids={}",
+            "list_key=collection%3A{col}&path=%2Fadmin%2Fcollections%2F{col}%2Fitems&query=&action={action}&param={param}&scope={scope}&expect=3&ids={}",
             ids.join(",")
         )
     }
