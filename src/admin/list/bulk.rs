@@ -64,6 +64,8 @@ pub struct BulkForm {
     pub notify: bool,
     pub scope: BulkScope,
     pub ids: Vec<i64>,
+    /// Число записей, подтверждённое пользователем при `scope=filter`.
+    pub expect: Option<i64>,
 }
 
 impl BulkForm {
@@ -95,6 +97,7 @@ impl BulkForm {
             notify: form.get("notify").map(String::as_str) == Some("1"),
             scope,
             ids,
+            expect: get("expect").trim().parse::<i64>().ok().filter(|n| *n >= 0),
         }
     }
 }
@@ -158,6 +161,23 @@ pub fn mails_to_send<T>(event: Option<T>, notify: bool) -> Option<T> {
     event.filter(|_| notify)
 }
 
+/// Письма, накопленные за прогон: уходят одной пачкой после цикла.
+#[derive(Debug, Default)]
+pub struct MailQueue(std::sync::Mutex<Vec<(String, i64)>>);
+
+impl MailQueue {
+    pub fn push(&self, event: String, order_id: i64) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((event, order_id));
+    }
+
+    pub fn take(&self) -> Vec<(String, i64)> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
 pub struct BulkCtx<'a> {
     pub state: &'a AppState,
     pub user: &'a Access,
@@ -166,6 +186,8 @@ pub struct BulkCtx<'a> {
     pub collection_id: Option<i64>,
     /// Коллекция загружается один раз на запрос.
     pub collection: tokio::sync::OnceCell<Option<crate::collection::Collection>>,
+    /// Письма заказов; отправляются после цикла одной задачей.
+    pub mails: MailQueue,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -228,6 +250,17 @@ fn reject(status: StatusCode, text: &str) -> Response {
     resp.headers_mut()
         .insert("HX-Reswap", axum::http::HeaderValue::from_static("none"));
     resp
+}
+
+/// Ошибка после выполнения действий — не 500: записи уже изменены, список просто не обновлён.
+fn degrade(result: AppResult<Response>) -> Response {
+    result.unwrap_or_else(|e| {
+        tracing::error!("массовое действие выполнено, но список не обновлён: {e}");
+        reject(
+            StatusCode::OK,
+            "Выполнено, но список не обновлён — обновите страницу",
+        )
+    })
 }
 
 /// Реестр выполнения по списку.
@@ -301,6 +334,16 @@ pub async fn handle(
         Ok(ids) => ids,
         Err(e) => return Ok(reject(StatusCode::UNPROCESSABLE_ENTITY, e.message())),
     };
+    if f.scope == BulkScope::Filter && f.expect != Some(ids.len() as i64) {
+        let text = match f.expect {
+            Some(_) => format!(
+                "Записей по фильтру стало {} — проверьте и повторите",
+                ids.len()
+            ),
+            None => "Не указано число записей — обновите страницу".to_string(),
+        };
+        return Ok(reject(StatusCode::UNPROCESSABLE_ENTITY, &text));
+    }
 
     let ctx = BulkCtx {
         state: &state,
@@ -308,6 +351,7 @@ pub async fn handle(
         notify,
         collection_id,
         collection: Default::default(),
+        mails: Default::default(),
     };
     let mut outcome = Outcome::default();
     for &id in &ids {
@@ -317,11 +361,30 @@ pub async fn handle(
         }
     }
 
+    let mails = ctx.mails.take();
+    if !mails.is_empty() {
+        let state = state.clone();
+        tokio::spawn(async move { crate::sale::mail::notify_many(&state, mails).await });
+    }
+    Ok(degrade(
+        finish(&state, &user, &spec, &f, &ids, &outcome).await,
+    ))
+}
+
+/// Итог и обновлённый список после выполнения.
+async fn finish(
+    state: &AppState,
+    user: &Access,
+    spec: &ListSpec,
+    f: &BulkForm,
+    ids: &[i64],
+    outcome: &Outcome,
+) -> AppResult<Response> {
     let summary = if outcome.failed.is_empty() {
         None
     } else {
         let failed_ids: Vec<i64> = outcome.failed.iter().map(|(id, _)| *id).collect();
-        let rows: Vec<(i64, String)> = sql::labels(&spec, &failed_ids)
+        let rows: Vec<(i64, String)> = sql::labels(spec, &failed_ids)
             .build_query_as()
             .fetch_all(&state.db)
             .await?;
@@ -329,18 +392,11 @@ pub async fn handle(
         Some(BulkSummary {
             done: outcome.done,
             total: ids.len(),
-            groups: summarize(&outcome, &labels, &spec.open_url),
+            groups: summarize(outcome, &labels, &spec.open_url),
         })
     };
-    let resp = views::rerender_with(
-        &state,
-        &user,
-        &f.list_key,
-        &f.path,
-        &f.query,
-        summary.clone(),
-    )
-    .await?;
+    let resp =
+        views::rerender_with(state, user, &f.list_key, &f.path, &f.query, summary.clone()).await?;
     Ok(match summary {
         Some(_) => resp,
         None => views::with_toast(
@@ -606,10 +662,10 @@ mod tests {
         let cookie = admin_cookie(&db).await;
         let key = format!("collection:{}", c.collection_id);
         let path = format!("/admin/collections/{}/items", c.collection_id);
-        let form = |scope: &str, ids: &[i64], query: &str| {
+        let form = |scope: &str, ids: &[i64], query: &str, expect: usize| {
             let ids: Vec<String> = ids.iter().map(i64::to_string).collect();
             format!(
-                "list_key={}&path={}&query={}&action=noop&scope={scope}&ids={}",
+                "list_key={}&path={}&query={}&action=noop&scope={scope}&ids={}&expect={expect}",
                 enc(&key),
                 enc(&path),
                 enc(query),
@@ -618,7 +674,7 @@ mod tests {
         };
         // чужая коллекция молча отбрасывается: обработаны 3 записи из этой коллекции
         let all = [c.item_id, in_sec, loose, foreign];
-        let (st, _, body) = post(&app, &cookie, &form("ids", &all, "")).await;
+        let (st, _, body) = post(&app, &cookie, &form("ids", &all, "", 0)).await;
         assert_eq!(st, StatusCode::OK, "{body}");
         let bad = [c.item_id, in_sec, loose]
             .iter()
@@ -632,7 +688,7 @@ mod tests {
         let (st, _, body) = post(
             &app,
             &cookie,
-            &form("filter", &[], &format!("section={}", c.section_id)),
+            &form("filter", &[], &format!("section={}", c.section_id), 2),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{body}");
@@ -684,6 +740,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r, Err(SelectError::Empty));
+    }
+
+    fn toast_text(h: &HeaderMap) -> String {
+        let v: serde_json::Value = serde_json::from_str(h["hx-trigger"].to_str().unwrap()).unwrap();
+        v["toast"]["text"].as_str().unwrap().to_string()
+    }
+
+    #[sqlx::test]
+    async fn filter_scope_requires_matching_expect(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let n = 3;
+        for _ in 0..n {
+            place_order(&db, &f, None).await;
+        }
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let base = orders_form("paid", "filter", &[], "");
+        let paid = || async {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM orders WHERE paid")
+                .fetch_one(&db)
+                .await
+                .unwrap()
+        };
+        // без expect и с мусором — 422
+        for form in [
+            base.clone(),
+            format!("{base}&expect=abc"),
+            format!("{base}&expect=-1"),
+        ] {
+            let (st, h, _) = post(&app, &cookie, &form).await;
+            assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{form}");
+            assert_eq!(h["HX-Reswap"], "none");
+        }
+        // между показом и отправкой появилась запись: ожидали n, подходит n + 1
+        place_order(&db, &f, None).await;
+        let (st, h, body) = post(&app, &cookie, &format!("{base}&expect={n}")).await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(h["HX-Reswap"], "none");
+        assert_eq!(
+            toast_text(&h),
+            format!("Записей по фильтру стало {} — проверьте и повторите", n + 1)
+        );
+        assert_eq!(paid().await, 0);
+        // с верным числом выполняется
+        let (st, _, body) = post(&app, &cookie, &format!("{base}&expect={}", n + 1)).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(paid().await, n as i64 + 1);
+    }
+
+    #[test]
+    fn degrade_turns_error_into_toast() {
+        let resp = degrade(Err(AppError::NotFound));
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["HX-Reswap"], "none");
+        assert!(resp.headers().contains_key("hx-trigger"));
+        let ok = degrade(Ok(Response::new(Body::from("x"))));
+        assert!(!ok.headers().contains_key("HX-Reswap"));
+    }
+
+    #[test]
+    fn mail_queue_collects_in_order() {
+        let q = MailQueue::default();
+        q.push("A".into(), 1);
+        q.push("B".into(), 2);
+        assert_eq!(q.take(), vec![("A".to_string(), 1), ("B".to_string(), 2)]);
+        assert!(q.take().is_empty());
     }
 
     #[sqlx::test]
@@ -741,7 +863,8 @@ mod tests {
         .await
         .unwrap();
         let q = format!("view={view}&edited=1&f.status=in%3AN");
-        let (st, _, body) = post(&app, &cookie, &orders_form("noop", "filter", &[], &q)).await;
+        let form = format!("{}&expect=1", orders_form("noop", "filter", &[], &q));
+        let (st, _, body) = post(&app, &cookie, &form).await;
         assert_eq!(st, StatusCode::OK, "{body}");
         assert!(body.contains("Выполнено 0 из 1"), "{body}");
     }

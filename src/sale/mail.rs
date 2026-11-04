@@ -131,6 +131,13 @@ pub async fn notify(state: &AppState, event: &str, order_id: i64) {
     }
 }
 
+/// Письма пачкой (массовые действия): по одному, последовательно, чтобы не плодить задачи и соединения.
+pub async fn notify_many(state: &AppState, events: Vec<(String, i64)>) {
+    for (event, order_id) in events {
+        notify(state, &event, order_id).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};

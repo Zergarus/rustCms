@@ -3141,6 +3141,7 @@ mod list_tests {
             notify: false,
             collection_id: Some(c),
             collection: Default::default(),
+            mails: Default::default(),
         };
         let r = super::bulk_run(&ctx, "move", &foreign.to_string(), fx.item_id).await;
         assert_eq!(r, Err("раздел не найден".to_string()));
@@ -3222,6 +3223,7 @@ mod list_tests {
             notify: false,
             collection_id: Some(offers),
             collection: Default::default(),
+            mails: Default::default(),
         };
         for (action, param) in [("deactivate", ""), ("move", "none"), ("delete", "")] {
             assert_eq!(
@@ -3312,6 +3314,7 @@ mod list_tests {
             notify: false,
             collection_id: Some(c),
             collection: Default::default(),
+            mails: Default::default(),
         };
         // запись удалена между выбором и выполнением
         sqlx::query("DELETE FROM collection_items WHERE id = $1")

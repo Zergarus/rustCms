@@ -1048,7 +1048,7 @@ pub(crate) async fn bulk_run(
     match apply(ctx, action, param, id).await {
         Ok(event) => {
             if let Some(event) = mails_to_send(event, ctx.notify) {
-                send(ctx.state, &event, id);
+                ctx.mails.push(event.event_name(), id);
             }
             Ok(())
         }
@@ -1100,6 +1100,15 @@ mod tests {
     use tower::ServiceExt;
 
     async fn bulk_post(app: &axum::Router, cookie: &str, body: &str) -> (StatusCode, String) {
+        let (status, _, text) = bulk_post_h(app, cookie, body).await;
+        (status, text)
+    }
+
+    async fn bulk_post_h(
+        app: &axum::Router,
+        cookie: &str,
+        body: &str,
+    ) -> (StatusCode, axum::http::HeaderMap, String) {
         let req = Request::post("/admin/lists/bulk")
             .header(header::COOKIE, cookie)
             .header(header::HOST, "127.0.0.1:3000")
@@ -1110,9 +1119,13 @@ mod tests {
             .body(Body::from(body.to_string()))
             .unwrap();
         let res = app.clone().oneshot(req).await.unwrap();
-        let status = res.status();
+        let (status, headers) = (res.status(), res.headers().clone());
         let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-        (status, String::from_utf8_lossy(&bytes).into_owned())
+        (
+            status,
+            headers,
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )
     }
 
     fn orders_form(action: &str, param: &str, ids: &[i64]) -> String {
@@ -1143,9 +1156,26 @@ mod tests {
         ];
         let cookie = admin_cookie(&db).await;
         let app = crate::app(test_state(db.clone()));
-        let (st, body) = bulk_post(&app, &cookie, &orders_form("status", "P", &ids)).await;
+        let (st, h, body) = bulk_post_h(&app, &cookie, &orders_form("status", "P", &ids)).await;
         assert_eq!(st, StatusCode::OK, "{body}");
         assert!(!body.contains("bulk-summary"), "{body}");
+        let toast: serde_json::Value =
+            serde_json::from_str(h["hx-trigger"].to_str().unwrap()).unwrap();
+        assert_eq!(toast["toast"]["text"], "Готово: 3");
+        let actor: i64 = sqlx::query_scalar("SELECT id FROM users WHERE login = 'smoke'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        for id in ids {
+            let who: Vec<Option<i64>> = sqlx::query_scalar(
+                "SELECT user_id FROM order_status_history WHERE order_id = $1 AND status = 'P'",
+            )
+            .bind(id)
+            .fetch_all(&db)
+            .await
+            .unwrap();
+            assert_eq!(who, vec![Some(actor)], "заказ {id}");
+        }
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE status = 'P'")
             .fetch_one(&db)
             .await
@@ -1177,6 +1207,7 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{body}");
         assert!(body.contains("bulk-summary"), "{body}");
+        assert!(body.contains("Некоторые товары уже отгружены"), "{body}");
         let canceled: Vec<(i64, bool)> =
             sqlx::query_as("SELECT id, canceled FROM orders ORDER BY id")
                 .fetch_all(&db)
@@ -1206,6 +1237,7 @@ mod tests {
             notify: true,
             collection_id: None,
             collection: Default::default(),
+            mails: Default::default(),
         };
         assert!(matches!(
             super::apply(&ctx, "cancel", "", id).await,
@@ -1226,8 +1258,12 @@ mod tests {
         assert_eq!(super::bulk_run(&ctx, "unpaid", "", id).await, Ok(()));
         // без «Уведомить» письма нет даже при изменении
         let quiet = BulkCtx {
+            state: &state,
+            user: &user,
             notify: false,
-            ..ctx
+            collection_id: None,
+            collection: Default::default(),
+            mails: Default::default(),
         };
         assert!(matches!(
             super::apply(&quiet, "paid", "", id).await,
@@ -1242,6 +1278,48 @@ mod tests {
             super::bulk_run(&quiet, "paid", "", id + 999).await,
             Err("заказ не найден".to_string())
         );
+    }
+
+    #[sqlx::test]
+    async fn bulk_run_queues_mails_for_one_batch(db: sqlx::PgPool) {
+        let f = order_fixture(&db).await;
+        add_statuses(&db).await;
+        let ids = [
+            place_order(&db, &f, None).await,
+            place_order(&db, &f, None).await,
+            place_order(&db, &f, None).await,
+        ];
+        let state = test_state(db.clone());
+        let user = crate::access::Access::load(
+            &db,
+            crate::auth::create_user(&db, "boss", "password123".into(), true)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let mk = |notify| BulkCtx {
+            state: &state,
+            user: &user,
+            notify,
+            collection_id: None,
+            collection: Default::default(),
+            mails: Default::default(),
+        };
+        let ctx = mk(true);
+        for id in ids {
+            assert_eq!(super::bulk_run(&ctx, "status", "P", id).await, Ok(()));
+        }
+        // ничего не отправлено по ходу цикла: все письма ждут в очереди, по порядку
+        let expected: Vec<(String, i64)> = ids
+            .iter()
+            .map(|id| ("SALE_STATUS_CHANGED_P".to_string(), *id))
+            .collect();
+        assert_eq!(ctx.mails.take(), expected);
+        // без «Уведомить» очередь пуста
+        let quiet = mk(false);
+        assert_eq!(super::bulk_run(&quiet, "paid", "", ids[0]).await, Ok(()));
+        assert!(quiet.mails.take().is_empty());
     }
 
     #[sqlx::test]
