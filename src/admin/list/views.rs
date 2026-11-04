@@ -1318,6 +1318,28 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn list_body_attrs_not_inherited_by_row_links(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let (_, _, out) = hx_get(&app, "/admin/shop/orders", &cookie).await;
+        let root = out
+            .split("id=\"list-body\"")
+            .nth(1)
+            .and_then(|r| r.split('>').next())
+            .unwrap();
+        // корень сам обновляется в себя, но потомки (ссылки записей) этих атрибутов не наследуют
+        assert!(
+            root.contains(r#"hx-disinherit="hx-target hx-swap hx-push-url""#),
+            "{root}"
+        );
+        // собственные элементы списка нацелены явно
+        assert!(
+            out.contains(r##"hx-get="&#x2f;admin&#x2f;shop&#x2f;orders" hx-target="#list-body""##),
+            "{out}"
+        );
+    }
+
+    #[sqlx::test]
     async fn huge_page_does_not_fail(db: PgPool) {
         let app = app(&db);
         let cookie = admin_cookie(&db).await;

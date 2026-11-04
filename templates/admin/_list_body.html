@@ -2,7 +2,7 @@
 {#- Дерево разделов обновляется вместе со списком (out-of-band): выбранный узел и счётчики -#}
 {% if not full %}<span class="muted count" id="list-count" hx-swap-oob="true">{% if capped %}10 000+{% else %}{{ total }}{% endif %}</span>{% endif %}
 {% if page.tree and not full %}<aside id="list-tree" class="list-tree" hx-swap-oob="true">{% set tree = page.tree %}{% include "_tree.html" %}</aside>{% endif %}
-<div id="list-body" class="list-body" hx-get="{{ current_url }}" hx-trigger="list:refresh from:body" hx-target="this" hx-swap="outerHTML" hx-push-url="false">
+<div id="list-body" class="list-body" hx-get="{{ current_url }}" hx-trigger="list:refresh from:body" hx-target="this" hx-swap="outerHTML" hx-push-url="false" hx-disinherit="hx-target hx-swap hx-push-url">
     <div class="list-views" id="list-views">
     <a class="view{% if vb.all_current %} on{% endif %}" href="{{ vb.all_url }}" hx-get="{{ vb.all_url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">Все</a>
     {% for v in vb.items %}

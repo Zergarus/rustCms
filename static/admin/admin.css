@@ -496,6 +496,11 @@ textarea.bc-text[hidden] { display: none; }
 /* дерево разделов слева от списка записей */
 .list-layout { display: flex; align-items: flex-start; gap: 16px; }
 .list-main { flex: 1; min-width: 0; }
+.list-layout { min-width: 0; }
+.list-body { min-width: 0; max-width: 100%; }
+.list-views, .list-bar, .view-dirty { min-width: 0; }
+.view-dirty { flex-wrap: wrap; }
+.list-body .table-wrap { max-width: 100%; }
 .list-tree { width: 230px; flex: none; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 10px 6px; }
 .list-layout.tree-collapsed .list-tree { width: 44px; padding: 10px 6px; }
 .list-layout.tree-collapsed .tree-body, .list-layout.tree-collapsed .tree-title { display: none; }
