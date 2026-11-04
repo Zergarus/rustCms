@@ -132,6 +132,14 @@ pub async fn spec_for_key(db: &PgPool, user: &Access, key: &str) -> AppResult<Li
     Ok(super::collection::collection_spec(db, user, &collection).await?)
 }
 
+/// Подставлять ли сохранённые колонки/сортировку/размер на голый адрес: после действия с видом
+/// и на полной странице, но не при восстановлении истории браузера (там голый адрес — умолчания).
+pub fn restores(headers: &HeaderMap, after_action: bool) -> bool {
+    after_action
+        || (crate::admin::is_full_page(headers)
+            && !headers.contains_key("hx-history-restore-request"))
+}
+
 pub struct Resolved {
     pub parsed: Parsed,
     pub notices: Vec<String>,
@@ -175,8 +183,11 @@ fn saved_query(saved: &serde_json::Value) -> String {
 /// `resolve` метку снимает; она нужна ровно тогда, когда состояние пустое (`is_blank`),
 /// иначе адрес нормализуется без неё (один редирект, дальше стабильно).
 ///
-/// `restore` — полная страница (не HTMX-фрагмент): только она подставляет сохранённое на голый адрес;
-/// фрагмент с голым адресом значит «умолчания» (ссылки на умолчания адрес не пишут).
+/// `restore` — полная страница (не HTMX-фрагмент и не восстановление истории, см. [`restores`]):
+/// только она подставляет сохранённое на голый адрес; фрагмент и история с голым адресом значат
+/// «умолчания» (ссылки на умолчания адрес не пишут). Подставленное сохранённое отличается от
+/// умолчаний — значит `changed`: полная страница уходит редиректом на явный адрес, чтобы адрес
+/// всегда описывал состояние (а `back`/`forward` не показывали чужое состояние по голому адресу).
 ///
 /// Состояние списка по адресу: с `view=<id>` — открытый вид (сохранённый запрос, пока в
 /// адресе нет собственных параметров), иначе обычный разбор.
@@ -199,7 +210,7 @@ pub async fn resolve(
             // Голый адрес: колонки, сортировка и размер страницы — как в прошлый раз (без редиректа).
             let saved = shell::list_prefs(db, user_id, &spec.key).await?;
             parsed = state::parse(spec, &saved_query(&saved));
-            parsed.changed = false;
+            parsed.changed = !to_query(spec, &parsed.state, true).is_empty();
         } else {
             parsed = state::parse(spec, raw_query);
         }
@@ -247,10 +258,7 @@ pub async fn resolve(
     let as_set = |q: &str| -> BTreeSet<(String, String)> { pairs_of(q).into_iter().collect() };
     let url_set: BTreeSet<_> = rest.into_iter().collect();
     parsed.changed = url_set != as_set(&norm) || is_blank(&norm) != edited;
-    Ok(Resolved {
-        parsed,
-        notices,
-    })
+    Ok(Resolved { parsed, notices })
 }
 
 // ---------- строка видов ----------
@@ -301,6 +309,15 @@ pub async fn bar(
     current_url: &str,
 ) -> sqlx::Result<ViewsBar> {
     let all = visible(db, user_id, &spec.key).await?;
+    // «Все» и сброс без вида ведут на явный адрес с сохранёнными колонками/сортировкой/размером:
+    // голый адрес во фрагменте значил бы умолчания и стёр бы запомненное.
+    let saved = shell::list_prefs(db, user_id, &spec.key).await?;
+    let all_query = to_query(spec, &state::parse(spec, &saved_query(&saved)).state, false);
+    let all_url = if all_query.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{all_query}")
+    };
     let open = st.view.and_then(|id| all.iter().find(|v| v.id == id));
     let query = to_query(spec, st, false);
     let dirty = match open {
@@ -323,12 +340,12 @@ pub async fn bar(
     Ok(ViewsBar {
         list_key: spec.key.clone(),
         path: path.to_string(),
-        all_url: path.to_string(),
+        all_url: all_url.clone(),
         all_current: open.is_none(),
         items,
         reset_url: match open {
             Some(v) => format!("{path}?view={}", v.id),
-            None => path.to_string(),
+            None => all_url,
         },
         open: open.map(|v| OpenView {
             id: v.id,
@@ -1224,8 +1241,13 @@ mod tests {
         )
         .await;
         assert!(out.contains("sort=-status"));
-        // пустой запрос: колонки, сортировка и размер возвращаются, фильтры нет
+        // голый полный запрос: сохранённое возвращается редиректом на явный адрес, фильтры нет
         let (st, h, out) = full_get(&app, "/admin/shop/orders", &cookie).await;
+        assert_eq!(st, StatusCode::FOUND, "{out}");
+        let to = h[header::LOCATION].to_str().unwrap().to_string();
+        assert!(to.contains("sort=-status") && to.contains("per=20"), "{to}");
+        assert!(!to.contains("has:7") && !to.contains("f.number"), "{to}");
+        let (st, h, out) = full_get(&app, &to, &cookie).await;
         assert_eq!(st, StatusCode::OK, "{out}");
         assert!(h.get(header::LOCATION).is_none());
         assert!(out.contains(r#""cols":["number","status"]"#), "{out}");
@@ -1235,6 +1257,90 @@ mod tests {
         // свои параметры сильнее сохранённых
         let (_, _, out) = full_get(&app, "/admin/shop/orders?cols=number,buyer", &cookie).await;
         assert!(out.contains(r#""cols":["number","buyer"]"#));
+    }
+
+    async fn history_get(
+        app: &Router,
+        path: &str,
+        cookie: &str,
+    ) -> (StatusCode, HeaderMap, String) {
+        let req = Request::get(path)
+            .header(header::COOKIE, cookie)
+            .header("hx-request", "true")
+            .header("hx-history-restore-request", "true")
+            .body(Body::empty())
+            .unwrap();
+        send(app, req).await
+    }
+
+    #[sqlx::test]
+    async fn bare_full_get_redirects_to_explicit_state(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        full_get(&app, "/admin/shop/orders?sort=-status", &cookie).await;
+        let (st, h, _) = full_get(&app, "/admin/shop/orders", &cookie).await;
+        assert_eq!(st, StatusCode::FOUND);
+        assert_eq!(
+            h[header::LOCATION].to_str().unwrap(),
+            "/admin/shop/orders?sort=-status"
+        );
+    }
+
+    #[sqlx::test]
+    async fn history_restore_of_bare_url_renders_defaults(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        full_get(&app, "/admin/shop/orders?sort=-status&per=20", &cookie).await;
+        let (st, h, out) = history_get(&app, "/admin/shop/orders", &cookie).await;
+        assert_eq!(st, StatusCode::OK, "{out}");
+        assert!(h.get(header::LOCATION).is_none());
+        assert!(out.contains(r#""per":50"#), "{out}");
+        assert!(!out.contains("sort=-status"), "{out}");
+        // выбор: показанное пользователю состояние (умолчания) и запоминается
+        assert_eq!(prefs_of(&db).await["lists"]["orders"]["per"], 50);
+    }
+
+    #[sqlx::test]
+    async fn all_link_keeps_saved_prefs(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        full_get(&app, "/admin/shop/orders?sort=-status&per=20", &cookie).await;
+        let (_, _, out) = full_get(&app, "/admin/shop/orders?sort=-status&per=20", &cookie).await;
+        assert!(
+            out.contains(r#"<a class="view on" href="&#x2f;admin&#x2f;shop&#x2f;orders?sort=-status&amp;per=20""#),
+            "{out}"
+        );
+        // переход по «Все» (фрагмент) не стирает запомненное
+        let before = prefs_of(&db).await;
+        let (st, _, _) = hx_get(&app, "/admin/shop/orders?sort=-status&per=20", &cookie).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(prefs_of(&db).await, before);
+    }
+
+    #[sqlx::test]
+    async fn huge_page_does_not_fail(db: PgPool) {
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let (st, h, out) = full_get(
+            &app,
+            "/admin/shop/orders?page=100000000000000000&per=100",
+            &cookie,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FOUND, "{out}");
+        assert!(
+            h[header::LOCATION]
+                .to_str()
+                .unwrap()
+                .contains("page=1000000")
+        );
+        let (st, _, out) = hx_get(
+            &app,
+            "/admin/shop/orders?page=100000000000000000&per=100",
+            &cookie,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{out}");
     }
 
     #[sqlx::test]
@@ -1247,7 +1353,15 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
-        let (st, h, out) = full_get(&app, "/admin/shop/orders", &cookie).await;
+        // сохранённые колонки отличаются от умолчаний — редирект на явный адрес
+        let (st, h, _) = full_get(&app, "/admin/shop/orders", &cookie).await;
+        assert_eq!(st, StatusCode::FOUND);
+        let to = h[header::LOCATION].to_str().unwrap().to_string();
+        assert!(
+            !to.contains("sort=nope") && !to.contains("gone") && !to.contains("per="),
+            "{to}"
+        );
+        let (st, h, out) = full_get(&app, &to, &cookie).await;
         assert_eq!(st, StatusCode::OK, "{out}");
         assert!(h.get(header::LOCATION).is_none());
         assert!(out.contains(r#""per":50"#), "{out}");
@@ -1359,7 +1473,11 @@ mod tests {
         assert!(out.contains("has-tree tree-collapsed"), "{out}");
         // запоминание списка не затирает флаг
         full_get(&app, &format!("{url}?per=20"), &cookie).await;
-        let (_, _, out) = full_get(&app, &url, &cookie).await;
+        // голый адрес редиректит на явное запомненное состояние
+        let (st, h, _) = full_get(&app, &url, &cookie).await;
+        assert_eq!(st, StatusCode::FOUND);
+        let to = h[header::LOCATION].to_str().unwrap().to_string();
+        let (_, _, out) = full_get(&app, &to, &cookie).await;
         assert!(out.contains("tree-collapsed"));
         let (st, _, _) = hx_post(&app, &tree, &cookie, "value=0").await;
         assert_eq!(st, StatusCode::NO_CONTENT);

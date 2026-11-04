@@ -106,10 +106,13 @@ fn field_entries(
         c.sortable = sortable;
         c
     };
-    // Элементы массива через запятую; для скаляра — он сам.
+    // Элементы массива через запятую; устаревший скаляр (строка или число, записанный до того,
+    // как поле стало множественным) показывается как есть; остальное — пусто.
     let joined = |elem: &str| {
         format!(
-            "(SELECT string_agg(e, ', ') FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof({raw}) = 'array' THEN {raw} ELSE '[]'::jsonb END) e{elem})"
+            "(CASE jsonb_typeof({raw}) \
+             WHEN 'array' THEN (SELECT string_agg(e, ', ') FROM jsonb_array_elements_text({raw}) e{elem}) \
+             WHEN 'string' THEN {text} WHEN 'number' THEN {text} END)"
         )
     };
     let fl = |ty: FieldType, expr: &str| filter(code, &f.name, FIELDS_GROUP, ty, expr);
@@ -455,6 +458,30 @@ mod tests {
     async fn spec_of(db: &PgPool, id: i64) -> ListSpec {
         let c = repo::get_collection(db, id).await.unwrap().unwrap();
         collection_spec(db, &admin(db).await, &c).await.unwrap()
+    }
+
+    #[sqlx::test]
+    async fn multiple_string_with_legacy_scalar(db: PgPool) {
+        let f = content_fixture(&db).await;
+        let c = f.collection_id;
+        sqlx::query("DELETE FROM collection_items WHERE id = $1")
+            .bind(f.item_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        field(&db, c, "tags", "string", true).await;
+        let a = item(&db, c, "a", json!({"tags": "red"})).await;
+        let b = item(&db, c, "b", json!({"tags": ["blue", "green"]})).await;
+        let d = item(&db, c, "d", json!({"tags": 7})).await;
+        let spec = spec_of(&db, c).await;
+        assert_eq!(ids(&db, &spec, "f.tags=has:re").await, vec![a, b]);
+        assert_eq!(ids(&db, &spec, "f.tags=has:7").await, vec![d]);
+        let st = parse(&spec, "cols=name,tags&sort=id").state;
+        let (rows, _) = fetch(&db, &spec, &st, &Scope::All).await.unwrap();
+        let cell = |id: i64| rows.iter().find(|r| r.id == id).unwrap().cells["tags"].clone();
+        assert_eq!(cell(a), json!("red"));
+        assert_eq!(cell(b), json!("blue, green"));
+        assert_eq!(cell(d), json!("7"));
     }
 
     #[sqlx::test]

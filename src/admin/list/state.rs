@@ -214,6 +214,9 @@ fn norm_cols(spec: &ListSpec, raw: Option<&str>) -> Vec<String> {
     cols
 }
 
+/// Верхняя граница номера страницы: больше — приводится к ней (адрес нормализуется).
+pub const MAX_PAGE: i64 = 1_000_000;
+
 pub fn parse(spec: &ListSpec, query: &str) -> Parsed {
     let pairs: Vec<(String, String)> = form_urlencoded::parse(query.as_bytes())
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
@@ -262,6 +265,7 @@ pub fn parse(spec: &ListSpec, query: &str) -> Parsed {
     let page = get("page")
         .and_then(|p| p.parse::<i64>().ok())
         .filter(|p| *p >= 1)
+        .map(|p| p.min(MAX_PAGE))
         .unwrap_or(1);
     let per = get("per")
         .and_then(|p| p.parse::<i64>().ok())
@@ -425,6 +429,16 @@ mod tests {
         assert_eq!(p.state.per, 50);
         assert_eq!(p.state.page, 1);
         assert!(p.changed);
+    }
+
+    #[test]
+    fn huge_page_is_capped() {
+        let spec = test_spec();
+        let p = parse(&spec, "page=100000000000000000&per=100");
+        assert_eq!(p.state.page, MAX_PAGE);
+        assert!(p.changed || to_query(&spec, &p.state, true).contains("page=1000000"));
+        // не помещается в i64 — обычный мусор, страница 1
+        assert_eq!(parse(&spec, "page=99999999999999999999999").state.page, 1);
     }
 
     #[test]

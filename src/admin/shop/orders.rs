@@ -64,15 +64,14 @@ pub(crate) async fn list_inner(
 ) -> AppResult<Response> {
     require_orders(&user)?;
     let spec = orders_spec(&state.db, &user).await?;
-    let resolved =
-        views::resolve(
-            &state.db,
-            user.user.id,
-            &spec,
-            raw.as_deref().unwrap_or(""),
-            after_action || crate::admin::is_full_page(&headers),
-        )
-        .await?;
+    let resolved = views::resolve(
+        &state.db,
+        user.user.id,
+        &spec,
+        raw.as_deref().unwrap_or(""),
+        views::restores(&headers, after_action),
+    )
+    .await?;
     let page = ListPage {
         title: "Заказы".into(),
         crumbs: vec![("Магазин".into(), String::new())],
@@ -2362,11 +2361,26 @@ mod tests {
         let cookie = admin_cookie(&db).await;
         let (_, full) = get(&app(&db), "/admin/shop/orders", &cookie).await;
         assert!(full.contains("id=\"list-count\""), "{full}");
-        assert!(!full.contains("hx-swap-oob=\"true\" id=\"list-count\""), "в полной странице счётчик не oob");
+        assert!(
+            !full.contains("hx-swap-oob=\"true\" id=\"list-count\""),
+            "в полной странице счётчик не oob"
+        );
         let (_, all) = htmx_get(&app(&db), "/admin/shop/orders", &cookie, "list-body").await;
-        assert!(all.contains("id=\"list-count\" hx-swap-oob=\"true\">1<"), "{all}");
-        let (_, none) = htmx_get(&app(&db), "/admin/shop/orders?f.paid=eq:Y", &cookie, "list-body").await;
-        assert!(none.contains("id=\"list-count\" hx-swap-oob=\"true\">0<"), "{none}");
+        assert!(
+            all.contains("id=\"list-count\" hx-swap-oob=\"true\">1<"),
+            "{all}"
+        );
+        let (_, none) = htmx_get(
+            &app(&db),
+            "/admin/shop/orders?f.paid=eq:Y",
+            &cookie,
+            "list-body",
+        )
+        .await;
+        assert!(
+            none.contains("id=\"list-count\" hx-swap-oob=\"true\">0<"),
+            "{none}"
+        );
     }
 
     #[sqlx::test]

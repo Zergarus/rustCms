@@ -55,7 +55,10 @@
     if (!keepPop) closePop();
     closeDetails();
     var before = location.pathname + location.search;
+    var old = document.getElementById('list-body');
     return window.htmx.ajax('GET', url, { target: '#list-body', swap: 'outerHTML' }).then(function () {
+      // Запрос не удался (не 2xx, нет замены): адрес и история остаются прежними
+      if (old && old.isConnected) return;
       var after = location.pathname + location.search;
       // состояние {htmx:true}: так htmx узнаёт записи истории и при «назад/вперёд» подгружает страницу по адресу
       history.replaceState({ htmx: true }, '', before);
@@ -65,7 +68,7 @@
       } else if (url !== before) {
         history.pushState({ htmx: true }, '', url);
       }
-    });
+    }, function () { /* сбой запроса: ничего не менять */ });
   }
 
   function currentFilter(code) {

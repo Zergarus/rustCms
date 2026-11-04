@@ -111,6 +111,10 @@ impl TreeBuilder<'_> {
         if !q.is_empty() {
             q.push('&');
         }
+        // Подгруженные ветки продолжают открытый вид: ссылки узлов несут `view=`.
+        if let Some(id) = self.state.view {
+            q.push_str(&format!("view={id}&"));
+        }
         format!(
             "/admin/collections/{}/tree?{q}parent={parent}",
             self.collection_id
@@ -183,5 +187,57 @@ impl TreeBuilder<'_> {
             "can_write": can_write,
             "nodes": self.level(Some(parent)),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admin::list::{spec::test_spec, state::parse};
+
+    fn section(id: i64, parent: Option<i64>) -> Section {
+        let now = chrono::Utc::now();
+        Section {
+            id,
+            collection_id: 1,
+            parent_id: parent,
+            code: format!("s{id}"),
+            xml_id: String::new(),
+            name: format!("S{id}"),
+            active: true,
+            sort: 0,
+            depth_level: 1,
+            description: String::new(),
+            picture_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn lazy_branch_keeps_view() {
+        let spec = test_spec();
+        let mut st = parse(&spec, "per=20").state;
+        st.view = Some(7);
+        let sections = vec![section(1, None), section(2, Some(1))];
+        let b = TreeBuilder {
+            collection_id: 1,
+            spec: &spec,
+            state: &st,
+            sections: &sections,
+            counts: HashMap::new(),
+            path: "/admin/collections/1/items".into(),
+            current: None,
+            ancestors: HashSet::new(),
+        };
+        let nodes = b.level(None);
+        assert_eq!(
+            nodes[0].load_url,
+            "/admin/collections/1/tree?per=20&view=7&parent=1"
+        );
+        // узлы подгруженной ветки, построенные из этого адреса, тоже несут view
+        let st2 = parse(&spec, "per=20&view=7").state;
+        assert_eq!(st2.view, Some(7));
+        assert!(nodes[0].url.contains("view=7"));
     }
 }

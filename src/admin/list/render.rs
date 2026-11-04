@@ -241,7 +241,16 @@ fn chip(spec: &ListSpec, path: &str, st: &ListState, c: &Cond) -> Option<ChipVie
     })
 }
 
-fn pager(spec: &ListSpec, path: &str, st: &ListState, pages: i64) -> Vec<PageLink> {
+/// Ссылки пагинации. При усечённом счёте (`capped`) число страниц неизвестно:
+/// последней страницы нет, «›» показывается, пока текущая страница полная.
+fn pager(
+    spec: &ListSpec,
+    path: &str,
+    st: &ListState,
+    pages: i64,
+    capped: bool,
+    rows_len: usize,
+) -> Vec<PageLink> {
     let link = |p: i64, label: String| {
         let mut next = st.clone();
         next.page = p;
@@ -261,16 +270,25 @@ fn pager(spec: &ListSpec, path: &str, st: &ListState, pages: i64) -> Vec<PageLin
         out.push(link(st.page - 1, "‹".into()));
     }
     let mut last = 0;
-    for p in 1..=pages {
-        if p == 1 || p == pages || (p - st.page).abs() <= 2 {
-            if p - last > 1 {
-                out.push(gap());
-            }
-            out.push(link(p, p.to_string()));
-            last = p;
+    // Усечённый счёт: окно только до текущей страницы, без ссылки на последнюю.
+    let upper = if capped { st.page } else { pages };
+    let mut shown: Vec<i64> = vec![1, upper];
+    shown.extend((st.page - 2..=st.page + 2).filter(|p| (1..=upper).contains(p)));
+    shown.sort_unstable();
+    shown.dedup();
+    for p in shown {
+        if p - last > 1 {
+            out.push(gap());
         }
+        out.push(link(p, p.to_string()));
+        last = p;
     }
-    if st.page < pages {
+    let has_next = if capped {
+        rows_len as i64 >= st.per
+    } else {
+        st.page < pages
+    };
+    if has_next {
         out.push(link(st.page + 1, "›".into()));
     }
     out
@@ -362,9 +380,11 @@ pub async fn run_list(
     }
 
     let (mut rows, total) = fetch(&state.db, spec, &st, &scope).await?;
+    let capped = total >= COUNT_CAP;
     let pages = ((total + st.per - 1) / st.per).max(1);
     let mut replace_url = parsed.changed.then(|| normalized.clone());
-    if st.page > pages {
+    // При усечённом счёте страницы не зажимаем: за пределом пустая таблица с «‹».
+    if !capped && st.page > pages {
         st.page = pages;
         let clamped = url_of(spec, path, &st);
         if full {
@@ -493,8 +513,12 @@ pub async fn run_list(
             }
         })
         .collect();
-    let capped = total >= COUNT_CAP;
     let stored = crate::admin::shell::list_prefs(&state.db, user.user.id, &spec.key).await?;
+    // Запоминаем до отрисовки строки видов: ссылка «Все» берёт запомненное из БД.
+    // Сбой записи запомненного не должен ронять уже готовый список
+    if remember_state && let Err(e) = remember(state, user, spec, &st, &stored).await {
+        tracing::warn!(error = ?e, list = %spec.key, "не удалось сохранить состояние списка");
+    }
     let tree_collapsed = stored.get("tree_collapsed").and_then(Value::as_bool) == Some(true);
     let ctx = context! {
         tree_collapsed,
@@ -510,7 +534,7 @@ pub async fn run_list(
         capped,
         pages,
         cur_page => st.page,
-        pager => pager(spec, path, &st, pages),
+        pager => pager(spec, path, &st, pages, capped, rows.len()),
         current_url => url_of(spec, path, &st),
         only_toggle,
         full,
@@ -523,11 +547,6 @@ pub async fn run_list(
         "_list_body.html"
     };
     let mut resp = render(state, name, ctx)?.into_response();
-    // Сбой записи запомненного не должен ронять уже готовый список
-    if remember_state
-        && let Err(e) = remember(state, user, spec, &st, &stored).await {
-        tracing::warn!(error = ?e, list = %spec.key, "не удалось сохранить состояние списка");
-    }
     if let Some(Ok(v)) = replace_url.as_deref().map(HeaderValue::from_str) {
         resp.headers_mut().insert("HX-Replace-Url", v);
     }
@@ -539,6 +558,39 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn labels(links: &[PageLink]) -> Vec<String> {
+        links.iter().map(|l| l.label.clone()).collect()
+    }
+
+    #[test]
+    fn capped_pager_has_next_while_page_full_and_no_last_link() {
+        let spec = crate::admin::list::spec::test_spec();
+        let mut st = crate::admin::list::state::parse(&spec, "").state;
+        st.per = 50;
+        st.page = 201;
+        let full = pager(&spec, "/x", &st, 201, true, 50);
+        assert_eq!(labels(&full), ["‹", "1", "…", "199", "200", "201", "›"]);
+        // последняя страница не выдумывается: после текущей чисел нет
+        assert!(full.iter().all(|l| l.label != "202"));
+        // за пределом: пустая страница, только «‹», без «›»
+        st.page = 202;
+        let past = pager(&spec, "/x", &st, 201, true, 0);
+        assert_eq!(labels(&past).first().map(String::as_str), Some("‹"));
+        assert!(!labels(&past).contains(&"›".to_string()));
+        // неполная страница — тоже конец
+        st.page = 201;
+        assert!(!labels(&pager(&spec, "/x", &st, 201, true, 7)).contains(&"›".to_string()));
+    }
+
+    #[test]
+    fn uncapped_pager_keeps_last_link() {
+        let spec = crate::admin::list::spec::test_spec();
+        let mut st = crate::admin::list::state::parse(&spec, "").state;
+        st.page = 1;
+        let l = pager(&spec, "/x", &st, 10, false, 50);
+        assert_eq!(labels(&l), ["1", "2", "3", "…", "10", "›"]);
+    }
 
     #[test]
     fn money_cells() {

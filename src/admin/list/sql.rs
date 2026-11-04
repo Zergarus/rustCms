@@ -320,7 +320,7 @@ pub fn select(spec: &ListSpec, st: &ListState, scope: &Scope) -> QueryBuilder<Po
     qb.push(format!(" NULLS LAST, {} LIMIT ", spec.tie_break));
     qb.push_bind(st.per);
     qb.push(" OFFSET ");
-    qb.push_bind((st.page.max(1) - 1) * st.per);
+    qb.push_bind((st.page.max(1) - 1).saturating_mul(st.per));
     qb
 }
 
@@ -461,6 +461,34 @@ mod tests {
         let (rows, total) = fetch(&db, &spec, &st, &Scope::All).await.unwrap();
         assert_eq!(total, 10);
         assert_eq!(rows.len(), 10);
+    }
+
+    #[sqlx::test]
+    async fn pages_past_the_cap_are_reachable(db: sqlx::PgPool) {
+        let spec = series_spec();
+        // 10 050 строк: счёт усечён, но страница 201 (строки 10 001..10 050) полная и достижима
+        let st = parse(&spec, "sort=id&page=201").state;
+        let (rows, total) = fetch(&db, &spec, &st, &Scope::All).await.unwrap();
+        assert_eq!(total, COUNT_CAP);
+        assert_eq!(rows.len(), 50);
+        assert_eq!(rows[0].id, 10_001);
+        let st = parse(&spec, "sort=id&page=202").state;
+        assert!(
+            fetch(&db, &spec, &st, &Scope::All)
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        // огромный номер страницы не роняет запрос
+        let st = parse(&spec, "sort=id&page=100000000000000000&per=100").state;
+        assert!(
+            fetch(&db, &spec, &st, &Scope::All)
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+        );
     }
 
     #[sqlx::test]
