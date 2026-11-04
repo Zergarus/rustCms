@@ -2,6 +2,7 @@
 
 pub(crate) mod bulk;
 pub(crate) mod collection;
+pub(crate) mod edit;
 pub(crate) mod orders;
 pub(crate) mod render;
 pub(crate) mod spec;

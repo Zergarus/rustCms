@@ -110,7 +110,39 @@ pub fn parse_value(prop: &Field, raws: &[&str], enums: &[FieldOption]) -> Result
 }
 
 fn parse_item(prop: &Field, s: &str, enums: &[FieldOption]) -> Result<Value, String> {
-    Ok(match prop.kind.as_str() {
+    parse_item_kind(&prop.kind, &prop.name, s, enums)
+}
+
+/// Одно значение поля из ячейки списка: пустое даёт `null` (у «Да/Нет» — `false`),
+/// обязательное пустое — ошибку. Остальное разбирается как в карточке.
+pub fn parse_single(
+    kind: &str,
+    required: bool,
+    name: &str,
+    options: &[FieldOption],
+    raw: &str,
+) -> Result<Value, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        if required {
+            return Err(format!("«{name}»: обязательное поле"));
+        }
+        return Ok(if kind == "boolean" {
+            Value::Bool(false)
+        } else {
+            Value::Null
+        });
+    }
+    parse_item_kind(kind, name, s, options)
+}
+
+fn parse_item_kind(
+    kind: &str,
+    name: &str,
+    s: &str,
+    options: &[FieldOption],
+) -> Result<Value, String> {
+    Ok(match kind {
         "string" | "text" => Value::String(s.to_string()),
         "number" => {
             let s = s.replace(',', ".");
@@ -121,32 +153,36 @@ fn parse_item(prop: &Field, s: &str, enums: &[FieldOption]) -> Result<Value, Str
                     .parse()
                     .ok()
                     .filter(|f: &f64| f.is_finite())
-                    .ok_or_else(|| format!("«{}»: ожидается число", prop.name))?;
+                    .ok_or_else(|| format!("«{name}»: ожидается число"))?;
                 Value::from(f)
             }
         }
         "date" => {
             let d = NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                .map_err(|_| format!("«{}»: ожидается дата ГГГГ-ММ-ДД", prop.name))?;
+                .map_err(|_| format!("«{name}»: ожидается дата ГГГГ-ММ-ДД"))?;
             Value::String(d.format("%Y-%m-%d").to_string())
         }
+        "boolean" => Value::Bool(!matches!(
+            s.to_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        )),
         "list" => {
-            let id = parse_id(prop, s)?;
-            if !enums.iter().any(|e| e.id == id) {
-                return Err(format!("«{}»: неизвестный вариант", prop.name));
+            let id = parse_id(name, s)?;
+            if !options.iter().any(|e| e.id == id) {
+                return Err(format!("«{name}»: неизвестный вариант"));
             }
             Value::from(id)
         }
-        "element" | "file" => Value::from(parse_id(prop, s)?),
+        "element" | "file" => Value::from(parse_id(name, s)?),
         kind => return Err(format!("неизвестный тип поля {kind}")),
     })
 }
 
-fn parse_id(prop: &Field, s: &str) -> Result<i64, String> {
+fn parse_id(name: &str, s: &str) -> Result<i64, String> {
     s.parse::<i64>()
         .ok()
         .filter(|id| *id > 0)
-        .ok_or_else(|| format!("«{}»: ожидается id, получено «{s}»", prop.name))
+        .ok_or_else(|| format!("«{name}»: ожидается id, получено «{s}»"))
 }
 
 fn is_empty(value: &Value) -> bool {
@@ -188,6 +224,8 @@ pub fn to_form_values(prop: &Field, value: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     fn prop(kind: &str, required: bool) -> Field {
@@ -285,6 +323,43 @@ mod tests {
             Ok(serde_json::json!([10, 11]))
         );
         assert!(parse_value(&prop("list", false), &["12"], &enums).is_err());
+    }
+
+    #[test]
+    fn single_cell_values() {
+        let opts = [FieldOption {
+            id: 3,
+            field_id: 1,
+            value: "v".into(),
+            xml_id: "x".into(),
+            sort: 0,
+            is_default: false,
+        }];
+        assert_eq!(parse_single("string", false, "S", &[], ""), Ok(Value::Null));
+        assert_eq!(
+            parse_single("string", false, "S", &[], " текст "),
+            Ok(json!("текст"))
+        );
+        assert_eq!(
+            parse_single("number", false, "N", &[], "1,5"),
+            Ok(json!(1.5))
+        );
+        assert_eq!(
+            parse_single("date", false, "D", &[], "2026-05-06"),
+            Ok(json!("2026-05-06"))
+        );
+        assert_eq!(
+            parse_single("boolean", false, "B", &[], "true"),
+            Ok(json!(true))
+        );
+        assert_eq!(
+            parse_single("boolean", false, "B", &[], ""),
+            Ok(json!(false))
+        );
+        assert_eq!(parse_single("list", false, "L", &opts, "3"), Ok(json!(3)));
+        assert!(parse_single("string", true, "S", &[], "").is_err());
+        assert!(parse_single("list", false, "L", &opts, "9").is_err());
+        assert!(parse_single("date", false, "D", &[], "06.05.2026").is_err());
     }
 
     #[test]

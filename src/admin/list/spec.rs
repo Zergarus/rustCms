@@ -49,7 +49,6 @@ pub enum EditTarget {
 #[derive(Debug, Clone)]
 pub struct CellEdit {
     /// Куда писать значение; читается обработчиком сохранения ячейки.
-    #[allow(dead_code)]
     pub target: EditTarget,
     pub kind: EditKind,
     pub required: bool,

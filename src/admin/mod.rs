@@ -83,6 +83,7 @@ pub fn router(state: AppState) -> Router<AppState> {
             post(items::tree_collapsed),
         )
         .route("/lists/bulk", post(list::bulk::handle))
+        .route("/lists/cell", post(list::edit::handle))
         .route("/views", post(list::views::create))
         .route("/views/{id}", post(list::views::update))
         .route("/views/{id}/delete", post(list::views::delete))

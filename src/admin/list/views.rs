@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use axum::{
     Extension, Form,
+    body::Body,
     extract::{Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, Uri},
     response::Response,
@@ -464,6 +465,15 @@ pub(crate) fn with_toast(
     let [(name, value)] = toast(text, kind);
     resp.headers_mut().insert(name, value);
     *resp.status_mut() = status;
+    resp
+}
+
+/// Отказ без замены списка: `HX-Reswap: none`, причина — уведомлением.
+pub(crate) fn reject(status: StatusCode, text: &str) -> Response {
+    let mut resp = with_toast(Response::new(Body::empty()), status, text, FlashKind::Error);
+    // 4xx htmx не подставляет в страницу (см. htmx-config в base.html): список остаётся как был
+    resp.headers_mut()
+        .insert("HX-Reswap", HeaderValue::from_static("none"));
     resp
 }
 

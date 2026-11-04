@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use axum::{Extension, Form, body::Body, extract::State, http::StatusCode, response::Response};
+use axum::{Extension, Form, extract::State, http::StatusCode, response::Response};
 use serde::Serialize;
 
 use super::{
@@ -244,19 +244,11 @@ pub fn check_param(action: &BulkAction, raw: &str) -> Result<String, &'static st
     }
 }
 
-fn reject(status: StatusCode, text: &str) -> Response {
-    let mut resp = views::with_toast(Response::new(Body::empty()), status, text, FlashKind::Error);
-    // 403 htmx подставляет в страницу (см. htmx-config в base.html): список остаётся как был
-    resp.headers_mut()
-        .insert("HX-Reswap", axum::http::HeaderValue::from_static("none"));
-    resp
-}
-
 /// Ошибка после выполнения действий — не 500: записи уже изменены, список просто не обновлён.
 fn degrade(result: AppResult<Response>) -> Response {
     result.unwrap_or_else(|e| {
         tracing::error!("массовое действие выполнено, но список не обновлён: {e}");
-        reject(
+        views::reject(
             StatusCode::OK,
             "Выполнено, но список не обновлён — обновите страницу",
         )
@@ -290,7 +282,7 @@ pub async fn handle(
 ) -> AppResult<Response> {
     let f = BulkForm::parse(&form);
     if f.ids.len() as i64 > BULK_LIMIT {
-        return Ok(reject(
+        return Ok(views::reject(
             StatusCode::UNPROCESSABLE_ENTITY,
             SelectError::TooMany.message(),
         ));
@@ -301,17 +293,17 @@ pub async fn handle(
     spec.bulk_actions.extend(tests::test_actions());
     let expected = views::list_path(&f.list_key).ok_or(AppError::NotFound)?;
     if f.path != expected {
-        return Ok(reject(
+        return Ok(views::reject(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Неверный адрес списка",
         ));
     }
     let Some(action) = spec.bulk_actions.iter().find(|a| a.code == f.action) else {
-        return Ok(reject(StatusCode::FORBIDDEN, "Действие недоступно"));
+        return Ok(views::reject(StatusCode::FORBIDDEN, "Действие недоступно"));
     };
     let param = match check_param(action, &f.param) {
         Ok(p) => p,
-        Err(msg) => return Ok(reject(StatusCode::UNPROCESSABLE_ENTITY, msg)),
+        Err(msg) => return Ok(views::reject(StatusCode::UNPROCESSABLE_ENTITY, msg)),
     };
     let notify = f.notify && action.notify;
 
@@ -332,7 +324,7 @@ pub async fn handle(
     let only = (f.scope == BulkScope::Ids).then_some(f.ids.as_slice());
     let ids = match select_ids(&state.db, &spec, &st, &scope, only).await? {
         Ok(ids) => ids,
-        Err(e) => return Ok(reject(StatusCode::UNPROCESSABLE_ENTITY, e.message())),
+        Err(e) => return Ok(views::reject(StatusCode::UNPROCESSABLE_ENTITY, e.message())),
     };
     if f.scope == BulkScope::Filter && f.expect != Some(ids.len() as i64) {
         let text = match f.expect {
@@ -342,7 +334,7 @@ pub async fn handle(
             ),
             None => "Не указано число записей — обновите страницу".to_string(),
         };
-        return Ok(reject(StatusCode::UNPROCESSABLE_ENTITY, &text));
+        return Ok(views::reject(StatusCode::UNPROCESSABLE_ENTITY, &text));
     }
 
     let ctx = BulkCtx {
