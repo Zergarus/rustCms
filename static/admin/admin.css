@@ -473,6 +473,12 @@ textarea.bc-text[hidden] { display: none; }
 .view-dirty .dirty { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--warn); }
 .view-dirty .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
 .list-notice { margin-bottom: 8px; padding: 8px 12px; border-radius: 7px; border: 1px solid var(--border-strong); background: var(--raised); color: var(--muted); font-size: 13px; }
+.bulk-summary { position: relative; margin-bottom: 10px; padding: 10px 36px 10px 12px; border-radius: 7px; border: 1px solid var(--border-strong); background: var(--raised); font-size: 13px; }
+.bulk-summary-x { position: absolute; top: 6px; right: 8px; border: 0; background: none; color: var(--muted); cursor: pointer; }
+.bulk-summary-head { font-weight: 500; margin-bottom: 6px; }
+.bulk-group { margin-top: 6px; }
+.bulk-reason { color: var(--muted); }
+.bulk-links a { margin-right: 2px; }
 .list-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-height: 34px; margin-bottom: 10px; }
 .chip { display: inline-flex; align-items: center; height: 28px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--raised); overflow: hidden; font-size: 13px; }
 .chip-main { display: inline-flex; align-items: center; gap: 4px; padding: 0 8px 0 9px; }

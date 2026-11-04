@@ -1,5 +1,6 @@
 //! Движок списков админки: спека, состояние URL, SQL, рендер.
 
+pub(crate) mod bulk;
 pub(crate) mod collection;
 pub(crate) mod orders;
 pub(crate) mod render;

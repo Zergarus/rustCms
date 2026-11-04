@@ -336,6 +336,44 @@ pub fn count(spec: &ListSpec, st: &ListState, scope: &Scope) -> QueryBuilder<Pos
     qb
 }
 
+/// Id записей по условию списка (без сортировки по колонкам и страниц). `only` пересекает
+/// выборку с переданными id: скрытые фильтром и чужие отбрасываются самим условием.
+pub fn ids(
+    spec: &ListSpec,
+    st: &ListState,
+    scope: &Scope,
+    only: Option<&[i64]>,
+    limit: i64,
+) -> QueryBuilder<Postgres> {
+    let (head, tail) = split_from(&spec.from);
+    let mut qb = QueryBuilder::new(format!("SELECT ({})::bigint AS id {head}", spec.id_expr));
+    for j in needed_joins(spec, filter_joins(spec, st)) {
+        qb.push(j);
+    }
+    qb.push(format!(" {tail}"));
+    push_where(&mut qb, spec, st, scope);
+    if let Some(only) = only {
+        qb.push(format!(" AND ({}) = ANY(", spec.id_expr));
+        qb.push_bind(only.to_vec());
+        qb.push(")");
+    }
+    qb.push(format!(" ORDER BY ({}) LIMIT ", spec.id_expr));
+    qb.push_bind(limit);
+    qb
+}
+
+/// Подписи записей (`label_expr`) по id.
+pub fn labels(spec: &ListSpec, ids: &[i64]) -> QueryBuilder<Postgres> {
+    let (head, tail) = split_from(&spec.from);
+    let mut qb = QueryBuilder::new(format!(
+        "SELECT ({})::bigint AS id, ({})::text AS label {head} {tail} AND ({}) = ANY(",
+        spec.id_expr, spec.label_expr, spec.id_expr
+    ));
+    qb.push_bind(ids.to_vec());
+    qb.push(")");
+    qb
+}
+
 pub async fn fetch(
     db: &PgPool,
     spec: &ListSpec,

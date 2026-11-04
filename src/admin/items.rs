@@ -920,7 +920,7 @@ pub async fn list(
     RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    list_inner(state, user, id, raw, headers, false).await
+    list_inner(state, user, id, raw, headers, false, None).await
 }
 
 /// `after_action` — перерисовка после действия с видом: показывает запомненное и ничего не запоминает.
@@ -931,6 +931,7 @@ pub(crate) async fn list_inner(
     raw: Option<String>,
     headers: HeaderMap,
     after_action: bool,
+    bulk: Option<crate::admin::list::bulk::BulkSummary>,
 ) -> AppResult<Response> {
     user.require_collection(id, Level::Read)?;
     let collection = repo::get_collection(&state.db, id)
@@ -1038,6 +1039,7 @@ pub(crate) async fn list_inner(
             .as_ref()
             .is_some_and(|c| sections.iter().any(|s| s.parent_id == Some(c.id))),
         section_name: current.as_ref().map(|s| s.name.clone()),
+        bulk,
     };
     run_list(
         &state,
@@ -1656,6 +1658,16 @@ pub async fn delete(
         url.push_str(&format!("?section={section}"));
     }
     Ok(Redirect::to(&url))
+}
+
+/// Массовое действие над записью коллекции (реестр действий — `list::bulk`).
+pub(crate) async fn bulk_run(
+    _ctx: &crate::admin::list::bulk::BulkCtx<'_>,
+    _action: &str,
+    _param: &str,
+    _id: i64,
+) -> Result<(), String> {
+    Err("неизвестное действие".into())
 }
 
 #[cfg(test)]

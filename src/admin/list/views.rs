@@ -377,12 +377,24 @@ fn check_path(form: &HashMap<String, String>, list_key: &str) -> AppResult<Strin
 }
 
 /// Перерисовывает список по запросу `query`: вид, которого уже нет, из него убирается.
-async fn rerender(
+pub(crate) async fn rerender(
     state: &AppState,
     user: &Access,
     list_key: &str,
     path: &str,
     query: &str,
+) -> AppResult<Response> {
+    rerender_with(state, user, list_key, path, query, None).await
+}
+
+/// [`rerender`] с итогом массового действия в начале `#list-body`.
+pub(crate) async fn rerender_with(
+    state: &AppState,
+    user: &Access,
+    list_key: &str,
+    path: &str,
+    query: &str,
+    bulk: Option<super::bulk::BulkSummary>,
 ) -> AppResult<Response> {
     let mut pairs = pairs_of(query);
     let viewed = pairs
@@ -411,6 +423,7 @@ async fn rerender(
             headers,
             uri,
             true,
+            bulk,
         )
         .await?
     } else {
@@ -425,6 +438,7 @@ async fn rerender(
             Some(query.clone()),
             headers,
             true,
+            bulk,
         )
         .await?
     };
@@ -441,7 +455,12 @@ async fn rerender(
     Ok(resp)
 }
 
-fn with_toast(mut resp: Response, status: StatusCode, text: &str, kind: FlashKind) -> Response {
+pub(crate) fn with_toast(
+    mut resp: Response,
+    status: StatusCode,
+    text: &str,
+    kind: FlashKind,
+) -> Response {
     let [(name, value)] = toast(text, kind);
     resp.headers_mut().insert(name, value);
     *resp.status_mut() = status;

@@ -161,6 +161,8 @@ pub(crate) async fn build_spec(db: &PgPool, can_share: bool) -> sqlx::Result<Lis
         open_url: "/admin/shop/orders/{id}".into(),
         can_share,
         muted_expr: Some("o.canceled".into()),
+        label_expr: "COALESCE(o.account_number, o.id::text)".into(),
+        bulk_actions: Vec::new(),
     })
 }
 

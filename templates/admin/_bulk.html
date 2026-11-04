@@ -1,0 +1,12 @@
+{#- Итог массового действия: над видами; закрывается ✕ -#}
+{% set b = page.bulk %}
+<div class="bulk-summary" id="bulk-summary" role="status">
+  <button class="bulk-summary-x" type="button" aria-label="Закрыть" onclick="this.closest('.bulk-summary').remove()">✕</button>
+  <div class="bulk-summary-head">Выполнено {{ b.done }} из {{ b.total }}. Не выполнено:</div>
+  {% for g in b.groups %}
+  <div class="bulk-group">
+    <div class="bulk-reason">{{ g.reason }}</div>
+    <div class="bulk-links">{% for l in g.links %}<a href="{{ l[1] }}">{{ l[0] }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% if g.more %} и ещё {{ g.more }}{% endif %}</div>
+  </div>
+  {% endfor %}
+</div>

@@ -34,6 +34,8 @@ pub struct ListPage {
     pub section_name: Option<String>,
     /// У выбранного раздела есть подразделы: показывается галочка «только этот раздел».
     pub section_has_kids: bool,
+    /// Итог массового действия: блок в начале `#list-body`.
+    pub bulk: Option<super::bulk::BulkSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]

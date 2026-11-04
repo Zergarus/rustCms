@@ -1,6 +1,6 @@
 //! Описание списка: колонки, фильтры, источник данных.
 
-use super::state::Sort;
+use super::{bulk::BulkAction, state::Sort};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldType {
@@ -78,6 +78,10 @@ pub struct ListSpec {
     pub can_share: bool,
     /// Булево SQL-выражение: строки с истиной выводятся приглушёнными.
     pub muted_expr: Option<String>,
+    /// SQL-выражение подписи записи для итога массовых действий (номер заказа, название).
+    pub label_expr: String,
+    /// Массовые действия, разрешённые пользователю; пусто — нет чекбоксов и панели.
+    pub bulk_actions: Vec<BulkAction>,
 }
 
 impl ListSpec {
@@ -169,5 +173,7 @@ pub(crate) fn test_spec() -> ListSpec {
         open_url: "/admin/test/{id}".into(),
         can_share: false,
         muted_expr: None,
+        label_expr: "t.id::text".into(),
+        bulk_actions: Vec::new(),
     }
 }

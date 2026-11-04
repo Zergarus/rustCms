@@ -55,7 +55,7 @@ pub async fn list(
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
 ) -> AppResult<Response> {
-    list_inner(state, user, raw, headers, uri, false).await
+    list_inner(state, user, raw, headers, uri, false, None).await
 }
 
 /// `after_action` — перерисовка после действия с видом: показывает запомненное и ничего не запоминает.
@@ -66,6 +66,7 @@ pub(crate) async fn list_inner(
     headers: HeaderMap,
     uri: axum::http::Uri,
     after_action: bool,
+    bulk: Option<crate::admin::list::bulk::BulkSummary>,
 ) -> AppResult<Response> {
     require_orders(&user)?;
     let spec = orders_spec(&state.db, &user).await?;
@@ -80,6 +81,7 @@ pub(crate) async fn list_inner(
     let page = ListPage {
         title: "Заказы".into(),
         crumbs: vec![("Магазин".into(), String::new())],
+        bulk,
         ..ListPage::default()
     };
     run_list(
@@ -1033,6 +1035,16 @@ pub async fn save_shipment(
         }
         Err(StockError::Db(e)) => Err(e.into()),
     }
+}
+
+/// Массовое действие над заказом (реестр действий — `list::bulk`).
+pub(crate) async fn bulk_run(
+    _ctx: &crate::admin::list::bulk::BulkCtx<'_>,
+    _action: &str,
+    _param: &str,
+    _id: i64,
+) -> Result<(), String> {
+    Err("неизвестное действие".into())
 }
 
 #[cfg(test)]

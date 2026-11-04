@@ -347,6 +347,8 @@ pub async fn collection_spec(db: &PgPool, user: &Access, c: &Collection) -> sqlx
         open_url: "/admin/items/{id}".into(),
         can_share: user.collection_level(id) >= Level::Write || user.can(COLLECTIONS_MANAGE),
         muted_expr: Some("NOT ci.active".into()),
+        label_expr: "ci.name".into(),
+        bulk_actions: Vec::new(),
     })
 }
 
