@@ -694,7 +694,10 @@ mod tests {
         let cookie = admin_cookie(&db).await;
         let (st, _, body) = get(&app, &path, &cookie).await;
         assert_eq!(st, StatusCode::OK, "{body}");
-        assert!(body.contains("data-edit"), "{body}");
+        for code in ["name", "code", "active"] {
+            assert!(body.contains(&format!("data-edit=\"{code}\"")), "{body}");
+        }
+        assert!(!body.contains("data-edit=\"\""), "{body}");
         assert!(body.contains("data-version"), "{body}");
         assert!(!body.contains("\"edit_columns\":[]"), "{body}");
         assert!(body.contains("\"edit_columns\":[{"), "{body}");

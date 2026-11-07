@@ -122,6 +122,7 @@ fn edit_value(v: &Value) -> String {
 
 #[derive(Serialize)]
 struct CellView {
+    code: String,
     text: String,
     num: bool,
     first: bool,
@@ -509,6 +510,7 @@ pub async fn run_list(
                         _ => "",
                     };
                     CellView {
+                        code: c.code.clone(),
                         text: format_cell(&c.ty, &v, cur),
                         num: matches!(c.ty, FieldType::Number | FieldType::Money),
                         first: i == 0,

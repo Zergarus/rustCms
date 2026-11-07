@@ -10,6 +10,13 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-05-admin-inline-edit-design.md`
 
+## Статус на 2026-11-08
+
+- Tasks 1–3 реализованы коммитами `7e75ade`, `86f22d9`, `3c7fff6`.
+- Итоговое ревью выявило пустой `data-edit`: в `CellView` отсутствовал код колонки. Добавлена передача кода и регрессионная проверка точных атрибутов для `name`, `code`, `active`. До исправления тест воспроизвёл ошибку.
+- README дополнен описанием правки в таблице.
+- Браузерная проверка Task 3 / Step 6 остаётся открытой: инструмент вернул `The browser access host is unavailable`. Автоматические проверки не заменяют этот пункт.
+
 ## Global Constraints
 
 - Ветка `feature/admin-inline-edit` (от `main`): перед Task 1 — `git switch -c feature/admin-inline-edit`. Коммиты на русском в стиле `Админка: …`, без упоминаний ИИ и `Co-Authored-By`.
@@ -310,6 +317,6 @@ async fn field(db: &PgPool, c: i64, code: &str, kind: &str) -> i64 {
 
 ### Task 4: Итоговая проверка
 
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `node --check static/admin/list.js` → PASS.
-- [ ] `README.md`, раздел «Интерфейс админки» → «Списки»: абзац о правке в таблице (двойной клик, `Enter`/`Esc`/`Tab`, типы полей, только при праве записи, 409).
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `node --check static/admin/list.js` → PASS (2026-11-08: 1129 тестов).
+- [x] `README.md`, раздел «Интерфейс админки» → «Списки»: абзац о правке в таблице (двойной клик, `Enter`/`Esc`/`Tab`, типы полей, только при праве записи, 409).
 - [ ] Commit `Админка: этап 3.3 — итоговые правки`, если что-то изменилось.
