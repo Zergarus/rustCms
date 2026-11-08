@@ -52,17 +52,14 @@ async fn sitemap_index_counts_and_order(db: PgPool) {
     assert_eq!(json["errors"], serde_json::json!([]));
 
     let items = json["data"]["items"].as_array().unwrap();
-    let types: Vec<&str> = items
-        .iter()
-        .map(|i| i["type"].as_str().unwrap())
-        .collect();
-    assert_eq!(types, ["products", "catalog", "news", "schemes", "contacts"]);
+    let types: Vec<&str> = items.iter().map(|i| i["type"].as_str().unwrap()).collect();
+    assert_eq!(
+        types,
+        ["products", "catalog", "news", "schemes", "contacts"]
+    );
 
     let count = |t: &str| {
-        items
-            .iter()
-            .find(|i| i["type"] == t)
-            .unwrap()["count"]
+        items.iter().find(|i| i["type"] == t).unwrap()["count"]
             .as_i64()
             .unwrap()
     };
