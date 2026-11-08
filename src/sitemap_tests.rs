@@ -374,3 +374,24 @@ async fn sitemap_admin_requires_collections_manage(db: PgPool) {
     let (status, _, _) = get_raw(&app, "/admin/seo/sitemap", &cookie).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
+
+#[sqlx::test]
+async fn sitemap_skips_sources_without_address_template(db: PgPool) {
+    // Коллекция без detail_page_url и тип без своего шаблона: адресов нет,
+    // поэтому и счётчик должен быть нулевым — иначе витрина сделает пустой файл.
+    let plain = collection(&db, "plain", "", "").await;
+    item(&db, plain, "one", true, None).await;
+    sitemap(&db, "plain", "", "items", 100, true, &[plain]).await;
+
+    let app = crate::app(test_state(db));
+    let (_, _, body) = get_raw(&app, "/api/v1/seo/sitemap", "").await;
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let item = json["data"]["items"].as_array().unwrap().first().unwrap();
+    assert_eq!(item["type"], "plain");
+    assert_eq!(item["count"], 0);
+    assert!(item["lastmod"].is_null());
+
+    let (_, _, body) = get_raw(&app, "/api/v1/seo/sitemap/plain", "").await;
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert!(item_paths(&json).is_empty());
+}

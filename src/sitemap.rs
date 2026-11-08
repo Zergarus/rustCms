@@ -153,6 +153,9 @@ pub async fn index(State(state): State<AppState>) -> AppResult<Response> {
     for entry in list(&state.db, true).await? {
         let (mut count, mut lastmod) = (0i64, None::<DateTime<Utc>>);
         for source in &entry.sources {
+            if template(&entry.sitemap, source).is_empty() {
+                continue;
+            }
             let (source_count, source_lastmod) =
                 aggregate(&state.db, &entry.sitemap, source).await?;
             count += source_count;
@@ -178,14 +181,7 @@ pub async fn kind(State(state): State<AppState>, Path(raw): Path<String>) -> App
         .ok_or(AppError::NotFound)?;
     let mut items = Vec::new();
     for source in &entry.sources {
-        let template = if entry.sitemap.path_template.is_empty() {
-            match entry.sitemap.include.as_str() {
-                "sections" => &source.section_page_url,
-                _ => &source.detail_page_url,
-            }
-        } else {
-            &entry.sitemap.path_template
-        };
+        let template = template(&entry.sitemap, source);
         if template.is_empty() {
             continue;
         }
@@ -223,6 +219,18 @@ pub async fn kind(State(state): State<AppState>, Path(raw): Path<String>) -> App
         "type": entry.sitemap.name,
         "items": items,
     })))
+}
+
+/// Шаблон адреса: свой у типа, иначе шаблон коллекции. Пустой — адресов нет.
+fn template<'a>(sitemap: &'a Type, source: &'a Source) -> &'a str {
+    if !sitemap.path_template.is_empty() {
+        return &sitemap.path_template;
+    }
+    if sitemap.include == "sections" {
+        &source.section_page_url
+    } else {
+        &source.detail_page_url
+    }
 }
 
 fn format_date(at: DateTime<Utc>) -> String {
