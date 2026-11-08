@@ -81,3 +81,70 @@ async fn sitemap_index_counts_and_order(db: PgPool) {
     let lastmod = items[0]["lastmod"].as_str().unwrap();
     assert!(lastmod.ends_with("+00:00"), "{lastmod}");
 }
+
+#[sqlx::test]
+async fn sitemap_items_paths_and_unknown_type(db: PgPool) {
+    let db = fixture(&db).await;
+    let app = crate::app(test_state(db.clone()));
+
+    let (status, _, body) = get_raw(&app, "/api/v1/seo/sitemap/products", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"]["type"], "products");
+    let items = json["data"]["items"].as_array().unwrap();
+    let paths: Vec<&str> = items.iter().map(|i| i["path"].as_str().unwrap()).collect();
+    // catalog1 и CATALOG2 — по коду (в нижнем регистре), запись без кода — по id
+    assert!(paths.contains(&"/product/catalog1/"), "{paths:?}");
+    assert!(paths.contains(&"/product/catalog2/"), "{paths:?}");
+    assert!(
+        paths.iter().any(|p| p
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .parse::<i64>()
+            .is_ok()),
+        "{paths:?}"
+    );
+    assert_eq!(paths.len(), 3, "{paths:?}");
+    assert!(!paths.iter().any(|p| p.contains("//")), "{paths:?}");
+    let lastmod = items[0]["lastmod"].as_str().unwrap();
+    assert!(lastmod.ends_with("+00:00"), "{lastmod}");
+
+    let (_, _, body) = get_raw(&app, "/api/v1/seo/sitemap/news", "").await;
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let paths: Vec<&str> = json["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["/news/info1/", "/news/info2/"]);
+
+    let (_, _, body) = get_raw(&app, "/api/v1/seo/sitemap/schemes", "").await;
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"]["items"][0]["path"], "/schemes/schemes1/");
+
+    for t in ["catalog", "contacts"] {
+        let (status, _, body) = get_raw(&app, &format!("/api/v1/seo/sitemap/{t}"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["items"].as_array().unwrap().len(), 0, "{t}");
+        assert_eq!(json["data"]["type"], t);
+    }
+
+    let (status, _, body) = get_raw(&app, "/api/v1/seo/sitemap/nope", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "not_found");
+
+    // Выключенная из API коллекция не отдаёт записи, хотя они активны и опубликованы.
+    sqlx::query("UPDATE collections SET api_enabled = FALSE WHERE code = 'info'")
+        .execute(&db)
+        .await
+        .unwrap();
+    let (status, _, body) = get_raw(&app, "/api/v1/seo/sitemap/news", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["data"]["items"].as_array().unwrap().len(), 0);
+}
