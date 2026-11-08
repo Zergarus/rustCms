@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% set section = "collections" %}
+{% block title %}Sitemap — {{ form.name or "новый тип" }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>{{ form.name or "Новый тип" }}</h1>
+  <a class="btn" href="/admin/seo/sitemap">К списку</a>
+</div>
+<form class="card form" method="post" action="{% if id %}/admin/seo/sitemap/{{ id }}{% else %}/admin/seo/sitemap{% endif %}">
+{% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
+<label>Имя типа<input name="name" value="{{ form.name }}" maxlength="64" required></label>
+<p class="muted">Сегмент адреса API: <code>/api/v1/seo/sitemap/{имя}</code>. Строчные латинские буквы, цифры, дефис.</p>
+<label>Сортировка<input name="sort" type="number" value="{{ form.sort }}"></label>
+<label>Что включать<select name="include">
+{% for value, label in [("items", "Записи коллекций"), ("sections", "Разделы коллекций")] %}
+<option value="{{ value }}" {% if form.include == value %}selected{% endif %}>{{ label }}</option>
+{% endfor %}</select></label>
+<label>Коллекции<select name="collection" multiple size="8">
+{% for item in collections %}
+<option value="{{ item.id }}" {% if item.id in form.collections %}selected{% endif %}>{{ item.code }} — {{ item.name }}</option>
+{% endfor %}</select></label>
+<p class="muted">Можно выбрать несколько: счётчик суммируется, дата берётся самая свежая.</p>
+<label>Шаблон адреса<input name="path_template" value="{{ form.path_template }}" maxlength="500" placeholder="/product/#ELEMENT_CODE_OR_ID#/"></label>
+<p class="muted">Пусто — берётся шаблон коллекции: <code>detail_page_url</code> для записей, <code>section_page_url</code> для разделов. Подстановки: <code>#ELEMENT_ID#</code>, <code>#ELEMENT_CODE#</code>, <code>#ELEMENT_CODE_OR_ID#</code>, <code>#SECTION_CODE#</code>, <code>#SECTION_CODE_PATH#</code>, <code>#ID#</code>, <code>#CODE#</code>, <code>#SITE_DIR#</code>.</p>
+<label class="checkbox"><input type="checkbox" name="active" value="on" {% if form.active %}checked{% endif %}> Активен</label>
+<button class="btn primary" type="submit">Сохранить</button>
+</form>
+{% endblock %}

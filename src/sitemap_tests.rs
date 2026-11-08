@@ -1,49 +1,146 @@
+use crate::sitemap::{Ctx, normalize, render};
 use crate::test_support::{get_raw, test_state};
 use axum::http::StatusCode;
 use serde_json::Value;
 use sqlx::PgPool;
 
-/// Фикстура: catalog (3 активных — из них один с пустым кодом и один с заглавными
-/// в коде, 1 неактивная, 1 с будущей публикацией), info (2), schemes (1).
-/// Коллекция `contacts` отсутствует вовсе.
+/// Коллекция с шаблонами адресов. `detail` — шаблон записи, `section` — раздела.
+async fn collection(db: &PgPool, code: &str, detail: &str, section: &str) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO collections(code,name,api_enabled,detail_page_url,section_page_url)
+         VALUES ($1,$1,TRUE,$2,$3) RETURNING id",
+    )
+    .bind(code)
+    .bind(detail)
+    .bind(section)
+    .fetch_one(db)
+    .await
+    .unwrap()
+}
+
+async fn item(
+    db: &PgPool,
+    collection_id: i64,
+    code: &str,
+    active: bool,
+    published: Option<&str>,
+) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO collection_items(collection_id,code,name,active,published_at)
+         VALUES ($1,$2,$3,$4,$5::timestamptz) RETURNING id",
+    )
+    .bind(collection_id)
+    .bind(code)
+    .bind(format!("Запись {code}"))
+    .bind(active)
+    .bind(published)
+    .fetch_one(db)
+    .await
+    .unwrap()
+}
+
+async fn section(db: &PgPool, collection_id: i64, parent: Option<i64>, code: &str) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO collection_sections(collection_id,parent_id,code,name)
+         VALUES ($1,$2,$3,$3) RETURNING id",
+    )
+    .bind(collection_id)
+    .bind(parent)
+    .bind(code)
+    .fetch_one(db)
+    .await
+    .unwrap()
+}
+
+async fn sitemap(
+    db: &PgPool,
+    name: &str,
+    template: &str,
+    include: &str,
+    sort: i32,
+    active: bool,
+    collections: &[i64],
+) -> i64 {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO seo_sitemap(name,path_template,include,sort,active)
+         VALUES ($1,$2,$3,$4,$5) RETURNING id",
+    )
+    .bind(name)
+    .bind(template)
+    .bind(include)
+    .bind(sort)
+    .bind(active)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    for collection_id in collections {
+        sqlx::query("INSERT INTO seo_sitemap_collection(sitemap_id,collection_id) VALUES ($1,$2)")
+            .bind(id)
+            .bind(collection_id)
+            .execute(db)
+            .await
+            .unwrap();
+    }
+    id
+}
+
+/// ТрансОпт-подобная конфигурация: товары в двух коллекциях, новости и схемы из
+/// шаблона коллекции, разделы каталога, пустой / выключенный тип.
 async fn fixture(db: &PgPool) -> PgPool {
-    for q in [
-        "INSERT INTO collections(code,name,api_enabled) VALUES ('catalog','Каталог',TRUE)",
-        "INSERT INTO collections(code,name,api_enabled) VALUES ('info','Статьи',TRUE)",
-        "INSERT INTO collections(code,name,api_enabled) VALUES ('schemes','Схемы',TRUE)",
-    ] {
-        sqlx::query(q).execute(db).await.unwrap();
-    }
-    for (collection, code, active, published) in [
-        ("catalog", "catalog1", true, None),
-        ("catalog", "CATALOG2", true, None), // путь должен прийти в нижнем регистре
-        ("catalog", "", true, None),         // пустой код — путь по id
-        ("catalog", "catalog4", false, None), // неактивная
-        ("catalog", "catalog5", true, Some("2999-01-01")), // будущая публикация
-        ("info", "info1", true, None),
-        ("info", "info2", true, None),
-        ("schemes", "schemes1", true, None),
-    ] {
-        sqlx::query(
-            "INSERT INTO collection_items(collection_id,code,name,active,published_at)
-             SELECT id,$1,$2,$3,$4::timestamptz FROM collections WHERE code=$5",
-        )
-        .bind(code)
-        .bind(format!("Запись {code}"))
-        .bind(active)
-        .bind(published)
-        .bind(collection)
-        .execute(db)
-        .await
-        .unwrap();
-    }
+    let catalog = collection(
+        db,
+        "catalog",
+        "/catalog/#SECTION_CODE_PATH#/#ELEMENT_ID#/",
+        "/catalog/#SECTION_CODE_PATH#/",
+    )
+    .await;
+    let second = collection(db, "catalog2", "/catalog2/#ELEMENT_CODE#/", "/catalog2/").await;
+    let info = collection(db, "info", "/news/#ELEMENT_CODE#/", "/news/").await;
+    let schemes = collection(db, "schemes", "/schemes/#ELEMENT_CODE#/", "/schemes/").await;
+
+    item(db, catalog, "catalog1", true, None).await;
+    item(db, catalog, "CATALOG2", true, None).await;
+    item(db, catalog, "", true, None).await;
+    item(db, catalog, "catalog4", false, None).await;
+    item(db, catalog, "catalog5", true, Some("2999-01-01")).await;
+    item(db, second, "second1", true, None).await;
+    item(db, info, "info1", true, None).await;
+    item(db, info, "info2", true, None).await;
+    item(db, schemes, "schemes1", true, None).await;
+
+    let root = section(db, catalog, None, "Root").await;
+    section(db, catalog, Some(root), "Child").await;
+
+    sitemap(
+        db,
+        "products",
+        "/product/#ELEMENT_CODE_OR_ID#/",
+        "items",
+        100,
+        true,
+        &[catalog, second],
+    )
+    .await;
+    sitemap(db, "catalog", "", "sections", 200, true, &[catalog]).await;
+    sitemap(db, "news", "", "items", 300, true, &[info]).await;
+    sitemap(db, "schemes", "", "items", 400, true, &[schemes]).await;
+    sitemap(db, "contacts", "", "items", 500, true, &[]).await;
+    sitemap(db, "hidden", "", "items", 600, false, &[info]).await;
     db.clone()
+}
+
+fn item_paths(json: &Value) -> Vec<String> {
+    json["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["path"].as_str().unwrap().to_string())
+        .collect()
 }
 
 #[sqlx::test]
 async fn sitemap_index_counts_and_order(db: PgPool) {
-    let db = fixture(&db).await;
-    let app = crate::app(test_state(db));
+    let app = crate::app(test_state(fixture(&db).await));
     let (status, _, body) = get_raw(&app, "/api/v1/seo/sitemap", "").await;
 
     assert_eq!(status, StatusCode::OK, "{body:?}");
@@ -53,6 +150,7 @@ async fn sitemap_index_counts_and_order(db: PgPool) {
 
     let items = json["data"]["items"].as_array().unwrap();
     let types: Vec<&str> = items.iter().map(|i| i["type"].as_str().unwrap()).collect();
+    // `hidden` выключен и в индекс не попадает, порядок — sort, id
     assert_eq!(
         types,
         ["products", "catalog", "news", "schemes", "contacts"]
@@ -63,36 +161,32 @@ async fn sitemap_index_counts_and_order(db: PgPool) {
             .as_i64()
             .unwrap()
     };
-    assert_eq!(count("products"), 3);
-    assert_eq!(count("catalog"), 0);
+    assert_eq!(count("products"), 4, "две коллекции: 3 + 1 активных");
+    assert_eq!(count("catalog"), 2);
     assert_eq!(count("news"), 2);
     assert_eq!(count("schemes"), 1);
     assert_eq!(count("contacts"), 0);
 
-    for t in ["catalog", "contacts"] {
-        assert!(
-            items.iter().find(|i| i["type"] == t).unwrap()["lastmod"].is_null(),
-            "{t}"
-        );
-    }
+    let contacts = items.iter().find(|i| i["type"] == "contacts").unwrap();
+    assert!(contacts["lastmod"].is_null());
     let lastmod = items[0]["lastmod"].as_str().unwrap();
     assert!(lastmod.ends_with("+00:00"), "{lastmod}");
 }
 
 #[sqlx::test]
-async fn sitemap_items_paths_and_unknown_type(db: PgPool) {
-    let db = fixture(&db).await;
-    let app = crate::app(test_state(db.clone()));
+async fn sitemap_items_paths_and_types(db: PgPool) {
+    let app = crate::app(test_state(fixture(&db).await));
 
     let (status, _, body) = get_raw(&app, "/api/v1/seo/sitemap/products", "").await;
     assert_eq!(status, StatusCode::OK);
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["data"]["type"], "products");
-    let items = json["data"]["items"].as_array().unwrap();
-    let paths: Vec<&str> = items.iter().map(|i| i["path"].as_str().unwrap()).collect();
-    // catalog1 и CATALOG2 — по коду (в нижнем регистре), запись без кода — по id
-    assert!(paths.contains(&"/product/catalog1/"), "{paths:?}");
-    assert!(paths.contains(&"/product/catalog2/"), "{paths:?}");
+    let paths = item_paths(&json);
+    assert_eq!(paths.len(), 4, "{paths:?}");
+    assert!(paths.contains(&"/product/catalog1/".into()), "{paths:?}");
+    // код в нижнем регистре
+    assert!(paths.contains(&"/product/catalog2/".into()), "{paths:?}");
+    // пустой код — путь по id
     assert!(
         paths.iter().any(|p| p
             .trim_end_matches('/')
@@ -103,45 +197,180 @@ async fn sitemap_items_paths_and_unknown_type(db: PgPool) {
             .is_ok()),
         "{paths:?}"
     );
-    assert_eq!(paths.len(), 3, "{paths:?}");
     assert!(!paths.iter().any(|p| p.contains("//")), "{paths:?}");
-    let lastmod = items[0]["lastmod"].as_str().unwrap();
-    assert!(lastmod.ends_with("+00:00"), "{lastmod}");
 
     let (_, _, body) = get_raw(&app, "/api/v1/seo/sitemap/news", "").await;
     let json: Value = serde_json::from_slice(&body).unwrap();
-    let paths: Vec<&str> = json["data"]["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|i| i["path"].as_str().unwrap())
-        .collect();
-    assert_eq!(paths, ["/news/info1/", "/news/info2/"]);
+    assert_eq!(item_paths(&json), ["/news/info1/", "/news/info2/"]);
 
     let (_, _, body) = get_raw(&app, "/api/v1/seo/sitemap/schemes", "").await;
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["data"]["items"][0]["path"], "/schemes/schemes1/");
+    assert_eq!(item_paths(&json), ["/schemes/schemes1/"]);
 
-    for t in ["catalog", "contacts"] {
-        let (status, _, body) = get_raw(&app, &format!("/api/v1/seo/sitemap/{t}"), "").await;
-        assert_eq!(status, StatusCode::OK);
-        let json: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["data"]["items"].as_array().unwrap().len(), 0, "{t}");
-        assert_eq!(json["data"]["type"], t);
-    }
-
-    let (status, _, body) = get_raw(&app, "/api/v1/seo/sitemap/nope", "").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    // include = sections: путь раздела собирается из шаблона коллекции
+    let (_, _, body) = get_raw(&app, "/api/v1/seo/sitemap/catalog", "").await;
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"], "not_found");
+    assert_eq!(
+        item_paths(&json),
+        ["/catalog/root/", "/catalog/root/child/"]
+    );
 
-    // Выключенная из API коллекция не отдаёт записи, хотя они активны и опубликованы.
-    sqlx::query("UPDATE collections SET api_enabled = FALSE WHERE code = 'info'")
-        .execute(&db)
-        .await
-        .unwrap();
-    let (status, _, body) = get_raw(&app, "/api/v1/seo/sitemap/news", "").await;
+    let (_, _, body) = get_raw(&app, "/api/v1/seo/sitemap/contacts", "").await;
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert!(item_paths(&json).is_empty());
+
+    // выключенный и неизвестный тип — 404 в обычном формате ошибок API
+    for t in ["hidden", "nope"] {
+        let (status, _, body) = get_raw(&app, &format!("/api/v1/seo/sitemap/{t}"), "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{t}");
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "not_found", "{t}");
+    }
+}
+
+#[sqlx::test]
+async fn sitemap_without_configuration_is_empty(db: PgPool) {
+    let app = crate::app(test_state(db.clone()));
+    let (status, _, body) = get_raw(&app, "/api/v1/seo/sitemap", "").await;
+
     assert_eq!(status, StatusCode::OK);
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["data"]["items"].as_array().unwrap().len(), 0);
+    assert_eq!(json["data"]["items"], serde_json::json!([]));
+
+    let (status, _, _) = get_raw(&app, "/api/v1/seo/sitemap/products", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[test]
+fn sitemap_render_and_normalize() {
+    let ctx = Ctx {
+        section_path: "Root/Child",
+        section_code: "Child",
+        element_id: 42,
+        element_code: "",
+    };
+    assert_eq!(
+        render("/product/#ELEMENT_CODE_OR_ID#/", &ctx),
+        "/product/42/"
+    );
+    assert_eq!(render("#SITE_DIR#/x/#ELEMENT_ID#/", &ctx), "/x/42/");
+
+    let ctx = Ctx {
+        element_code: "AbC",
+        ..ctx
+    };
+    assert_eq!(
+        render("/p/#ELEMENT_CODE#/#ELEMENT_CODE_OR_ID#/", &ctx),
+        "/p/abc/abc/"
+    );
+    assert_eq!(render("/c/#SECTION_CODE_PATH#/", &ctx), "/c/root/child/");
+
+    assert_eq!(normalize("//A//b//"), "/a/b/");
+    assert_eq!(normalize("a"), "/a/");
+    assert_eq!(normalize("/"), "/");
+}
+
+fn form(name: &str, active: bool, collections: &[i64], include: &str, template: &str) -> String {
+    let mut pairs = form_urlencoded::Serializer::new(String::new());
+    pairs.append_pair("name", name);
+    pairs.append_pair("sort", "100");
+    pairs.append_pair("include", include);
+    pairs.append_pair("path_template", template);
+    if active {
+        pairs.append_pair("active", "on");
+    }
+    for collection in collections {
+        pairs.append_pair("collection", &collection.to_string());
+    }
+    pairs.finish()
+}
+
+#[sqlx::test]
+async fn sitemap_admin_crud(db: PgPool) {
+    let catalog = collection(&db, "catalog", "/c/#ELEMENT_CODE#/", "/c/").await;
+    item(&db, catalog, "one", true, None).await;
+    let app = crate::app(test_state(db.clone()));
+    let cookie = crate::test_support::admin_cookie(&db).await;
+
+    let (status, _, body) = get_raw(&app, "/admin/seo/sitemap", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        String::from_utf8_lossy(&body).contains("Типы не настроены"),
+        "пустой список"
+    );
+
+    let body = form(
+        "products",
+        true,
+        &[catalog],
+        "items",
+        "/product/#ELEMENT_CODE_OR_ID#/",
+    );
+    let (status, _, _) =
+        crate::test_support::post_form_raw(&app, "/admin/seo/sitemap", &cookie, &body).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    let (_, _, body) = get_raw(&app, "/api/v1/seo/sitemap/products", "").await;
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(item_paths(&json), ["/product/one/"]);
+
+    let id: i64 = sqlx::query_scalar("SELECT id FROM seo_sitemap WHERE name = 'products'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+
+    let (status, _, body) = get_raw(&app, &format!("/admin/seo/sitemap/{id}"), &cookie).await;
+    assert_eq!(status, StatusCode::OK, "форма правки: {body:?}");
+
+    // Выключенный тип исчезает из API.
+    let body = form("products", false, &[catalog], "items", "");
+    let (status, _, _) = crate::test_support::post_form_raw(
+        &app,
+        &format!("/admin/seo/sitemap/{id}"),
+        &cookie,
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (status, _, _) = get_raw(&app, "/api/v1/seo/sitemap/products", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Невалидное имя — страница с ошибкой, данные не меняются.
+    let (status, _, body) = crate::test_support::post_form_raw(
+        &app,
+        &format!("/admin/seo/sitemap/{id}"),
+        &cookie,
+        "name=Bad_Name&include=items",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Имя типа"));
+    let name: String = sqlx::query_scalar("SELECT name FROM seo_sitemap WHERE id = $1")
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(name, "products");
+
+    let (status, _, _) = crate::test_support::post_form_raw(
+        &app,
+        &format!("/admin/seo/sitemap/{id}/delete"),
+        &cookie,
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM seo_sitemap")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[sqlx::test]
+async fn sitemap_admin_requires_collections_manage(db: PgPool) {
+    let app = crate::app(test_state(db.clone()));
+    let cookie = crate::test_support::permitted_cookie(&db, "reader", &[]).await;
+    let (status, _, _) = get_raw(&app, "/admin/seo/sitemap", &cookie).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }

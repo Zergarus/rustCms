@@ -251,6 +251,15 @@ pub(crate) fn sections(user: &Access, ctx: &NavCtx) -> Vec<Section> {
             Mode::Cms,
         );
     }
+    if user.can(crate::access::COLLECTIONS_MANAGE) {
+        add(
+            "sitemap",
+            "Sitemap",
+            "/admin/seo/sitemap",
+            "content",
+            Mode::Cms,
+        );
+    }
     if user.can(crate::access::USERS_MANAGE) {
         add("users", "Пользователи", "/admin/users", "system", Mode::Cms);
     }

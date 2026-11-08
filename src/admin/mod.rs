@@ -14,6 +14,7 @@ mod nav;
 mod palette;
 mod sections;
 mod seo;
+mod seo_sitemap;
 pub(crate) mod shell;
 pub(crate) mod shop;
 mod sku;
@@ -48,6 +49,16 @@ const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 pub fn router(state: AppState) -> Router<AppState> {
     let protected = Router::new()
         .route("/", get(dashboard))
+        .route(
+            "/seo/sitemap",
+            get(seo_sitemap::list).post(seo_sitemap::create),
+        )
+        .route("/seo/sitemap/new", get(seo_sitemap::new_form))
+        .route(
+            "/seo/sitemap/{id}",
+            get(seo_sitemap::edit_form).post(seo_sitemap::update),
+        )
+        .route("/seo/sitemap/{id}/delete", post(seo_sitemap::delete))
         .route("/seo/{kind}/{id}", get(seo::form).post(seo::save))
         .route("/logout", post(auth_pages::logout))
         .route(
