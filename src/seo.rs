@@ -62,6 +62,8 @@ pub struct Settings {
     pub title: String,
     pub description: String,
     pub h1: String,
+    pub canonical: String,
+    pub robots: String,
 }
 
 #[derive(Serialize)]
@@ -69,6 +71,8 @@ pub struct Metadata {
     pub title: String,
     pub description: String,
     pub h1: String,
+    pub canonical: String,
+    pub robots: String,
 }
 
 pub async fn load(db: &PgPool, kind: Kind, id: i64) -> AppResult<Target> {
@@ -121,7 +125,7 @@ pub async fn load(db: &PgPool, kind: Kind, id: i64) -> AppResult<Target> {
 
 pub async fn settings(db: &PgPool, target: &Target) -> AppResult<Settings> {
     let sql = format!(
-        "SELECT title,description,h1 FROM seo_settings WHERE {}=$1",
+        "SELECT title,description,h1,canonical,robots FROM seo_settings WHERE {}=$1",
         target.kind.column()
     );
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
@@ -175,9 +179,46 @@ impl Settings {
             }
             expand(s, target)?;
         }
+        self.canonical = self.canonical.trim().to_string();
+        if self.canonical.chars().count() > 2000
+            || self
+                .canonical
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err("Canonical: максимум 2000 символов, без пробелов".into());
+        }
+        if !self.canonical.is_empty() {
+            let raw = &self.canonical;
+            let valid = if raw.starts_with('/') {
+                !raw.starts_with("//") && !raw.contains(['\\', '#', '{', '}'])
+            } else {
+                reqwest::Url::parse(raw).is_ok_and(|u| {
+                    matches!(u.scheme(), "http" | "https")
+                        && u.host_str().is_some()
+                        && u.username().is_empty()
+                        && u.password().is_none()
+                        && u.fragment().is_none()
+                })
+            };
+            if !valid {
+                return Err(
+                    "Canonical: укажите путь /… или адрес http(s) без логина и фрагмента".into(),
+                );
+            }
+        }
+        if !matches!(
+            self.robots.as_str(),
+            "" | "index,follow" | "noindex,follow" | "index,nofollow" | "noindex,nofollow"
+        ) {
+            return Err("Недопустимое правило индексации".into());
+        }
         Ok(())
     }
     fn overlay(&mut self, other: &Self) {
+        if !other.robots.is_empty() {
+            self.robots.clone_from(&other.robots);
+        }
         if !other.title.is_empty() {
             self.title.clone_from(&other.title);
         }
@@ -194,13 +235,15 @@ pub async fn save(db: &PgPool, target: &Target, mut input: Settings) -> AppResul
     input.validate(target).map_err(AppError::BadRequest)?;
     let col = target.kind.column();
     let sql = format!(
-        "INSERT INTO seo_settings ({col},title,description,h1) VALUES ($1,$2,$3,$4) ON CONFLICT ({col}) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, h1=EXCLUDED.h1"
+        "INSERT INTO seo_settings ({col},title,description,h1,canonical,robots) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT ({col}) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, h1=EXCLUDED.h1, canonical=EXCLUDED.canonical, robots=EXCLUDED.robots"
     );
     sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(target.id)
         .bind(input.title)
         .bind(input.description)
         .bind(input.h1)
+        .bind(input.canonical)
+        .bind(input.robots)
         .execute(db)
         .await?;
     Ok(())
@@ -218,7 +261,7 @@ struct Layer {
 pub async fn resolve(db: &PgPool, target: &Target) -> AppResult<Metadata> {
     let section_ids: Vec<i64> = target.sections.iter().map(|s| s.id).collect();
     let item_id = (target.kind == Kind::Item).then_some(target.id);
-    let layers: Vec<Layer>=sqlx::query_as("SELECT collection_id,section_id,item_id,title,description,h1 FROM seo_settings WHERE collection_id=$1 OR section_id=ANY($2) OR item_id=$3")
+    let layers: Vec<Layer>=sqlx::query_as("SELECT collection_id,section_id,item_id,title,description,h1,canonical,robots FROM seo_settings WHERE collection_id=$1 OR section_id=ANY($2) OR item_id=$3")
         .bind(target.collection.id).bind(&section_ids).bind(item_id).fetch_all(db).await?;
     let mut merged = Settings::default();
     if let Some(l) = layers
@@ -244,10 +287,17 @@ pub async fn resolve(db: &PgPool, target: &Target) -> AppResult<Metadata> {
             expand(s, target).map_err(AppError::BadRequest)
         }
     };
+    let own = settings(db, target).await?;
     Ok(Metadata {
         title: render(&merged.title, &target.name)?,
         description: render(&merged.description, "")?,
         h1: render(&merged.h1, &target.name)?,
+        canonical: own.canonical,
+        robots: if merged.robots.is_empty() {
+            "index,follow".into()
+        } else {
+            merged.robots
+        },
     })
 }
 

@@ -2828,6 +2828,6 @@ async fn seo_public_defaults(db: sqlx::PgPool) {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
         json,
-        serde_json::json!({"title":"Каталог","description":"","h1":"Каталог"})
+        serde_json::json!({"title":"Каталог","description":"","h1":"Каталог","canonical":"","robots":"index,follow"})
     );
 }

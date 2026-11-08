@@ -56,7 +56,7 @@ async fn seo_inheritance_edit_clear_move_delete(db: PgPool) {
     save(&app, &cookie, "sections", b, &[("h1", "Выбор: {name}")]).await;
     assert_eq!(
         meta(&app, "items", i).await,
-        json!({"title":"Купить Товар <b>","description":"В Раздел","h1":"Выбор: Товар <b>"})
+        json!({"title":"Купить Товар <b>","description":"В Раздел","h1":"Выбор: Товар <b>","canonical":"","robots":"index,follow"})
     );
     assert_eq!(meta(&app, "sections", b).await["title"], "Купить Раздел");
     save(&app, &cookie, "items", i, &[("title", "Особый {name}")]).await;
@@ -149,4 +149,54 @@ async fn seo_invalid_template_preserves_data(db: PgPool) {
         .unwrap();
     save(&app, &cookie, "items", i, &[("title", "{name}")]).await;
     assert_eq!(meta(&app, "items", i).await["title"], "{collection}");
+}
+
+#[sqlx::test]
+async fn seo_canonical_and_robots(db: PgPool) {
+    let (c, a, _, i) = fixture(&db).await;
+    let cookie = admin_cookie(&db).await;
+    let app = crate::app(test_state(db.clone()));
+    save(
+        &app,
+        &cookie,
+        "collections",
+        c,
+        &[("robots", "noindex,follow"), ("canonical", "/catalog/")],
+    )
+    .await;
+    assert_eq!(meta(&app, "items", i).await["robots"], "noindex,follow");
+    assert_eq!(meta(&app, "items", i).await["canonical"], "");
+    save(&app, &cookie, "sections", a, &[("robots", "index,follow")]).await;
+    save(
+        &app,
+        &cookie,
+        "items",
+        i,
+        &[("canonical", "https://example.org/product/")],
+    )
+    .await;
+    assert_eq!(meta(&app, "items", i).await["robots"], "index,follow");
+    assert_eq!(
+        meta(&app, "items", i).await["canonical"],
+        "https://example.org/product/"
+    );
+    for invalid in [
+        "javascript:alert(1)",
+        "//evil.org/",
+        "https://user:pass@example.org/",
+        "/a\nb",
+    ] {
+        let body = form_urlencoded::Serializer::new(String::new())
+            .append_pair("canonical", invalid)
+            .finish();
+        let (_, _, html) =
+            post_form_raw(&app, &format!("/admin/seo/items/{i}"), &cookie, &body).await;
+        assert!(html.contains("role=\"alert\""));
+        assert_eq!(
+            meta(&app, "items", i).await["canonical"],
+            "https://example.org/product/"
+        );
+    }
+    save(&app, &cookie, "items", i, &[]).await;
+    assert_eq!(meta(&app, "items", i).await["canonical"], "");
 }

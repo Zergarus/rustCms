@@ -13,11 +13,17 @@
 <label>Title<input name="title" value="{{ form.title }}" maxlength="2000"></label>
 <label>Description<textarea name="description" rows="3" maxlength="2000">{{ form.description }}</textarea></label>
 <label>H1<input name="h1" value="{{ form.h1 }}" maxlength="2000"></label>
+<label>Canonical<input name="canonical" value="{{ form.canonical }}" maxlength="2000" placeholder="https://example.org/page/"></label>
+<p>Canonical действует только на эту страницу. Пусто — адрес текущей страницы на витрине.</p>
+<label>Индексация<select name="robots">
+{% for value, label in [("", "Наследовать"), ("index,follow", "Индексировать, переходить по ссылкам"), ("noindex,follow", "Не индексировать, переходить по ссылкам"), ("index,nofollow", "Индексировать, не переходить по ссылкам"), ("noindex,nofollow", "Не индексировать, не переходить по ссылкам")] %}
+<option value="{{ value }}" {% if form.robots == value %}selected{% endif %}>{{ label }}</option>
+{% endfor %}</select></label>
 <button class="btn primary" type="submit">Сохранить</button>
 </form>
 <div class="card">
 <h2>Результат сохранённых настроек</h2>
-<dl><dt>Title</dt><dd>{{ metadata.title }}</dd><dt>Description</dt><dd>{{ metadata.description or "—" }}</dd><dt>H1</dt><dd>{{ metadata.h1 }}</dd></dl>
+<dl><dt>Title</dt><dd>{{ metadata.title }}</dd><dt>Description</dt><dd>{{ metadata.description or "—" }}</dd><dt>H1</dt><dd>{{ metadata.h1 }}</dd><dt>Canonical</dt><dd>{{ metadata.canonical or "Адрес текущей страницы" }}</dd><dt>Robots</dt><dd>{{ metadata.robots }}</dd></dl>
 <p class="muted">Без шаблона Title и H1 совпадают с названием, Description остаётся пустым.</p>
 </div>
 {% endblock %}
