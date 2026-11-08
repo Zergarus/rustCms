@@ -322,8 +322,9 @@ async fn sections(
     .await?)
 }
 
-/// Данные формы админки.
-#[derive(Clone, Debug, Default, Serialize)]
+/// Данные формы админки. Значения по умолчанию совпадают с дефолтами таблицы
+/// и с поведением Битрикса: новый тип активен, сортировка 500, включаются записи.
+#[derive(Clone, Debug, Serialize)]
 pub struct Input {
     pub name: String,
     pub active: bool,
@@ -331,6 +332,19 @@ pub struct Input {
     pub path_template: String,
     pub include: String,
     pub collections: Vec<i64>,
+}
+
+impl Default for Input {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            active: true,
+            sort: 500,
+            path_template: String::new(),
+            include: "items".into(),
+            collections: Vec::new(),
+        }
+    }
 }
 
 impl Input {

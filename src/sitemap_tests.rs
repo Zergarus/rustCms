@@ -365,6 +365,8 @@ async fn sitemap_admin_crud(db: PgPool) {
         .await
         .unwrap();
     assert_eq!(left, 0);
+    let (status, _, _) = get_raw(&app, "/api/v1/seo/sitemap/products", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "удалённый тип исчез из API");
 }
 
 #[sqlx::test]
@@ -394,4 +396,87 @@ async fn sitemap_skips_sources_without_address_template(db: PgPool) {
     let (_, _, body) = get_raw(&app, "/api/v1/seo/sitemap/plain", "").await;
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert!(item_paths(&json).is_empty());
+}
+
+#[sqlx::test]
+async fn sitemap_survives_collection_delete(db: PgPool) {
+    let catalog = collection(&db, "catalog", "/p/#ELEMENT_ID#/", "/p/").await;
+    item(&db, catalog, "one", true, None).await;
+    let id = sitemap(&db, "products", "", "items", 100, true, &[catalog]).await;
+    let app = crate::app(test_state(db.clone()));
+
+    sqlx::query("DELETE FROM collections WHERE id = $1")
+        .bind(catalog)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    // Связь чистится каскадом, тип остаётся и отдаёт пустой список.
+    let links: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM seo_sitemap_collection WHERE sitemap_id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(links, 0);
+
+    let (_, _, body) = get_raw(&app, "/api/v1/seo/sitemap", "").await;
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let item = json["data"]["items"].as_array().unwrap().first().unwrap();
+    assert_eq!(item["count"], 0);
+    assert!(item["lastmod"].is_null());
+
+    let (status, _, body) = get_raw(&app, "/api/v1/seo/sitemap/products", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert!(item_paths(&json).is_empty());
+}
+
+#[sqlx::test]
+async fn sitemap_new_type_form_has_active_defaults(db: PgPool) {
+    let app = crate::app(test_state(db.clone()));
+    let cookie = crate::test_support::admin_cookie(&db).await;
+    let (status, _, body) = get_raw(&app, "/admin/seo/sitemap/new", &cookie).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&body);
+    assert!(
+        html.contains("name=\"sort\" type=\"number\" value=\"500\""),
+        "{html}"
+    );
+    assert!(
+        html.contains("value=\"on\" checked"),
+        "активен по умолчанию"
+    );
+}
+
+#[sqlx::test]
+async fn sitemap_items_use_section_path(db: PgPool) {
+    // Тип без своего шаблона: адрес записи строится по шаблону коллекции
+    // с путём раздела — основной путь для проектов без кастомного шаблона.
+    let catalog = collection(&db, "catalog", "/c/#SECTION_CODE_PATH#/#ELEMENT_ID#/", "").await;
+    let root = section(&db, catalog, None, "Root").await;
+    let child = section(&db, catalog, Some(root), "Child").await;
+    sqlx::query("UPDATE collection_items SET section_id = $2 WHERE collection_id = $1")
+        .bind(catalog)
+        .bind(child)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO collection_items(collection_id,section_id,code,name) VALUES ($1,$2,'x','X')",
+    )
+    .bind(catalog)
+    .bind(child)
+    .execute(&db)
+    .await
+    .unwrap();
+    sitemap(&db, "products", "", "items", 100, true, &[catalog]).await;
+
+    let app = crate::app(test_state(db.clone()));
+    let (_, _, body) = get_raw(&app, "/api/v1/seo/sitemap/products", "").await;
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let paths = item_paths(&json);
+    assert_eq!(paths.len(), 1, "{paths:?}");
+    assert!(paths[0].starts_with("/c/root/child/"), "{paths:?}");
 }
