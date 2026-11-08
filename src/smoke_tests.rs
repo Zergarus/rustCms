@@ -2812,3 +2812,22 @@ async fn exchange_settings_page(db: PgPool) {
     assert_eq!(st, StatusCode::OK, "{home}");
     assert!(home.contains("href=\"/admin/exchange\""), "{home}");
 }
+
+#[sqlx::test]
+async fn seo_public_defaults(db: sqlx::PgPool) {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO collections(code,name,api_enabled) VALUES ('seo','Каталог',TRUE) RETURNING id",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let app = crate::app(crate::test_support::test_state(db));
+    let (status, _, body) =
+        crate::test_support::get_raw(&app, &format!("/api/v1/seo/collections/{id}"), "").await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"title":"Каталог","description":"","h1":"Каталог"})
+    );
+}

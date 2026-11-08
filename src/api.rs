@@ -25,6 +25,7 @@ const MAX_PER_PAGE: i64 = 100;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
+        .route("/v1/seo/{kind}/{id}", get(crate::seo::public))
         .route("/v1/iblocks", get(list_collections))
         .route("/v1/iblocks/{iblock}", get(get_collection))
         .route("/v1/iblocks/{iblock}/elements", get(list_items))

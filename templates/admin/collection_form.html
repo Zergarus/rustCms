@@ -5,6 +5,7 @@
 {% import "_ui.html" as ui %}
 {% call ui.page_head([("Коллекции", "/admin/collections"), (collection.name if collection else "Новая коллекция", none)]) %}
   {%- if collection %}
+  <a class="btn" href="/admin/seo/collections/{{ collection.id }}">SEO</a>
   <a class="btn" href="/admin/collections/{{ collection.id }}/items">Записи →</a>
   <form method="post" action="/admin/collections/{{ collection.id }}/delete"
         hx-confirm="Удалить коллекцию «{{ collection.name }}» со всеми записями?">

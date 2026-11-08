@@ -13,6 +13,7 @@ mod modules;
 mod nav;
 mod palette;
 mod sections;
+mod seo;
 pub(crate) mod shell;
 pub(crate) mod shop;
 mod sku;
@@ -47,6 +48,7 @@ const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 pub fn router(state: AppState) -> Router<AppState> {
     let protected = Router::new()
         .route("/", get(dashboard))
+        .route("/seo/{kind}/{id}", get(seo::form).post(seo::save))
         .route("/logout", post(auth_pages::logout))
         .route(
             "/collections",

@@ -9,6 +9,8 @@
 </div>
 <h1>{% if section_id %}{{ form.name }}{% else %}Новый раздел{% endif %}</h1>
 
+{% if section_id %}<p><a class="btn" href="/admin/seo/sections/{{ section_id }}">SEO</a></p>{% endif %}
+
 <form class="card form" method="post" enctype="multipart/form-data"
       action="{% if section_id %}/admin/sections/{{ section_id }}{% else %}/admin/collections/{{ collection.id }}/sections{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}

@@ -19,6 +19,9 @@ mod import;
 mod mail;
 mod passwords;
 mod sale;
+mod seo;
+#[cfg(test)]
+mod seo_tests;
 #[cfg(test)]
 mod smoke_tests;
 mod state;
