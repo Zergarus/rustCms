@@ -16,7 +16,7 @@
 |---|---|---|---|---|
 | 1 | Оплата заказа целиком: инициация (`/order/pay`), канал оплаты (`/order/{id}/payment-channel`), счёт (`/bill/{order}/{payment}`), чек (`/receipt/{order}/{payment}`), шлюзы ЮKassa / Альфа SBP / QR, чеки ОФД | `order/pay`, `PaymentChannelController`, `ReceiptDownloadController`, `transopt/payment/**` | только `order/submit`, платёжных клиентов нет | ⛔ (большой) |
 | 2 | Сотрудники и отзывы: `/employees`, `/employees/{id}`, `/review/employees/{id}` (список и создание) | `userStoreEmployeeSource.php`, `routes/review_mediagroup_bxapi.php` | нет | ⛔ (средний) |
-| 3 | Регистрация и пароли: `/auth/register`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/confirm-registration` | штатный `main.auth` + шаблоны писем | только login / logout / session | ⛔ (средний) |
+| 3 | Регистрация и пароли: `/auth/register`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/confirm-registration` | штатный `main.auth` + шаблоны писем | ✅ 2026-11-09, `4692d71` (капча — TD-010) | ✅ |
 | 4 | Индивидуальная скидка: правило корзины по `UF_INDIVIDUAL_DISCOUNT`, `cashDiscount`, приём изменений из 1С | `transopt/sale/IndividualDiscount*` | в обмене есть только домен `Individual`, правила скидки нет | ⛔ (средний) |
 
 ## P2 — нужно для полноты
