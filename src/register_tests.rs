@@ -285,3 +285,202 @@ async fn reset_changes_password_and_drops_sessions(db: PgPool) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["status"], "success", "вход новым паролем: {json}");
 }
+
+/// Активный шаблон письма: recipient берётся из подстановки `#EMAIL#`.
+async fn template(db: &PgPool, event: &str, body: &str, to: &str) {
+    sqlx::query(
+        "INSERT INTO mail_templates (event_name, active, email_from, email_to, bcc, subject, body, body_type)
+         VALUES ($1, TRUE, 'site@example.ru', $2, '', 'Письмо', $3, 'text')",
+    )
+    .bind(event)
+    .bind(to)
+    .bind(body)
+    .execute(db)
+    .await
+    .unwrap();
+}
+
+fn mail_text(dir: &std::path::Path) -> String {
+    let mut out = String::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) == Some("eml") {
+            out.push_str(&std::fs::read_to_string(path).unwrap());
+        }
+    }
+    out
+}
+
+fn hex_code(text: &str) -> String {
+    // quoted-printable переносит длинные строки мягким переводом `=\n`.
+    let text = text.replace("=\r\n", "").replace("=\n", "");
+    let mut run = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_hexdigit() {
+            run.push(ch);
+            if run.len() == 64 {
+                return run;
+            }
+        } else {
+            run.clear();
+        }
+    }
+    panic!("в письме нет кода: {text}");
+}
+
+#[sqlx::test]
+async fn register_code_from_email_confirms_user(db: PgPool) {
+    template(&db, "NEW_USER_CONFIRM", "Код: #CONFIRM_CODE#", "#EMAIL#").await;
+    let state = crate::test_support::test_state(db.clone());
+    let mail_dir = state.config.mail_dir.clone();
+    let app = crate::app(state);
+
+    post(
+        &app,
+        "/api/v1/auth/register",
+        register_body("mail@example.ru"),
+        "",
+    )
+    .await;
+    let code = hex_code(&mail_text(&mail_dir));
+    assert!(
+        mail_text(&mail_dir).contains("mail@example.ru"),
+        "письмо ушло на почту"
+    );
+
+    let (status, json) = post(
+        &app,
+        "/api/v1/auth/confirm-registration",
+        json!({"login": "mail@example.ru", "confirmCode": code}),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["data"]["user"]["login"], "mail@example.ru");
+
+    // Код одноразовый: повторный запрос с тем же кодом отклоняется.
+    let (_, json) = post(
+        &app,
+        "/api/v1/auth/confirm-registration",
+        json!({"login": "mail@example.ru", "confirmCode": code}),
+        "",
+    )
+    .await;
+    assert_eq!(json["errors"][0]["code"], "invalid_confirm_code");
+}
+
+#[sqlx::test]
+async fn login_is_blocked_until_confirmed(db: PgPool) {
+    let app = crate::app(crate::test_support::test_state(db.clone()));
+    post(
+        &app,
+        "/api/v1/auth/register",
+        register_body("pending@example.ru"),
+        "",
+    )
+    .await;
+
+    let (status, _) = post(
+        &app,
+        "/api/v1/auth/login",
+        json!({"login": "pending@example.ru", "password": "secret1"}),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test]
+async fn password_spaces_are_not_trimmed(db: PgPool) {
+    let app = crate::app(crate::test_support::test_state(db.clone()));
+    let mut body = register_body("space@example.ru");
+    body["password"] = json!(" secret1 ");
+    body["passwordConfirm"] = json!(" secret1 ");
+    post(&app, "/api/v1/auth/register", body, "").await;
+    sqlx::query(
+        "UPDATE users SET active = TRUE, confirmed = TRUE WHERE login = 'space@example.ru'",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let (status, json) = post(
+        &app,
+        "/api/v1/auth/login",
+        json!({"login": "space@example.ru", "password": " secret1 "}),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["status"], "success");
+}
+
+#[sqlx::test]
+async fn reset_uses_profile_email_and_keeps_block(db: PgPool) {
+    // Импортированный пользователь: логин не почта, почта в профиле, аккаунт заблокирован.
+    sqlx::query(
+        "INSERT INTO users (login, email, password_hash, name, active, confirmed)
+         VALUES ('manager', 'boss@example.ru', 'x', 'Босс', FALSE, TRUE)",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE login = 'manager'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    template(&db, "USER_PASS_REQUEST", "Код: #CHECKWORD#", "#EMAIL#").await;
+    let state = crate::test_support::test_state(db.clone());
+    let mail_dir = state.config.mail_dir.clone();
+    let app = crate::app(state);
+
+    post(
+        &app,
+        "/api/v1/auth/forgot-password",
+        json!({"login": "manager"}),
+        "",
+    )
+    .await;
+    let letter = mail_text(&mail_dir);
+    assert!(
+        letter.contains("boss@example.ru"),
+        "письмо на почту профиля: {letter}"
+    );
+    let word = hex_code(&letter);
+
+    let (status, json) = post(
+        &app,
+        "/api/v1/auth/reset-password",
+        json!({"login": "manager", "checkword": word, "password": "newpass1", "passwordConfirm": "newpass1"}),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["data"]["changed"], true);
+    assert_eq!(
+        json["data"]["authorized"], false,
+        "блокировку сброс не снимает"
+    );
+
+    let active: bool = sqlx::query_scalar("SELECT active FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(!active);
+}
+
+#[sqlx::test]
+async fn long_login_is_rejected_without_growth(db: PgPool) {
+    let app = crate::app(crate::test_support::test_state(db.clone()));
+    let long = "а".repeat(500);
+    let (status, json) = post(
+        &app,
+        "/api/v1/auth/forgot-password",
+        json!({"login": long}),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["errors"][0]["code"], "login_too_long");
+}

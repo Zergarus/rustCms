@@ -4,6 +4,10 @@
 //! и `errors[0].code`, которые различает витрина. Письма отправляются
 //! импортированными шаблонами `NEW_USER_CONFIRM` и `USER_PASS_REQUEST`;
 //! отсутствие шаблона не ломает сценарий, только пишет предупреждение.
+//!
+//! Подтверждение почты хранится отдельно от `active`: `active = false` — это и
+//! «не подтвердил», и «заблокирован администратором», а сброс пароля не должен
+//! снимать блокировку.
 
 use std::{
     collections::HashMap,
@@ -11,11 +15,10 @@ use std::{
     time::{Duration as StdDuration, Instant},
 };
 
-use axum::{body::Bytes, extract::State, response::IntoResponse};
+use axum::{body::Bytes, extract::State, http::HeaderMap, response::IntoResponse};
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{Duration, Utc};
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use serde_json::{Map, Value, json};
 
 use super::{BxError, BxResult, auth, parse_body, success};
 use crate::{auth::hash_password, mail, state::AppState};
@@ -24,21 +27,27 @@ use crate::{auth::hash_password, mail, state::AppState};
 const CONFIRM_TTL_DAYS: i64 = 7;
 const RESET_TTL_HOURS: i64 = 2;
 const PASSWORD_MIN: usize = 6;
-/// Не больше пяти попыток на логин за 15 минут, счётчик в памяти процесса.
+/// Длина логина ограничена до записи в счётчик: иначе публичный запрос
+/// создаёт многомегабайтный ключ.
+const MAX_LOGIN: usize = 254;
+/// Не больше пяти попыток на (эндпоинт, IP, логин) за 15 минут.
 const ATTEMPT_LIMIT: u32 = 5;
 const ATTEMPT_WINDOW_SECS: u64 = 15 * 60;
+/// Предел карты счётчиков: старые записи вычищаются, при переполнении — сброс.
+const ATTEMPT_CAP: usize = 1024;
 
 static ATTEMPTS: Mutex<Option<HashMap<String, (u32, Instant)>>> = Mutex::new(None);
 
 fn token_hash(token: &str) -> String {
-    hex::encode(Sha256::digest(token.as_bytes()))
+    auth::token_hash(token)
 }
 
 fn new_token() -> String {
     hex::encode(rand::random::<[u8; 32]>())
 }
 
-fn text(body: &serde_json::Map<String, Value>, key: &str) -> String {
+/// Строковое поле с обрезкой пробелов — для имён, почты, логинов.
+fn text(body: &Map<String, Value>, key: &str) -> String {
     body.get(key)
         .and_then(Value::as_str)
         .unwrap_or("")
@@ -46,16 +55,49 @@ fn text(body: &serde_json::Map<String, Value>, key: &str) -> String {
         .to_string()
 }
 
+/// Поле без обрезки — для паролей: вход пароль не обрезает, и регистрация не должна.
+fn raw(body: &Map<String, Value>, key: &str) -> String {
+    body.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
 fn bad(code: &str, message: &str) -> BxError {
     BxError::new(code, message)
 }
 
-/// Счётчик попыток: подтверждение кода и сброс пароля нельзя перебирать.
-fn throttle(login: &str) -> Result<(), BxError> {
+fn client_ip(headers: &HeaderMap) -> String {
+    for name in ["x-forwarded-for", "x-real-ip"] {
+        if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
+            let first = value.split(',').next().unwrap_or("").trim();
+            if !first.is_empty() {
+                return first.to_string();
+            }
+        }
+    }
+    "unknown".into()
+}
+
+fn attempt_key(scope: &str, ip: &str, login: &str) -> String {
+    format!("{scope}|{ip}|{}", login.to_lowercase())
+}
+
+/// Ограничитель перебора: ключ (эндпоинт, IP, логин), карта ограничена по размеру.
+fn throttle(scope: &str, ip: &str, login: &str) -> Result<(), BxError> {
+    let key = attempt_key(scope, ip, login);
     let mut guard = ATTEMPTS.lock().unwrap_or_else(|e| e.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
     let now = Instant::now();
-    let entry = map.entry(login.to_lowercase()).or_insert((0, now));
+    if map.len() >= ATTEMPT_CAP {
+        map.retain(|_, (_, at)| {
+            now.duration_since(*at) <= StdDuration::from_secs(ATTEMPT_WINDOW_SECS)
+        });
+        if map.len() >= ATTEMPT_CAP {
+            map.clear();
+        }
+    }
+    let entry = map.entry(key).or_insert((0, now));
     if now.duration_since(entry.1) > StdDuration::from_secs(ATTEMPT_WINDOW_SECS) {
         *entry = (0, now);
     }
@@ -67,6 +109,15 @@ fn throttle(login: &str) -> Result<(), BxError> {
         ));
     }
     Ok(())
+}
+
+/// Успешная попытка не должна расходовать чужой бюджет.
+fn forgive(scope: &str, ip: &str, login: &str) {
+    let key = attempt_key(scope, ip, login);
+    let mut guard = ATTEMPTS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = guard.as_mut() {
+        map.remove(&key);
+    }
 }
 
 fn normalize_email(value: &str) -> Option<String> {
@@ -91,11 +142,34 @@ fn check_password(password: &str, confirm: &str) -> Result<(), BxError> {
     Ok(())
 }
 
-/// Письмо по шаблону; сбой почты не отменяет регистрацию.
+/// Письмо по шаблону; сбой почты не отменяет сценарий.
 async fn send(state: &AppState, event: &str, fields: HashMap<String, String>) {
     if let Err(e) = mail::send_event(&state.db, &state.config, event, &fields).await {
         tracing::error!(error = ?e, event, "не удалось отправить письмо авторизации");
     }
+}
+
+/// Забирает токен из БД атомарно: повторный запрос с тем же кодом получит пусто.
+async fn consume(
+    db: &sqlx::PgPool,
+    kind: &str,
+    code: &str,
+    login: &str,
+) -> Result<Option<i64>, BxError> {
+    Ok(sqlx::query_scalar(
+        "DELETE FROM auth_tokens t USING users u
+         WHERE t.user_id = u.id
+           AND t.kind = $1
+           AND t.token_hash = $2
+           AND t.expires_at > now()
+           AND (lower(u.login) = lower($3) OR lower(u.email) = lower($3))
+         RETURNING t.user_id",
+    )
+    .bind(kind)
+    .bind(token_hash(code))
+    .bind(login)
+    .fetch_optional(db)
+    .await?)
 }
 
 pub async fn register(State(state): State<AppState>, body: Bytes) -> BxResult {
@@ -103,8 +177,8 @@ pub async fn register(State(state): State<AppState>, body: Bytes) -> BxResult {
     let name = text(&body, "name");
     let email = text(&body, "email");
     let phone = text(&body, "phone");
-    let password = text(&body, "password");
-    let confirm = text(&body, "passwordConfirm");
+    let password = raw(&body, "password");
+    let confirm = raw(&body, "passwordConfirm");
     let personal_data = body
         .get("personalData")
         .and_then(Value::as_bool)
@@ -124,26 +198,36 @@ pub async fn register(State(state): State<AppState>, body: Bytes) -> BxResult {
         ));
     }
 
-    let exists: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM users WHERE login = $1 OR lower(email) = $1 LIMIT 1")
-            .bind(&email)
-            .fetch_optional(&state.db)
-            .await?;
+    // Импортированный пользователь может иметь другой регистр логина и пустой email.
+    let exists: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM users
+         WHERE lower(login) = $1 OR lower(email) = $1
+         LIMIT 1",
+    )
+    .bind(&email)
+    .fetch_optional(&state.db)
+    .await?;
     if exists.is_some() {
         return Err(bad("email_exists", "Пользователь с такой почтой уже есть."));
     }
 
     let hash = hash_password(password).await?;
-    let user_id: i64 = sqlx::query_scalar(
-        "INSERT INTO users (login, email, password_hash, name, phone, active)
-         VALUES ($1, $1, $2, $3, $4, FALSE) RETURNING id",
+    let mut tx = state.db.begin().await?;
+    let user_id: Option<i64> = sqlx::query_scalar(
+        "INSERT INTO users (login, email, password_hash, name, phone, active, confirmed)
+         VALUES ($1, $1, $2, $3, $4, FALSE, FALSE)
+         ON CONFLICT (login) DO NOTHING
+         RETURNING id",
     )
     .bind(&email)
     .bind(hash)
     .bind(&name)
     .bind(&phone)
-    .fetch_one(&state.db)
+    .fetch_optional(&mut *tx)
     .await?;
+    let Some(user_id) = user_id else {
+        return Err(bad("email_exists", "Пользователь с такой почтой уже есть."));
+    };
 
     let code = new_token();
     sqlx::query(
@@ -156,8 +240,9 @@ pub async fn register(State(state): State<AppState>, body: Bytes) -> BxResult {
     .bind(user_id)
     .bind(token_hash(&code))
     .bind(Utc::now() + Duration::days(CONFIRM_TTL_DAYS))
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     send(
         &state,
@@ -179,7 +264,12 @@ pub async fn register(State(state): State<AppState>, body: Bytes) -> BxResult {
     })))
 }
 
-pub async fn confirm(State(state): State<AppState>, jar: CookieJar, body: Bytes) -> BxResult {
+pub async fn confirm(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    body: Bytes,
+) -> BxResult {
     let body = parse_body(&body)?;
     let login = text(&body, "login");
     let code = text(&body, "confirmCode");
@@ -189,34 +279,26 @@ pub async fn confirm(State(state): State<AppState>, jar: CookieJar, body: Bytes)
             "Укажите логин и код подтверждения.",
         ));
     }
-    throttle(&login)?;
+    if login.chars().count() > MAX_LOGIN {
+        return Err(bad("invalid_confirm_code", "Код подтверждения неверен."));
+    }
+    let ip = client_ip(&headers);
+    throttle("confirm", &ip, &login)?;
 
-    let user_id: Option<i64> = sqlx::query_scalar(
-        "SELECT u.id FROM users u
-         JOIN auth_tokens t ON t.user_id = u.id
-         WHERE t.kind = 'confirm' AND t.expires_at > now() AND t.token_hash = $2
-           AND (u.login = $1 OR lower(u.email) = lower($1))
-         LIMIT 1",
-    )
-    .bind(&login)
-    .bind(token_hash(&code))
-    .fetch_optional(&state.db)
-    .await?;
-    let Some(user_id) = user_id else {
+    let Some(user_id) = consume(&state.db, "confirm", &code, &login).await? else {
         return Err(bad(
             "invalid_confirm_code",
             "Код подтверждения неверен или устарел.",
         ));
     };
 
-    sqlx::query("UPDATE users SET active = TRUE WHERE id = $1")
-        .bind(user_id)
-        .execute(&state.db)
-        .await?;
-    sqlx::query("DELETE FROM auth_tokens WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(
+        "UPDATE users SET confirmed = TRUE, active = active OR NOT confirmed WHERE id = $1",
+    )
+    .bind(user_id)
+    .execute(&state.db)
+    .await?;
+    forgive("confirm", &ip, &login);
 
     let (jar, user) = auth::sign_in(&state, jar, user_id, false).await?;
     Ok((
@@ -226,7 +308,7 @@ pub async fn confirm(State(state): State<AppState>, jar: CookieJar, body: Bytes)
         .into_response())
 }
 
-pub async fn forgot(State(state): State<AppState>, body: Bytes) -> BxResult {
+pub async fn forgot(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> BxResult {
     let body = parse_body(&body)?;
     let login = text(&body, "login");
     if login.is_empty() {
@@ -235,17 +317,27 @@ pub async fn forgot(State(state): State<AppState>, body: Bytes) -> BxResult {
             "Укажите логин.",
         ));
     }
-    throttle(&login)?;
+    if login.chars().count() > MAX_LOGIN {
+        return Err(bad("login_too_long", "Слишком длинный логин."));
+    }
+    let ip = client_ip(&headers);
+    throttle("forgot", &ip, &login)?;
 
     // Ответ одинаковый для существующего и несуществующего аккаунта.
-    let user: Option<(i64, String)> = sqlx::query_as(
-        "SELECT id, login FROM users WHERE login = $1 OR lower(email) = lower($1) LIMIT 1",
+    // Адрес — из профиля: логин импортированного пользователя почтой не является,
+    // а смена email не меняет логин.
+    let user: Option<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, login, COALESCE(NULLIF(email, ''), login)
+         FROM users
+         WHERE lower(login) = lower($1) OR lower(email) = lower($1)
+         ORDER BY (lower(login) = lower($1)) DESC, id
+         LIMIT 1",
     )
     .bind(&login)
     .fetch_optional(&state.db)
     .await?;
 
-    if let Some((user_id, user_login)) = user {
+    if let Some((user_id, user_login, address)) = user {
         let word = new_token();
         sqlx::query(
             "INSERT INTO auth_tokens (user_id, kind, token_hash, expires_at)
@@ -264,8 +356,8 @@ pub async fn forgot(State(state): State<AppState>, body: Bytes) -> BxResult {
             "USER_PASS_REQUEST",
             HashMap::from([
                 ("USER_ID".to_string(), user_id.to_string()),
-                ("LOGIN".to_string(), user_login.clone()),
-                ("EMAIL".to_string(), user_login),
+                ("LOGIN".to_string(), user_login),
+                ("EMAIL".to_string(), address),
                 ("CHECKWORD".to_string(), word),
             ]),
         )
@@ -275,54 +367,70 @@ pub async fn forgot(State(state): State<AppState>, body: Bytes) -> BxResult {
     Ok(success(json!({ "sent": true })))
 }
 
-pub async fn reset(State(state): State<AppState>, jar: CookieJar, body: Bytes) -> BxResult {
+pub async fn reset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    body: Bytes,
+) -> BxResult {
     let body = parse_body(&body)?;
     let login = text(&body, "login");
     let checkword = text(&body, "checkword");
-    let password = text(&body, "password");
-    let confirm = text(&body, "passwordConfirm");
+    let password = raw(&body, "password");
+    let confirm = raw(&body, "passwordConfirm");
     if login.is_empty() || checkword.is_empty() {
         return Err(BxError::bad_request(
             "reset_data_required",
             "Ссылка на сброс пароля неполная.",
         ));
     }
-    check_password(&password, &confirm)?;
-    throttle(&login)?;
+    let ip = client_ip(&headers);
+    throttle("reset", &ip, &login)?;
 
-    let user_id: Option<i64> = sqlx::query_scalar(
-        "SELECT u.id FROM users u
-         JOIN auth_tokens t ON t.user_id = u.id
-         WHERE t.kind = 'reset' AND t.expires_at > now() AND t.token_hash = $2
-           AND (u.login = $1 OR lower(u.email) = lower($1))
-         LIMIT 1",
-    )
-    .bind(&login)
-    .bind(token_hash(&checkword))
-    .fetch_optional(&state.db)
-    .await?;
-    let Some(user_id) = user_id else {
+    let Some(user_id) = consume(&state.db, "reset", &checkword, &login).await? else {
         return Err(bad(
             "invalid_checkword",
             "Ссылка на сброс пароля неверна или устарела.",
         ));
     };
+    // Пароль проверяем после токена: по мёртвой ссылке политика не утекает.
+    check_password(&password, &confirm)?;
 
     let hash = hash_password(password).await?;
-    sqlx::query("UPDATE users SET password_hash = $2, active = TRUE WHERE id = $1")
-        .bind(user_id)
-        .bind(hash)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(
+        "UPDATE users
+         SET password_hash = $2, confirmed = TRUE, active = active OR NOT confirmed
+         WHERE id = $1",
+    )
+    .bind(user_id)
+    .bind(hash)
+    .execute(&state.db)
+    .await?;
     sqlx::query("DELETE FROM auth_tokens WHERE user_id = $1")
         .bind(user_id)
         .execute(&state.db)
         .await?;
-    // Пароль сменился — все прежние сессии недействительны.
+    // Пароль сменился — все прежние сессии недействительны, включая админские.
     sqlx::query("DELETE FROM site_sessions WHERE user_id = $1")
         .bind(user_id)
         .execute(&state.db)
         .await?;
+    crate::auth::delete_user_sessions(&state.db, user_id, None).await?;
+    forgive("reset", &ip, &login);
+
+    let active: bool = sqlx::query_scalar("SELECT active FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+    if !active {
+        // Заблокированного администратором не авторизуем, но пароль уже сменён.
+        return Ok(success(json!({
+            "user": Value::Null,
+            "csrfToken": auth::csrf_token(),
+            "changed": true,
+            "authorized": false,
+        })));
+    }
 
     let (jar, user) = auth::sign_in(&state, jar, user_id, false).await?;
     Ok((
