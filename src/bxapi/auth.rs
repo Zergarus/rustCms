@@ -50,11 +50,11 @@ impl SiteUser {
     }
 }
 
-fn token_hash(token: &str) -> String {
+pub(crate) fn token_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
-fn csrf_token() -> String {
+pub(crate) fn csrf_token() -> String {
     hex::encode(rand::random::<[u8; 16]>())
 }
 
@@ -169,7 +169,22 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar, body: Bytes) -
             .await?;
     }
 
-    // Новая сессия на каждый вход (старую из cookie закрываем — защита от фиксации)
+    let (jar, user) = sign_in(&state, jar, user_id, remember).await?;
+    Ok((
+        jar,
+        success(json!({ "user": user, "csrfToken": csrf_token() })),
+    )
+        .into_response())
+}
+
+/// Открывает новую сессию посетителя: закрывает старую из cookie, чистит
+/// просроченные, переносит корзину гостя. Возвращает cookie-jar и JSON пользователя.
+pub(super) async fn sign_in(
+    state: &AppState,
+    jar: CookieJar,
+    user_id: i64,
+    remember: bool,
+) -> Result<(CookieJar, Value), BxError> {
     if let Some(old) = jar.get(COOKIE) {
         sqlx::query("DELETE FROM site_sessions WHERE token_hash = $1")
             .bind(token_hash(old.value()))
@@ -201,7 +216,7 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar, body: Bytes) -
             .bind(user_id)
             .fetch_one(&state.db)
             .await?;
-    let mut jar = jar.add(session_cookie(&state, token, remember));
+    let mut jar = jar.add(session_cookie(state, token, remember));
     // Корзина гостя переходит пользователю, как в Битриксе; сбой не мешает входу
     if let Some(guest) = jar.get(BUYER_COOKIE).map(|c| c.value().to_string()) {
         if let Err(e) = crate::cart::repo::merge_guest_into_user(&state.db, &guest, user_id).await {
@@ -209,8 +224,7 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar, body: Bytes) -
         }
         jar = jar.remove(Cookie::build(BUYER_COOKIE).path("/"));
     }
-    let data = json!({ "user": user.json(), "csrfToken": csrf_token() });
-    Ok((jar, success(data)).into_response())
+    Ok((jar, user.json()))
 }
 
 pub async fn session(State(state): State<AppState>, jar: CookieJar) -> BxResult {

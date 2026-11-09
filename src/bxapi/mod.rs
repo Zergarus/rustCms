@@ -5,7 +5,7 @@
 //! Все ответы в обёртке `{status, data, errors}`. Коды инфоблоков и свойств в API —
 //! camelCase (`homeTabs`, `relatedBrands`), в CMS — snake_case.
 
-mod auth;
+pub(crate) mod auth;
 mod cart;
 mod elements;
 mod filter;
@@ -19,6 +19,7 @@ mod profile;
 mod profile_orders;
 pub mod project;
 mod query;
+pub mod register;
 pub mod registry;
 mod search;
 mod sections;
@@ -62,6 +63,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/profile/orders", get(profile_orders::orders))
         .route("/profile/orders/{id}", get(profile_orders::order))
+        .route("/auth/register", post(register::register))
+        .route("/auth/confirm-registration", post(register::confirm))
+        .route("/auth/forgot-password", post(register::forgot))
+        .route("/auth/reset-password", post(register::reset))
         .route("/auth/login", post(auth::login))
         .route("/auth/session", get(auth::session))
         .route("/auth/logout", post(auth::logout))

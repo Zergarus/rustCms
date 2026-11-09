@@ -18,6 +18,8 @@ mod groups;
 mod import;
 mod mail;
 mod passwords;
+#[cfg(test)]
+mod register_tests;
 mod sale;
 mod seo;
 #[cfg(test)]
