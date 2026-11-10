@@ -1,6 +1,7 @@
-//! `POST /iblock/{apiCode}/search`. В Битриксе — индекс модуля search (заголовок +
-//! свойства с флагом «участвует в поиске»); здесь — все слова запроса должны
-//! встретиться в названии или поисковых свойствах. Совпадения в названии выше.
+//! `POST /iblock/{apiCode}/search`. Как индекс модуля `search` Битрикса:
+//! словоформы ищутся полнотекстово (`tsvector`, русская конфигурация), подстроки
+//! и опечатки — через `pg_trgm`; все слова запроса должны найтись. Порядок:
+//! точное название, затем релевантность, затем все слова в названии.
 //! Как и в индексе Битрикса, активность раздела не учитывается — только элемента.
 //! Если ничего не нашлось — повтор в другой раскладке / с латинскими двойниками
 //! кириллицы (`queryCorrection`).
@@ -16,7 +17,7 @@ use super::{
     serialize::{Env, Mode, ROW_COLS, Row, detail_page_url, serialize},
     success,
 };
-use crate::{collection::is_valid_code, state::AppState};
+use crate::state::AppState;
 
 const MAX_LIMIT: i64 = 200;
 
@@ -171,18 +172,25 @@ async fn find(
             *ROW_COLS
         ));
         qb.push_bind(schema.collection.id).push(" AND e.active");
-        let mut haystack = String::from("e.name");
-        for p in props.iter().filter(|p| is_valid_code(p)) {
-            haystack.push_str(&format!(
-                " || ' ' || COALESCE(e.field_values ->> '{p}', '')"
-            ));
+        // Свойства с флагом поиска больше не нужны отдельно: значения полей
+        // уже в `search_vector`. Оставляем `props` для совместимости вызова.
+        let _ = props;
+        // Словоформы ищем полнотекстом, подстроки/опечатки — ILIKE по trgm.
+        for (word, pattern) in words.iter().zip(&patterns) {
+            qb.push(" AND (e.search_vector @@ plainto_tsquery('russian', ")
+                .push_bind(word.clone())
+                .push(") OR e.name ILIKE ")
+                .push_bind(pattern.clone())
+                .push(" OR e.code ILIKE ")
+                .push_bind(pattern.clone())
+                .push(")");
         }
-        for pattern in &patterns {
-            qb.push(format!(" AND ({haystack}) ILIKE "))
-                .push_bind(pattern.clone());
-        }
-        // Сначала совпадения в названии, потом новые
-        qb.push(" ORDER BY (e.name ILIKE ALL(")
+        // Точное название, затем релевантность, затем все слова в названии.
+        qb.push(" ORDER BY (lower(e.name) = lower(")
+            .push_bind(query.to_string())
+            .push(")) DESC, ts_rank(e.search_vector, plainto_tsquery('russian', ")
+            .push_bind(query.to_string())
+            .push(")) DESC, (e.name ILIKE ALL(")
             .push_bind(patterns.clone())
             .push(")) DESC, e.id DESC");
         qb.push(" LIMIT ").push_bind(limit);

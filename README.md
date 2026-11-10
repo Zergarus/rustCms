@@ -136,6 +136,10 @@ cms import-bitrix 'mysql://user:pass@host:3306/db' --upload /path/to/site/upload
 
 Почтовые шаблоны правятся в админке: «Письма» (`/admin/mail`, право «Настройки сайта и письма») — список, создание, правка темы и тела, тип `text`/`html`, активность и удаление. Код события — заглавные латинские буквы, цифры и `_`; пустые тема и тело не сохраняются.
 
+## Поиск
+
+`POST /api/v1/iblock/{code}/search`: словоформы ищутся полнотекстово (`tsvector` с русской конфигурацией, индекс GIN), подстроки и опечатки — по триграммам (`pg_trgm`). Все слова запроса должны найтись; выдача — точное название, затем релевантность, затем все слова в названии. Если ничего не нашлось, пробуются варианты в другой раскладке и с латинскими двойниками (`queryCorrection`). Индекс генерируется колонкой `search_vector` — переиндексация вручную не нужна.
+
 ## API в формате bxapi
 
 Под `/api/v1/` — контракт модуля `mediagroup.bxapi` (обёртка `{status, data, errors}`, ключи в camelCase): `iblock/list`, `iblock/info/{apiCode}`, `iblock/{apiCode}/element/list`, `element/{id}`, `element/slug/{slug}`, `section/list` (с `hasElements`), `iblock/{apiCode}/search`, `nav/breadcrumbs`, `nav/legacy-redirect`, `base/csrf/token`, `auth/login|session|logout`, `location/search|set|current` (выбор города: у гостя — в cookie, у авторизованного — ещё и в профиле), `form/{code}` (проверка полей, запись в коллекцию, письмо по почтовому событию; формы описываются в `config/forms.toml` или кодом проекта — см. раздел «Формы»).

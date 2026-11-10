@@ -36,6 +36,8 @@ mod project_extension_tests;
 #[cfg(test)]
 mod register_tests;
 mod sale;
+#[cfg(test)]
+mod search_fulltext_tests;
 mod seo;
 #[cfg(test)]
 mod seo_tests;
