@@ -33,6 +33,8 @@ mod forms_config_tests;
 mod groups;
 mod import;
 mod mail;
+#[cfg(test)]
+mod mail_queue_tests;
 mod mail_templates;
 #[cfg(test)]
 mod mail_templates_tests;
@@ -316,6 +318,7 @@ async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
 
     currency::auto::spawn(state.clone());
     payment::spawn(state.clone());
+    mail::spawn(state.clone());
     stock::cleaner::spawn(state.clone());
     stock::rebuild::spawn(state.clone());
     let app = app(state.clone());

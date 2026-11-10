@@ -17,7 +17,7 @@ use lettre::{
 };
 use sqlx::{FromRow, PgPool};
 
-use crate::config::Config;
+use crate::{config::Config, state::AppState};
 
 #[derive(FromRow)]
 struct Template {
@@ -71,7 +71,46 @@ fn addresses(raw: &str) -> Vec<Mailbox> {
 }
 
 /// Отправляет письма по шаблонам события. Возвращает число отправленных писем.
+/// Ставит письмо в очередь и сразу пробует отправить; при сбое письмо
+/// останется в очереди и фоновая задача повторит его с паузой.
 pub async fn send_event(
+    db: &PgPool,
+    config: &Config,
+    event: &str,
+    fields: &HashMap<String, String>,
+) -> anyhow::Result<usize> {
+    let stored = serde_json::to_value(fields)?;
+    let id: i64 =
+        sqlx::query_scalar("INSERT INTO mail_queue (event, fields) VALUES ($1, $2) RETURNING id")
+            .bind(event)
+            .bind(stored)
+            .fetch_one(db)
+            .await?;
+    match deliver_event(db, config, event, fields).await {
+        Ok(sent) => {
+            sqlx::query("UPDATE mail_queue SET sent_at = now() WHERE id = $1")
+                .bind(id)
+                .execute(db)
+                .await?;
+            Ok(sent)
+        }
+        Err(error) => {
+            tracing::warn!(event, %error, "письмо не отправлено, осталось в очереди");
+            sqlx::query(
+                "UPDATE mail_queue SET attempts = attempts + 1,
+                     next_at = now() + interval '60 seconds', error = $2 WHERE id = $1",
+            )
+            .bind(id)
+            .bind(error.to_string())
+            .execute(db)
+            .await?;
+            Ok(0)
+        }
+    }
+}
+
+/// Отправляет одно письмо по шаблонам события. `Ok(0)` — шаблонов нет.
+async fn deliver_event(
     db: &PgPool,
     config: &Config,
     event: &str,
@@ -253,4 +292,65 @@ mod tests {
         );
         assert_eq!(substitute("#not a key#", &fields), "#not a key#");
     }
+}
+
+/// Обрабатывает очередь: до 20 писем за проход.
+pub async fn process(state: &AppState) -> anyhow::Result<usize> {
+    let rows: Vec<(i64, String, sqlx::types::Json<HashMap<String, String>>, i32)> = sqlx::query_as(
+        "SELECT id, event, fields, attempts FROM mail_queue
+             WHERE sent_at IS NULL AND next_at <= now()
+             ORDER BY next_at, id LIMIT 20",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    let mut sent = 0;
+    for (id, event, fields, attempts) in rows {
+        match deliver_event(&state.db, &state.config, &event, &fields.0).await {
+            Ok(_) => {
+                sqlx::query("UPDATE mail_queue SET sent_at = now(), error = '' WHERE id = $1")
+                    .bind(id)
+                    .execute(&state.db)
+                    .await?;
+                sent += 1;
+            }
+            Err(error) => {
+                // 1, 5, 15, 60 минут — дальше раз в час.
+                let delay = match attempts {
+                    0 => 60,
+                    1 => 300,
+                    2 => 900,
+                    3 => 3600,
+                    _ => 3600,
+                };
+                tracing::warn!(id, event, %error, "письмо не отправлено, повтор позже");
+                sqlx::query(
+                    "UPDATE mail_queue
+                     SET attempts = attempts + 1,
+                         next_at = now() + ($2 || ' seconds')::interval,
+                         error = $3
+                     WHERE id = $1",
+                )
+                .bind(id)
+                .bind(delay.to_string())
+                .bind(error.to_string())
+                .execute(&state.db)
+                .await?;
+            }
+        }
+    }
+    Ok(sent)
+}
+
+/// Фоновая отправка очереди раз в 30 секунд.
+pub fn spawn(state: AppState) {
+    tokio::spawn(async move {
+        let mut timer = tokio::time::interval(std::time::Duration::from_secs(30));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            timer.tick().await;
+            if let Err(error) = process(&state).await {
+                tracing::warn!(%error, "очередь писем не обработана");
+            }
+        }
+    });
 }
