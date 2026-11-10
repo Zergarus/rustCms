@@ -151,6 +151,7 @@ pub fn test_state(db: PgPool) -> crate::state::AppState {
         currency_bank_url: None,
         // Тесты bxapi шлют запросы без токена; проверка CSRF покрыта отдельными тестами.
         csrf_enforce: false,
+        rate_limit_per_min: 0,
     };
     let mut env = minijinja::Environment::new();
     env.set_loader(minijinja::path_loader(config.templates_dir.join("admin")));

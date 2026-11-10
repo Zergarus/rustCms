@@ -24,6 +24,9 @@ mod currency;
 mod discount;
 mod error;
 mod exchange;
+mod export;
+#[cfg(test)]
+mod export_tests;
 mod files;
 #[cfg(test)]
 mod forms_config_tests;
@@ -39,6 +42,9 @@ mod payment;
 mod payment_tests;
 #[cfg(test)]
 mod project_extension_tests;
+mod rate_limit;
+#[cfg(test)]
+mod rate_limit_tests;
 #[cfg(test)]
 mod register_tests;
 mod sale;
@@ -99,6 +105,7 @@ const USAGE: &str = "\
                               Битрикса; --upload — каталог upload сайта (файлы линкуются в
                               UPLOAD_DIR), --replace — удалить уже существующие коллекции,
                               --api-code — apiCode инфоблока, если API_CODE в базе не заполнен
+  cms export --out <каталог>  выгрузить коллекции в JSON и CSV (collections.json, <код>.csv)
   cms currency-rates [--date ДД.ММ.ГГГГ]
                               загрузить курсы валют из банка базовой валюты (по умолчанию на
                               сегодня по Москве); существующие курсы не перезаписываются";
@@ -137,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
             let opts = import_options(&args[1..], &config).context(USAGE)?;
             import::run(&db, opts).await
         }
+        "export" => export_data(&db, &args[1..]).await,
         "currency-rates" => currency_rates(&db, &config, &args[1..]).await,
         other => bail!("неизвестная команда `{other}`\n\n{USAGE}"),
     }
@@ -255,14 +263,26 @@ pub(crate) fn app(state: AppState) -> Router {
             "/payment/webhook/{code}",
             axum::routing::post(payment::webhook_handler),
         )
-        .nest("/api", api::router().layer(cors_layer(&state.config)))
+        .nest(
+            "/api",
+            api::router().layer(cors_layer(&state.config)).layer(
+                axum::middleware::from_fn_with_state(state.clone(), rate_limit::guard),
+            ),
+        )
         .nest(
             "/api/v1",
-            bxapi::router(&state).layer(cors_layer(&state.config)),
+            bxapi::router(&state)
+                .layer(cors_layer(&state.config))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit::guard,
+                )),
         )
         .nest(
             "/api/stock/v1",
-            stock_api::router().layer(cors_layer(&state.config)),
+            stock_api::router().layer(cors_layer(&state.config)).layer(
+                axum::middleware::from_fn_with_state(state.clone(), rate_limit::guard),
+            ),
         )
         .nest("/admin", admin::router(state.clone()))
         .nest(
@@ -312,5 +332,19 @@ async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
         tokio::signal::ctrl_c().await.ok();
     })
     .await?;
+    Ok(())
+}
+
+async fn export_data(db: &PgPool, args: &[String]) -> anyhow::Result<()> {
+    let mut out = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--out" {
+            out = iter.next().map(std::path::PathBuf::from);
+        }
+    }
+    let out = out.context("cms export --out <каталог>")?;
+    let count = export::export(db, &out).await?;
+    println!("экспортировано коллекций: {count} → {}", out.display());
     Ok(())
 }
