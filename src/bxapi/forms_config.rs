@@ -12,7 +12,7 @@ use std::{
 use anyhow::{Context, bail};
 use serde::Deserialize;
 
-use super::project::{FormConfig, Project, Rule};
+use super::project::{FormConfig, FormExtension, Project, Rule};
 
 /// Форма в рантайме: владеющая копия конфигурации.
 #[derive(Clone, Debug, Default)]
@@ -41,9 +41,10 @@ pub struct NotifierSpec {
 }
 
 /// Реестр форм установки.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Forms {
     by_code: HashMap<String, FormSpec>,
+    extensions: HashMap<String, std::sync::Arc<FormExtension>>,
 }
 
 impl Forms {
@@ -52,6 +53,17 @@ impl Forms {
         let mut forms = Self::default();
         for form in &project.forms {
             forms.insert(spec_from_code(form));
+        }
+        for extension in &project.form_extensions {
+            forms.extensions.insert(
+                extension.code.to_string(),
+                std::sync::Arc::new(FormExtension {
+                    code: extension.code,
+                    validator: extension.validator.clone(),
+                    writer: extension.writer.clone(),
+                    notifier: extension.notifier.clone(),
+                }),
+            );
         }
         forms
     }
@@ -76,6 +88,11 @@ impl Forms {
 
     pub fn get(&self, code: &str) -> Option<&FormSpec> {
         self.by_code.get(code)
+    }
+
+    /// Шаги формы, заменённые кодом проекта.
+    pub fn extension(&self, code: &str) -> Option<&FormExtension> {
+        self.extensions.get(code).map(std::sync::Arc::as_ref)
     }
 
     pub fn insert(&mut self, spec: FormSpec) {

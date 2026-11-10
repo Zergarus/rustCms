@@ -259,14 +259,26 @@ pub async fn submit(
         guard.check(&state, &code, &body, ip.as_deref()).await?;
     }
 
-    let data = validate(form, &body)?;
-    let file_fields = save_files(&state, form, uploads).await?;
-    let id = match &form.writer {
-        Some(writer) => Some(write_element(&state, writer, &file_fields, &data).await?),
-        None => None,
+    let extension = state.forms.extension(&code);
+    let data = match extension.and_then(|e| e.validator.as_ref()) {
+        Some(validator) => validator.validate(&body).await?,
+        None => validate(form, &body)?,
     };
-    if let Some(notifier) = &form.notifier {
-        send_notification(&state, notifier, &data);
+    let file_fields = save_files(&state, form, uploads).await?;
+    let id = match extension.and_then(|e| e.writer.as_ref()) {
+        Some(writer) => writer.write(&state, &data).await?,
+        None => match &form.writer {
+            Some(writer) => Some(write_element(&state, writer, &file_fields, &data).await?),
+            None => None,
+        },
+    };
+    match extension.and_then(|e| e.notifier.as_ref()) {
+        Some(notifier) => notifier.notify(&state, &data).await,
+        None => {
+            if let Some(notifier) = &form.notifier {
+                send_notification(&state, notifier, &data);
+            }
+        }
     }
     Ok(success(json!({ "id": id, "data": data })))
 }

@@ -182,6 +182,12 @@ cms import-bitrix 'mysql://user:pass@host:3306/db' --upload /path/to/site/upload
 Образец конфигурации — `config/forms.toml.example`. Так проектные фичи вроде
 отзывов или брифа делаются формой, без правок ядра.
 
+Если данных не хватает, проект заменяет отдельные шаги кодом — как
+`FormRegistry::register()` в Битриксе. В `project()` добавляется
+`FormExtension` с кодом формы и любыми из трёх шагов: `FormValidator`
+(заменяет правила), `FormWriter` (заменяет запись), `FormNotifier` (заменяет
+письмо). Пример — `project/README.md`.
+
 ## Регистрация и пароли
 
 `POST /api/v1/auth/register` создаёт неактивного пользователя (логин — почта),

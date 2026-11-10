@@ -440,3 +440,106 @@ async fn html_email_escapes_user_values(db: PgPool) {
     assert!(letter.contains("&lt;script&gt;"), "{letter}");
     assert!(!letter.contains("<script>alert"), "{letter}");
 }
+
+// --- Расширения кодом проекта (аналог FormRegistry::register) ---
+
+struct NameOnly;
+
+impl crate::bxapi::project::FormValidator for NameOnly {
+    fn validate<'a>(
+        &'a self,
+        data: &'a serde_json::Map<String, Value>,
+    ) -> crate::bxapi::project::BoxFuture<
+        'a,
+        Result<serde_json::Map<String, Value>, crate::bxapi::BxError>,
+    > {
+        Box::pin(async move {
+            let name = data
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if name.is_empty() {
+                return Err(crate::bxapi::BxError::numeric(
+                    StatusCode::BAD_REQUEST,
+                    "name is required".to_string(),
+                ));
+            }
+            Ok(data.clone())
+        })
+    }
+}
+
+struct FixedWriter;
+
+impl crate::bxapi::project::FormWriter for FixedWriter {
+    fn write<'a>(
+        &'a self,
+        _state: &'a crate::state::AppState,
+        _data: &'a serde_json::Map<String, Value>,
+    ) -> crate::bxapi::project::BoxFuture<'a, Result<Option<i64>, crate::bxapi::BxError>> {
+        Box::pin(async move { Ok(Some(7)) })
+    }
+}
+
+struct FlagNotifier(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl crate::bxapi::project::FormNotifier for FlagNotifier {
+    fn notify<'a>(
+        &'a self,
+        _state: &'a crate::state::AppState,
+        _data: &'a serde_json::Map<String, Value>,
+    ) -> crate::bxapi::project::BoxFuture<'a, ()> {
+        let flag = self.0.clone();
+        Box::pin(async move {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+    }
+}
+
+#[sqlx::test]
+async fn project_code_replaces_form_stages(db: PgPool) {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let flag = Arc::new(AtomicBool::new(false));
+    let mut project = crate::bxapi::project::Project::default();
+    // Кодовая форма требует email, но кастомный валидатор её правила заменяет.
+    project.forms.push(crate::bxapi::project::FormConfig {
+        code: "custom",
+        rules: vec![("email", &[Rule::Required, Rule::Email])],
+        writer: None,
+        notifier: None,
+    });
+    project
+        .form_extensions
+        .push(crate::bxapi::project::FormExtension {
+            code: "custom",
+            validator: Some(Arc::new(NameOnly)),
+            writer: Some(Arc::new(FixedWriter)),
+            notifier: Some(Arc::new(FlagNotifier(flag.clone()))),
+        });
+
+    let mut state = crate::test_support::test_state(db.clone());
+    state.forms = Arc::new(Forms::from_project(&project));
+    let app = crate::app(state);
+
+    let (status, json) = post_json(
+        &app,
+        "/api/v1/form/custom",
+        json!({"name": "Ivan", "extra": "kept"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["data"]["id"], 7, "кастомный writer");
+    assert_eq!(
+        json["data"]["data"]["extra"], "kept",
+        "валидатор вернул поле"
+    );
+    assert!(flag.load(Ordering::SeqCst), "кастомный notifier вызван");
+
+    let (status, json) = post_json(&app, "/api/v1/form/custom", json!({"name": "  "})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+}

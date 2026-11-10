@@ -35,3 +35,25 @@ CMS не попадают — храните их в репозитории пр
 Корзина и оформление заказа (аналог `bxapi.basket` и `bxapi.order`) — поля `cart`
 (`CartConfig`) и `order` (`OrderConfig`; ограничение доставок по корзине — `impl
 crate::bxapi::project::DeliveryFilter` в `order.delivery_filter`).
+
+## Формы: шаги кодом проекта
+
+Аналог `FormRegistry::register()` в модуле `mediagroup.bxapi`. В `Project`
+добавьте `form_extensions`:
+
+```rust
+use crate::bxapi::project::{FormExtension, FormValidator, FormWriter, FormNotifier};
+
+project.form_extensions.push(FormExtension {
+    code: "review",
+    validator: Some(Arc::new(ReviewValidator)), // заменяет правила формы
+    writer: Some(Arc::new(ReviewWriter)),       // заменяет запись в коллекцию
+    notifier: Some(Arc::new(ReviewNotifier)),   // заменяет письмо
+});
+```
+
+Каждый шаг необязателен: `None` означает «взять из `config/forms.toml` или из
+описания формы в коде». Валидатор возвращает прошедшие проверку поля (они уйдут
+в writer/notifier и в ответ `data`), writer — id созданной записи или `None`,
+notifier просто выполняет отправку. Сигнатуры — в
+`src/bxapi/project/mod.rs` (`FormValidator`, `FormWriter`, `FormNotifier`).

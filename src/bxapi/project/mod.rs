@@ -281,6 +281,37 @@ pub struct OrderConfig {
     pub delivery_filter: Option<Arc<dyn DeliveryFilter>>,
 }
 
+/// Проверка формы кодом проекта: заменяет правила из конфига целиком.
+pub trait FormValidator: Send + Sync {
+    fn validate<'a>(
+        &'a self,
+        data: &'a Map<String, Value>,
+    ) -> BoxFuture<'a, Result<Map<String, Value>, BxError>>;
+}
+
+/// Запись формы кодом проекта: заменяет `writer` из конфига.
+pub trait FormWriter: Send + Sync {
+    fn write<'a>(
+        &'a self,
+        state: &'a AppState,
+        data: &'a Map<String, Value>,
+    ) -> BoxFuture<'a, Result<Option<i64>, BxError>>;
+}
+
+/// Уведомление формы кодом проекта: заменяет `notifier` из конфига.
+pub trait FormNotifier: Send + Sync {
+    fn notify<'a>(&'a self, state: &'a AppState, data: &'a Map<String, Value>)
+    -> BoxFuture<'a, ()>;
+}
+
+/// Расширение формы кодом проекта — аналог `FormRegistry::register()` в Битриксе.
+pub struct FormExtension {
+    pub code: &'static str,
+    pub validator: Option<Arc<dyn FormValidator>>,
+    pub writer: Option<Arc<dyn FormWriter>>,
+    pub notifier: Option<Arc<dyn FormNotifier>>,
+}
+
 pub struct Project {
     /// Разрешённые ширины ресайза (`bxapi.images.widths`); пусто — любые.
     pub image_widths: Vec<u32>,
@@ -302,6 +333,8 @@ pub struct Project {
     pub location: LocationConfig,
     pub forms: Vec<FormConfig>,
     pub form_guards: Vec<Arc<dyn FormGuard>>,
+    /// Формы, у которых шаги заменены кодом проекта.
+    pub form_extensions: Vec<FormExtension>,
     /// Обработчик товаров при обмене с 1С (`None` — ничего не делается).
     pub import_hook: Option<Arc<dyn ImportHook>>,
     /// Реквизиты заказа при выгрузке в 1С (`None` — только реквизиты модуля).
@@ -398,6 +431,7 @@ impl Default for Project {
             },
             forms: default_forms(),
             form_guards: Vec::new(),
+            form_extensions: Vec::new(),
             import_hook: None,
             order_export_hook: None,
             order_import_hook: None,
