@@ -94,6 +94,8 @@ pub struct OrderView {
     pub price: f64,
     /// НДС, рассчитанный при оформлении.
     pub tax_amount: f64,
+    /// Сколько уже возвращено покупателю.
+    pub refunded_amount: f64,
     pub currency: String,
     pub user_comment: String,
     pub manager_comment: String,
@@ -346,6 +348,7 @@ pub async fn load(db: &PgPool, id: i64) -> sqlx::Result<Option<OrderView>> {
                 o.person_type_id, o.status, COALESCE(s.name, o.status) AS status_name,
                 o.goods_price::float8 AS goods_price, o.delivery_price::float8 AS delivery_price,
                 o.price::float8 AS price, o.tax_amount::float8 AS tax_amount,
+                o.refunded_amount::float8 AS refunded_amount,
                 o.currency, o.user_comment, o.manager_comment,
                 o.canceled, o.canceled_at, o.cancel_reason, o.paid, o.paid_at, o.stock_deducted,
                 o.created_at, o.updated_at

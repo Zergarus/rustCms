@@ -54,6 +54,8 @@ mod rate_limit;
 #[cfg(test)]
 mod rate_limit_tests;
 #[cfg(test)]
+mod refund_tests;
+#[cfg(test)]
 mod register_tests;
 mod sale;
 #[cfg(test)]

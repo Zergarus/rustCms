@@ -6,6 +6,7 @@ pub mod form;
 pub mod guest;
 pub mod history;
 pub mod mail;
+pub mod refund;
 pub mod repo;
 pub mod stock;
 pub mod tax;

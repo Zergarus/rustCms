@@ -228,6 +228,7 @@ mod tests {
             delivery_price: 300.0,
             price: 1394.22,
             tax_amount: 0.0,
+            refunded_amount: 0.0,
             currency: "RUB".into(),
             user_comment: String::new(),
             manager_comment: String::new(),

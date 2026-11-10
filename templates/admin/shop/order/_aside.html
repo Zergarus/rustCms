@@ -7,6 +7,8 @@
   {% call ui.prop("Товары") %}{{ order.goods_price }} {{ order.currency }}{% endcall %}
   {% call ui.prop("Скидка") %}{% if discount_total %}{{ discount_total }} {{ order.currency }}{% else %}—{% endif %}{% endcall %}
   {% call ui.prop("Доставка") %}{{ order.delivery_price }} {{ order.currency }}{% endcall %}
+  {% call ui.prop("НДС") %}{{ order.tax_amount }} {{ order.currency }}{% endcall %}
+  {% if order.refunded_amount %}{% call ui.prop("Возвращено") %}{{ order.refunded_amount }} {{ order.currency }}{% endcall %}{% endif %}
   {% if show_cost and order_margin %}<div class="prop"><div class="prop-val">Маржа заказа: {{ order_margin }}</div></div>{% endif %}
 </section>
 <section class="card">
@@ -14,5 +16,16 @@
   {% call ui.prop("Оплата") %}{% if order.paid %}<span class="badge ok">оплачен</span>{% else %}не оплачен{% endif %}{% endcall %}
   {% call ui.prop("Отгрузка") %}{% if shipped %}<span class="badge ok">отгружен</span>{% else %}не отгружен{% endif %}{% if order.shipment and order.shipment.allow_delivery %}, доставка разрешена{% endif %}{% endcall %}
 </section>
+{% if order.paid and not order.canceled %}
+<section class="card">
+  <h3>Возврат</h3>
+  <form method="post" action="/admin/shop/orders/{{ order.id }}/refund" hx-confirm="Оформить возврат?">
+    <label>Сумма<input name="amount" inputmode="decimal" placeholder="0.00" required></label>
+    <label>Причина<input name="reason" placeholder="например, отказ покупателя"></label>
+    <button class="btn" type="submit">Вернуть</button>
+  </form>
+  <p class="muted">К возврату: {{ order.price - order.refunded_amount }} {{ order.currency }}</p>
+</section>
+{% endif %}
 {% endcall %}
 </div>
