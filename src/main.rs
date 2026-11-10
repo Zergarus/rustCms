@@ -39,10 +39,13 @@ mod mail_templates;
 #[cfg(test)]
 mod mail_templates_tests;
 mod metrics;
+mod openapi;
 #[cfg(test)]
 mod metrics_tests;
 mod passwords;
 mod payment;
+#[cfg(test)]
+mod openapi_tests;
 #[cfg(test)]
 mod payment_tests;
 #[cfg(test)]
@@ -265,6 +268,7 @@ pub(crate) fn app(state: AppState) -> Router {
     let mut app = Router::new()
         .route("/", get(|| async { Redirect::to("/admin") }))
         .route("/metrics", get(metrics::render))
+        .route("/openapi.json", get(openapi::document))
         .route(
             "/payment/webhook/{code}",
             axum::routing::post(payment::webhook_handler),
