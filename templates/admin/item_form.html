@@ -29,7 +29,6 @@
 <div data-card>
 <div class="tabs-row">
   {{ ui.card_tabs(card_tabs, tabctx) }}
-  {% if item_id and can_write %}<a class="tab tab-link" href="/admin/seo/items/{{ item_id }}">SEO</a>{% endif %}
 </div>
 <form class="card form" method="post" enctype="multipart/form-data" data-dirty-guard
       action="{% if item_id %}/admin/items/{{ item_id }}{% else %}/admin/collections/{{ collection.id }}/items{% endif %}">
@@ -226,6 +225,25 @@
     {% endif %}
   </fieldset>
 {% endif %}
+  {% endcall %}
+  {% endif %}
+
+  {% if item_id and seo is not none %}
+  {% call ui.tab_pane("seo", tabctx) %}
+  <fieldset>
+    <legend>SEO</legend>
+    <p class="muted">Пустое поле наследует настройку раздела или коллекции. Переменные: <code>{name}</code>, <code>{code}</code>, <code>{collection}</code>, <code>{section}</code>.</p>
+    <label>Title<input name="seo_title" value="{{ seo.title }}" maxlength="2000"></label>
+    <label>Description<textarea name="seo_description" rows="3" maxlength="2000">{{ seo.description }}</textarea></label>
+    <label>H1<input name="seo_h1" value="{{ seo.h1 }}" maxlength="2000"></label>
+    <label>Canonical<input name="seo_canonical" value="{{ seo.canonical }}" maxlength="2000" placeholder="https://example.org/page/"></label>
+    <label>Индексация<select name="seo_robots">
+      {% for value, label in [("", "Наследовать"), ("index,follow", "Индексировать, переходить по ссылкам"), ("noindex,follow", "Не индексировать, переходить по ссылкам"), ("index,nofollow", "Индексировать, не переходить по ссылкам"), ("noindex,nofollow", "Не индексировать, не переходить по ссылкам")] %}
+      <option value="{{ value }}" {% if seo.robots == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select></label>
+    <p class="muted"><a href="/admin/seo/items/{{ item_id }}">Открыть страницу SEO отдельно</a> — там же предпросмотр наследованных значений.</p>
+  </fieldset>
   {% endcall %}
   {% endif %}
 

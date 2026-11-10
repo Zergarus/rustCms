@@ -36,7 +36,7 @@ use crate::{
 };
 
 /// Вкладки карточки записи, на которые можно вернуться после сохранения.
-const CARD_TABS: [&str; 5] = ["main", "text", "fields", "catalog", "offers"];
+const CARD_TABS: [&str; 6] = ["main", "text", "fields", "catalog", "offers", "seo"];
 const DATETIME_FORMAT: &str = "%Y-%m-%dT%H:%M";
 /// Картинки записи — одиночные файловые поля.
 const PICTURE_FIELDS: [&str; 2] = ["preview_picture_id", "detail_picture_id"];
@@ -790,18 +790,62 @@ async fn render_form(
     if let Some(t) = &offers_tab {
         card_tabs.push(("offers", "Предложения", Some(t.rows.len())));
     }
+    if item_id.is_some() {
+        card_tabs.push(("seo", "SEO", None));
+    }
     let visible: Vec<&'static str> = card_tabs.iter().map(|t| t.0).collect();
     let tabctx = tab_context(&errors, &visible, tab);
+    let seo = match item_id {
+        Some(id) => match crate::seo::load(&state.db, crate::seo::Kind::Item, id).await {
+            Ok(target) => crate::seo::settings(&state.db, &target).await.ok(),
+            Err(_) => None,
+        },
+        None => None,
+    };
     render(
         state,
         "item_form.html",
         context! {
-            user, collection, properties, item_id, card_tabs, tabctx, can_write, sections, enums, files, linked,
+            user, collection, properties, item_id, card_tabs, tabctx, can_write, sections, enums, files, linked, seo,
             multi, catalog, store_control, offers_priced, offers, offers_tab, can_write_offers, offer_product, notice,
             can_purchase_info, can_shop, barcode_stores,
             form => form.first_values(),
         },
     )
+}
+
+/// SEO-поля из общей формы записи; пустые — наследование, как на отдельной странице.
+fn seo_settings(form: &FormValues) -> crate::seo::Settings {
+    crate::seo::Settings {
+        title: form.get("seo_title").trim().to_string(),
+        description: form.get("seo_description").trim().to_string(),
+        h1: form.get("seo_h1").trim().to_string(),
+        canonical: form.get("seo_canonical").trim().to_string(),
+        robots: form.get("seo_robots").trim().to_string(),
+    }
+}
+
+async fn save_seo(db: &sqlx::PgPool, item_id: i64, form: &FormValues) {
+    let settings = seo_settings(form);
+    let empty = settings.title.is_empty()
+        && settings.description.is_empty()
+        && settings.h1.is_empty()
+        && settings.canonical.is_empty()
+        && settings.robots.is_empty();
+    if empty {
+        return;
+    }
+    let target = match crate::seo::load(db, crate::seo::Kind::Item, item_id).await {
+        Ok(target) => target,
+        Err(error) => {
+            tracing::warn!(item_id, ?error, "SEO записи не сохранено");
+            return;
+        }
+    };
+    if let Err(error) = crate::seo::save(db, &target, settings).await {
+        // Карточка уже сохранена: SEO-ошибка не должна откатывать основную запись
+        tracing::warn!(item_id, ?error, "SEO записи не сохранено");
+    }
 }
 
 /// Работа с предложениями требует записи и в коллекции товаров.
@@ -1293,6 +1337,7 @@ async fn save(
                         &user.user.login,
                     )
                     .await;
+                    save_seo(&state.db, saved_id, &form).await;
                     if let Some(Ok(p)) = &purchase
                         && let Err(e) = save_catalog_tab(
                             &state.db,

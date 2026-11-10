@@ -65,6 +65,8 @@ mod sale;
 mod search_fulltext_tests;
 mod seo;
 #[cfg(test)]
+mod seo_tab_tests;
+#[cfg(test)]
 mod seo_tests;
 mod settings;
 #[cfg(test)]
