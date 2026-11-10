@@ -59,6 +59,16 @@
         <button class="ico nav-toggle" type="button" data-nav-toggle aria-controls="sidebar" aria-label="Меню">{{ ui.icon("menu") }}</button>
         <div id="open-tabs" class="open-tabs"{% if shell.prefs.tabs and shell.is_get and not no_tab %} data-record-page{% endif %}>{% set tabs = shell.tabs %}{% include "_tabs.html" %}</div>
         {% if shell.prefs.tabs and shell.is_get and not no_tab %}<span hidden hx-post="/admin/tabs" hx-trigger="load" hx-vals='{{ {"url": shell.url, "title": self.title()}|tojson }}' hx-target="#open-tabs" hx-swap="innerHTML"></span>{% endif %}
+        {% if shell.prefs.tabs and shell.tabs %}
+        <details class="tabs-all">
+          <summary class="ico" title="Все открытые страницы" aria-label="Все открытые страницы">⋯</summary>
+          <div class="tabs-all-menu">
+            {% for t in shell.tabs %}
+            <a href="{{ t.url }}" class="{% if t.active %}on{% endif %}">{{ t.title }}</a>
+            {% endfor %}
+          </div>
+        </details>
+        {% endif %}
       </header>
     {% endif %}
   <main class="{% block main_class %}container{% endblock %}">

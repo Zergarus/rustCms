@@ -267,6 +267,28 @@ td { padding: 8px var(--sp-3); }
 .stock-table td.num input { width: 140px; text-align: right; }
 .stock-table tr.muted td { color: var(--muted); }
 
+/* Список всех открытых вкладок */
+.tabs-all { position: relative; flex: none; }
+.tabs-all > summary { list-style: none; cursor: pointer; }
+.tabs-all > summary::-webkit-details-marker { display: none; }
+.tabs-all-menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 60;
+  display: grid; min-width: 300px; max-width: 420px; max-height: 60vh; overflow: auto;
+  padding: var(--sp-1); background: var(--panel);
+  border: 1px solid var(--border-strong); border-radius: var(--r-lg); box-shadow: var(--shadow-pop);
+}
+.tabs-all-menu a {
+  padding: 6px var(--sp-2); border-radius: var(--r-sm);
+  color: var(--text); font-size: var(--fs-base);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tabs-all-menu a:hover { background: var(--hover); text-decoration: none; }
+.tabs-all-menu a.on { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
+
+.users-table { min-width: 0; width: 100%; table-layout: fixed; }
+.users-table th, .users-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.users-table .groups { max-width: none; }
+
 /* Мобильная адаптация */
 @media (max-width: 900px) {
   .list-table { min-width: 720px; }
