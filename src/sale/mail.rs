@@ -125,6 +125,7 @@ pub fn order_fields(
         ("ADDRESS".to_string(), address),
         ("STORE".to_string(), store),
         ("USER_DESCRIPTION".to_string(), o.user_comment.clone()),
+        ("TAX".to_string(), money(o.tax_amount, &o.currency)),
         ("BCC".to_string(), sale_email.to_string()),
         ("SALE_EMAIL".to_string(), sale_email.to_string()),
         ("ORDER_LIST".to_string(), list.join("\n")),
@@ -226,6 +227,7 @@ mod tests {
             goods_price: 1094.22,
             delivery_price: 300.0,
             price: 1394.22,
+            tax_amount: 0.0,
             currency: "RUB".into(),
             user_comment: String::new(),
             manager_comment: String::new(),
@@ -341,6 +343,7 @@ mod tests {
         assert_eq!(f["PHONE"], "+7 900 000-00-00");
         assert_eq!(f["STORE"], "Склад на Ленина");
         assert_eq!(f["FIO"], f["ORDER_USER"]);
+        assert_eq!(f["TAX"], "0 руб.");
     }
 
     /// В `SALE_NEW_ORDER` Битрикса поля скидки нет — скидка позиции в строке состава.

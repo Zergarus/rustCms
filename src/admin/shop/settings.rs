@@ -57,6 +57,8 @@ async fn page(
 ) -> AppResult<Response> {
     let quantity_trace = flag(state, QUANTITY_TRACE, true).await?;
     let can_buy_zero = flag(state, CAN_BUY_ZERO, false).await?;
+    let (vat_rate, vat_included) = crate::sale::tax::settings(&state.db).await?;
+    let vat_rate = format!("{vat_rate}");
     let stock = stock::settings(&mut *state.db.acquire().await?).await?;
     let condition = stock.condition.code();
     let conditions: Vec<minijinja::Value> = [
@@ -88,6 +90,7 @@ async fn page(
             reservation => stock.reservation, allow_negative => stock.allow_negative,
             condition, conditions, clear_period => stock.clear_period,
             deduct_on_delivery => stock.deduct_on_delivery,
+            vat_rate, vat_included,
         },
     )?
     .into_response())
@@ -111,6 +114,11 @@ pub struct SettingsForm {
     /// Второй шаг выбора метода.
     #[serde(default)]
     confirm: String,
+    /// Ставка НДС, %.
+    #[serde(default)]
+    vat_rate: String,
+    /// Цена уже включает НДС.
+    vat_included: Option<String>,
 }
 
 async fn put_option(
@@ -203,6 +211,8 @@ pub async fn save(
             "allow_deduction_on_delivery",
             yn(form.deduct_on_delivery.is_some()),
         ),
+        ("sale", "vat_rate", form.vat_rate.trim()),
+        ("sale", "vat_included", yn(form.vat_included.is_some())),
     ] {
         put_option(&mut tx, module, name, value).await?;
     }

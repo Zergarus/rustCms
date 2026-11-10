@@ -112,6 +112,7 @@ pub async fn place_order_with(
         currency: "RUB".into(),
         goods_price: 100.0 * quantity,
         delivery_price: 0.0,
+        tax_amount: 0.0,
         user_comment: String::new(),
         properties: Vec::new(),
         delivery: (1, "Самовывоз".into(), 0.0, Some(1)),

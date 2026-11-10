@@ -92,6 +92,8 @@ pub struct OrderView {
     pub goods_price: f64,
     pub delivery_price: f64,
     pub price: f64,
+    /// НДС, рассчитанный при оформлении.
+    pub tax_amount: f64,
     pub currency: String,
     pub user_comment: String,
     pub manager_comment: String,
@@ -125,6 +127,7 @@ pub struct NewOrder {
     pub currency: String,
     pub goods_price: f64,
     pub delivery_price: f64,
+    pub tax_amount: f64,
     pub user_comment: String,
     /// (id свойства, код, название, значение)
     pub properties: Vec<(i64, String, String, String)>,
@@ -196,8 +199,8 @@ pub async fn create(tx: &mut PgConnection, o: &NewOrder) -> Result<i64, CreateEr
     let total = round2(o.goods_price + o.delivery_price);
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO orders (user_id, person_type_id, status, goods_price, delivery_price, price,
-                             currency, user_comment, stock_deducted)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE) RETURNING id",
+                             currency, user_comment, stock_deducted, tax_amount)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, $9) RETURNING id",
     )
     .bind(o.user_id)
     .bind(o.person_type_id)
@@ -207,6 +210,7 @@ pub async fn create(tx: &mut PgConnection, o: &NewOrder) -> Result<i64, CreateEr
     .bind(total)
     .bind(&o.currency)
     .bind(&o.user_comment)
+    .bind(o.tax_amount)
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query("UPDATE orders SET account_number = id::text WHERE id = $1")
@@ -341,7 +345,8 @@ pub async fn load(db: &PgPool, id: i64) -> sqlx::Result<Option<OrderView>> {
                 COALESCE(trim(concat_ws(' ', u.last_name, u.name, u.second_name)), '') AS user_name,
                 o.person_type_id, o.status, COALESCE(s.name, o.status) AS status_name,
                 o.goods_price::float8 AS goods_price, o.delivery_price::float8 AS delivery_price,
-                o.price::float8 AS price, o.currency, o.user_comment, o.manager_comment,
+                o.price::float8 AS price, o.tax_amount::float8 AS tax_amount,
+                o.currency, o.user_comment, o.manager_comment,
                 o.canceled, o.canceled_at, o.cancel_reason, o.paid, o.paid_at, o.stock_deducted,
                 o.created_at, o.updated_at
          FROM orders o
@@ -1049,6 +1054,7 @@ mod tests {
             currency: "RUB".into(),
             goods_price: 100.0 * quantity,
             delivery_price: 0.0,
+            tax_amount: 0.0,
             user_comment: String::new(),
             properties: Vec::new(),
             delivery: (1, "Самовывоз".into(), 0.0, Some(1)),
@@ -1233,6 +1239,18 @@ mod tests {
             .unwrap();
         assert_eq!(value(&db, id, many.id).await.as_deref(), Some("1"));
         assert_eq!(value(&db, id, 500).await.as_deref(), Some("Иван"));
+    }
+
+    #[sqlx::test]
+    async fn tax_amount_is_stored(db: PgPool) {
+        let f = order_fixture(&db).await;
+        let mut order = new_order(&f, 1.0);
+        order.tax_amount = 20.0;
+        let mut tx = db.begin().await.unwrap();
+        let id = create(&mut tx, &order).await.unwrap();
+        tx.commit().await.unwrap();
+        let view = load(&db, id).await.unwrap().unwrap();
+        assert_eq!(view.tax_amount, 20.0);
     }
 
     #[sqlx::test]

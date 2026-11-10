@@ -2508,6 +2508,7 @@ async fn offer_order(db: &PgPool, app: &Router, offer: i64) -> i64 {
         currency: "RUB".into(),
         goods_price: 900.0,
         delivery_price: 0.0,
+        tax_amount: 0.0,
         user_comment: String::new(),
         properties: Vec::new(),
         delivery: (1, "Самовывоз".into(), 0.0, Some(1)),

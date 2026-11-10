@@ -8,6 +8,7 @@ pub mod history;
 pub mod mail;
 pub mod repo;
 pub mod stock;
+pub mod tax;
 pub mod validate;
 
 use std::collections::HashMap;

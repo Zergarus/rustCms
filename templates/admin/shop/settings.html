@@ -9,6 +9,9 @@
   <p class="muted">Значения по умолчанию для товаров, у которых флаг стоит «по умолчанию».</p>
   <label class="check"><input type="checkbox" name="quantity_trace" {% if quantity_trace %}checked{% endif %}> Учитывать количество (нельзя купить больше остатка)</label>
   <label class="check"><input type="checkbox" name="can_buy_zero" {% if can_buy_zero %}checked{% endif %}> Разрешать покупку при нулевом остатке</label>
+  <h2>НДС</h2>
+  <label>Ставка НДС, %<input name="vat_rate" inputmode="decimal" value="{{ vat_rate }}"><small>0 — не считать НДС</small></label>
+  <label class="check"><input type="checkbox" name="vat_included" {% if vat_included %}checked{% endif %}> Цены уже включают НДС (иначе налог добавляется к сумме заказа)</label>
   <h2>Складской учёт</h2>
   <label class="check"><input type="checkbox" name="store_control" {% if store_control %}checked{% endif %}> Включить складской учёт (остатки меняются складскими документами; при включении доступное количество пересчитывается)</label>
   <label class="check"><input type="checkbox" name="reservation" {% if reservation %}checked{% endif %}> Резервировать товар при заказе</label>

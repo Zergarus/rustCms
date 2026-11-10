@@ -395,6 +395,8 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         .await?;
         Some(selected_sum(&seen.snapshot, &ids))
     };
+    // НДС читаем до транзакции: внутри неё — только её соединение.
+    let (vat_rate, vat_included) = crate::sale::tax::settings(&state.db).await?;
     let mut tx = state.db.begin().await?;
     let mut info = catalog::load_locked(&mut tx, &product_ids).await?;
     // Цены позиций заказа — в валюте сайта, как в корзине
@@ -445,6 +447,8 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
     }
     let goods = round2(order_items.iter().map(|i| i.price * i.quantity).sum());
     let delivery_price = round2(pricing.delivery_price.unwrap_or(delivery.price));
+    let tax_amount =
+        crate::sale::tax::amount(round2(goods + delivery_price), vat_rate, vat_included);
     let property_values = values
         .iter()
         .filter_map(|(id, value)| {
@@ -460,6 +464,7 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
         currency: currency(&basket),
         goods_price: goods,
         delivery_price,
+        tax_amount,
         user_comment: body
             .get("comment")
             .and_then(Value::as_str)
