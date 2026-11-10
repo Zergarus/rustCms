@@ -58,6 +58,11 @@ pub const KINDS: &[FieldKind] = &[
         name: "Файл",
         multiple: true,
     },
+    FieldKind {
+        code: "blocks",
+        name: "Блоки",
+        multiple: false,
+    },
 ];
 
 pub fn kind(code: &str) -> Option<&'static FieldKind> {
@@ -69,6 +74,15 @@ pub fn kind(code: &str) -> Option<&'static FieldKind> {
 /// снятый чекбокс). Множественные строки, числа и даты вводятся по одному на строку,
 /// id привязок — через запятую или пробел. `enums` — варианты поля-списка.
 pub fn parse_value(prop: &Field, raws: &[&str], enums: &[FieldOption]) -> Result<Value, String> {
+    if prop.kind == "blocks" {
+        let raw = raws.first().copied().unwrap_or("");
+        let value = super::blocks::from_form(raw)
+            .map_err(|error| format!("«{}»: {error}", prop.name))?;
+        if prop.is_required && is_empty(&value) {
+            return Err(format!("«{}»: обязательное поле", prop.name));
+        }
+        return Ok(value);
+    }
     if prop.kind == "boolean" {
         return Ok(Value::Bool(raws.iter().any(|s| !s.trim().is_empty())));
     }
@@ -204,6 +218,12 @@ pub fn ids(value: &Value) -> Vec<i64> {
 /// Значения поля для подстановки обратно в поля формы: по одному на
 /// каждый выбранный вариант / файл, либо одна строка для текстовых полей.
 pub fn to_form_values(prop: &Field, value: &Value) -> Vec<String> {
+    if prop.kind == "blocks" {
+        return match value {
+            Value::Null => Vec::new(),
+            other => vec![serde_json::to_string(other).unwrap_or_default()],
+        };
+    }
     let scalar = |v: &Value| match v {
         Value::Null | Value::Bool(false) => None,
         Value::Bool(true) => Some("on".to_string()),
@@ -285,6 +305,23 @@ mod tests {
             parse_value(&prop("boolean", false), &["on"], &[]),
             Ok(Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn blocks_field() {
+        let p = prop("blocks", false);
+        let parsed = parse_value(&p, &[r#"[{"type":"text","text":"a"}]"#], &[]).unwrap();
+        assert_eq!(parsed, json!([{ "type": "text", "text": "a" }]));
+        assert!(parse_value(&p, &["{oops"], &[]).is_err());
+        assert!(parse_value(&prop("blocks", true), &[""], &[]).is_err());
+
+        let back = to_form_values(&p, &parsed);
+        assert_eq!(back.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&back[0]).unwrap(),
+            json!([{ "type": "text", "text": "a" }])
+        );
+        assert!(to_form_values(&p, &Value::Null).is_empty());
     }
 
     #[test]
