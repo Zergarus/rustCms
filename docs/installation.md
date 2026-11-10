@@ -36,6 +36,7 @@ cargo run                     # http://127.0.0.1:3000/admin
 | `COOKIE_SECURE` | `true` за HTTPS |
 | `CURRENCY_BANK_URL` | подмена адреса банка курсов (тесты, прокси) |
 | `FORMS_CONFIG` | путь к `forms.toml`, по умолчанию `config/forms.toml` |
+| `CSRF_ENFORCE` | проверка CSRF-токена на POST bxapi, по умолчанию `true` |
 | `RUST_LOG` | например `cms=info,tower_http=warn` |
 
 ## Продакшен

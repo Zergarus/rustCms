@@ -8,6 +8,8 @@ mod cart;
 mod catalog;
 mod collection;
 mod config;
+#[cfg(test)]
+mod csrf_tests;
 mod currency;
 #[allow(dead_code)] // движок, корзина и админка подключают модель в следующих задачах
 mod discount;
@@ -238,7 +240,10 @@ pub(crate) fn app(state: AppState) -> Router {
             axum::routing::post(payment::webhook_handler),
         )
         .nest("/api", api::router().layer(cors_layer(&state.config)))
-        .nest("/api/v1", bxapi::router().layer(cors_layer(&state.config)))
+        .nest(
+            "/api/v1",
+            bxapi::router(&state).layer(cors_layer(&state.config)),
+        )
         .nest(
             "/api/stock/v1",
             stock_api::router().layer(cors_layer(&state.config)),

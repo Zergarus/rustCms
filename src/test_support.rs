@@ -149,6 +149,8 @@ pub fn test_state(db: PgPool) -> crate::state::AppState {
         mail_dir: tmp.join("mail"),
         cookie_secure: false,
         currency_bank_url: None,
+        // Тесты bxapi шлют запросы без токена; проверка CSRF покрыта отдельными тестами.
+        csrf_enforce: false,
     };
     let mut env = minijinja::Environment::new();
     env.set_loader(minijinja::path_loader(config.templates_dir.join("admin")));

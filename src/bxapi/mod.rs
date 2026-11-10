@@ -36,12 +36,13 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use axum_extra::extract::CookieJar;
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde_json::{Map, Value, json};
 
 use crate::state::AppState;
 
-pub fn router() -> Router<AppState> {
+pub fn router(state: &AppState) -> Router<AppState> {
+    let csrf_state = state.clone();
     Router::new()
         .route("/base/csrf/token", get(csrf_token))
         .route("/catalog/gifts", get(gifts::catalog_gifts))
@@ -85,6 +86,10 @@ pub fn router() -> Router<AppState> {
         .route("/nav/breadcrumbs", post(nav::breadcrumbs))
         .route("/nav/legacy-redirect", post(nav::legacy_redirect))
         .route("/iblock/{*rest}", post(dispatch_post).get(dispatch_get))
+        .layer(axum::middleware::from_fn_with_state(
+            csrf_state,
+            csrf_guard_with_config,
+        ))
 }
 
 // ---------------------------------------------------------------------------
@@ -213,10 +218,67 @@ fn parse_body(body: &Bytes) -> Result<Map<String, Value>, BxError> {
 // Маршруты
 // ---------------------------------------------------------------------------
 
-/// CSRF-токен. Проверка токенов включится вместе с сессиями посетителей;
-/// пока, как `dev`-окружение bxapi, токен выдаём, но не проверяем.
-async fn csrf_token() -> Response {
-    success(json!({ "token": hex::encode(rand::random::<[u8; 16]>()) }))
+/// Cookie с CSRF-токеном: double-submit, браузер присылает её вместе с заголовком.
+pub const CSRF_COOKIE: &str = "CMS_CSRF";
+/// Заголовок, который присылает фронтенд (контракт bxapi).
+pub const CSRF_HEADER: &str = "x-bitrix-csrf-token";
+
+/// CSRF-токен: кладём в cookie и отдаём в теле. Запросы, меняющие состояние,
+/// должны прислать тот же токен заголовком.
+async fn csrf_token(State(state): State<AppState>, jar: CookieJar) -> Response {
+    let token = hex::encode(rand::random::<[u8; 32]>());
+    let cookie = Cookie::build((CSRF_COOKIE, token.clone()))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .secure(state.config.cookie_secure)
+        .build();
+    (jar.add(cookie), success(json!({ "token": token }))).into_response()
+}
+
+fn cookie_value<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
+    let cookies = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    cookies.split(';').find_map(|pair| {
+        let (key, value) = pair.trim().split_once('=')?;
+        (key == name).then_some(value)
+    })
+}
+
+/// Double-submit: заголовок должен совпасть с cookie. Заодно закрывает запросы
+/// без токена — легитимный клиент получает его через `/base/csrf/token`.
+async fn csrf_guard_with_config(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if !state.config.csrf_enforce {
+        return next.run(req).await;
+    }
+    csrf_guard(req, next).await
+}
+
+async fn csrf_guard(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    use axum::http::Method;
+    if matches!(
+        *req.method(),
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) {
+        let header = req
+            .headers()
+            .get(CSRF_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        let cookie = cookie_value(req.headers(), CSRF_COOKIE).unwrap_or_default();
+        if header.is_empty() || header != cookie {
+            return BxError::with_status(
+                StatusCode::FORBIDDEN,
+                "invalid_csrf",
+                "Сессия устарела — обновите страницу",
+            )
+            .into_response();
+        }
+    }
+    next.run(req).await
 }
 
 /// Разбор `/iblock/...` вручную: `info/{apiCode}` и `{apiCode}/element/list`

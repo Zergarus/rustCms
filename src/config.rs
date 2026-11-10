@@ -21,6 +21,8 @@ pub struct Config {
     pub cookie_secure: bool,
     /// Заменяет схему и хост банков курсов валют (тесты, прокси); нет — настоящие адреса.
     pub currency_bank_url: Option<String>,
+    /// Проверять CSRF-токен на изменяющих запросах bxapi (по умолчанию да).
+    pub csrf_enforce: bool,
 }
 
 impl Config {
@@ -47,6 +49,7 @@ impl Config {
             currency_bank_url: env::var("CURRENCY_BANK_URL")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
+            csrf_enforce: var_or("CSRF_ENFORCE", "true") != "false",
         })
     }
 }
