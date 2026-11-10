@@ -143,3 +143,36 @@ pub async fn delete(
         flash::FlashKind::Ok,
     ))
 }
+
+/// `GET /admin/mail/queue`: последние письма очереди.
+pub async fn queue(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+) -> AppResult<Html<String>> {
+    user.require(SETTINGS_MANAGE)?;
+    let rows: Vec<(i64, String, String, i32, String, String, bool)> = sqlx::query_as(
+        "SELECT id, to_char(created_at, 'DD.MM.YYYY HH24:MI'), event, attempts, error,
+                to_char(next_at, 'DD.MM.YYYY HH24:MI'), sent_at IS NOT NULL
+         FROM mail_queue ORDER BY id DESC LIMIT 100",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    render(&state, "mail_queue.html", context! { user, rows })
+}
+
+/// `POST /admin/mail/queue/{id}/retry`: повторить письмо сейчас.
+pub async fn queue_retry(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+) -> AppResult<Redirect> {
+    user.require(SETTINGS_MANAGE)?;
+    sqlx::query("UPDATE mail_queue SET next_at = now() WHERE id = $1 AND sent_at IS NULL")
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    if let Err(error) = crate::mail::process(&state).await {
+        tracing::warn!(%error, "очередь писем не обработана");
+    }
+    Ok(Redirect::to("/admin/mail/queue"))
+}

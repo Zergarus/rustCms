@@ -68,3 +68,47 @@ async fn failed_mail_stays_queued(db: PgPool) {
     assert_eq!(attempts, 1);
     assert!(!error.is_empty());
 }
+
+#[sqlx::test]
+async fn queue_page_shows_letters(db: PgPool) {
+    template(&db).await;
+    let state = crate::test_support::test_state(db.clone());
+    let fields = HashMap::from([("NAME".to_string(), "Иван".to_string())]);
+    crate::mail::send_event(&state.db, &state.config, "QUEUE_TEST", &fields)
+        .await
+        .unwrap();
+    let app = crate::app(state);
+    let cookie = crate::test_support::admin_cookie(&db).await;
+
+    let (status, _, page) = crate::test_support::get_raw(&app, "/admin/mail/queue", &cookie).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let page = String::from_utf8_lossy(&page);
+    assert!(page.contains("QUEUE_TEST"), "{page}");
+    assert!(page.contains("отправлено"), "{page}");
+}
+
+#[sqlx::test]
+async fn retry_sends_letter_now(db: PgPool) {
+    template(&db).await;
+    // Письмо, «застрявшее» с будущей попыткой и ошибкой.
+    sqlx::query(
+        "INSERT INTO mail_queue (event, fields, attempts, next_at, error)
+         VALUES ('QUEUE_TEST', '{\"NAME\":\"Иван\"}'::jsonb, 1,
+                 now() + interval '1 hour', 'SMTP недоступен')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let app = crate::app(crate::test_support::test_state(db.clone()));
+    let cookie = crate::test_support::admin_cookie(&db).await;
+
+    let (status, _, _) =
+        crate::test_support::post_form_raw(&app, "/admin/mail/queue/1/retry", &cookie, "").await;
+    assert_eq!(status, axum::http::StatusCode::SEE_OTHER);
+
+    let sent: bool = sqlx::query_scalar("SELECT sent_at IS NOT NULL FROM mail_queue WHERE id = 1")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(sent, "письмо отправлено по кнопке");
+}

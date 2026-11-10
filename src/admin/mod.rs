@@ -67,6 +67,8 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/settings", get(settings::form).post(settings::save))
         .route("/mail", get(mail::list).post(mail::create))
         .route("/audit", get(audit::list))
+        .route("/mail/queue", get(mail::queue))
+        .route("/mail/queue/{id}/retry", post(mail::queue_retry))
         .route(
             "/blocks/upload",
             post(blocks::upload).layer(DefaultBodyLimit::max(11 * 1024 * 1024)),

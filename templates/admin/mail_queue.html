@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% set section = "system" %}
+{% block title %}Очередь писем{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Очередь писем</h1>
+  <a class="btn" href="/admin/mail">Шаблоны</a>
+</div>
+{% if rows %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>#</th><th>Создано</th><th>Событие</th><th>Попытки</th><th>Следующая</th><th>Ошибка</th><th>Статус</th><th></th></tr></thead>
+    <tbody>
+      {% for id, created, event, attempts, error, next_at, sent in rows %}
+      <tr>
+        <td>{{ id }}</td>
+        <td>{{ created }}</td>
+        <td><code>{{ event }}</code></td>
+        <td>{{ attempts }}</td>
+        <td>{{ next_at }}</td>
+        <td>{% if error %}<span class="text-error">{{ error }}</span>{% else %}—{% endif %}</td>
+        <td>{% if sent %}<span class="badge ok">отправлено</span>{% else %}<span class="badge">в очереди</span>{% endif %}</td>
+        <td>{% if not sent %}<form method="post" action="/admin/mail/queue/{{ id }}/retry"><button class="btn" type="submit">Повторить</button></form>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card"><p>Очередь пуста.</p></div>
+{% endif %}
+{% endblock %}
