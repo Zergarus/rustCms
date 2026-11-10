@@ -74,8 +74,8 @@ async fn refund_reduces_remaining(db: PgPool) {
 
 #[sqlx::test]
 async fn unpaid_order_cannot_be_refunded(db: PgPool) {
-    let fixture = crate::test_support::order_fixture(db).await;
-    let order_id = crate::test_support::place_order(db, &fixture, None).await;
+    let fixture = crate::test_support::order_fixture(&db).await;
+    let order_id = crate::test_support::place_order(&db, &fixture, None).await;
     let app = crate::app(crate::test_support::test_state(db.clone()));
     let cookie = crate::test_support::admin_cookie(&db).await;
     let (status, text) = refund(&app, &cookie, order_id, "10").await;
