@@ -71,7 +71,11 @@ impl PaymentProvider for YooKassa {
     {
         Box::pin(async move {
             // запрос к API провайдера, создание платежа
-            Ok(PaymentStarted { url: Some("https://…".into()), data: json!({ "qrPayload": "…" }) })
+            Ok(PaymentStarted {
+                url: Some("https://…".into()),
+                data: json!({ "qrPayload": "…" }),
+                external_id: Some("провайдер-id".into()),
+            })
         })
     }
 
@@ -89,4 +93,8 @@ project.payment_extensions.push(PaymentExtension {
 ```
 
 `pay_system_id` — id платёжной системы из админки магазина. Возвращённые
-`data` сохраняются в `payments.data` и переиспользуются при повторном `pay`.
+`data` сохраняются в `payments.data.started` и переиспользуются при повторном
+`pay`; в `status` провайдер получает ровно эти данные (`PaymentRef.data`).
+`external_id` сохраняется в `payments.external_id` и годится для запроса статуса.
+Ошибку из `start`/`status` ядро логирует и наружу отдаёт безопасный код
+`payment_provider_failed`; сбой `status` не ломает опрос.

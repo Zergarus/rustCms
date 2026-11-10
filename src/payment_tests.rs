@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
@@ -23,6 +23,19 @@ use crate::{
 struct Stub {
     starts: AtomicUsize,
     paid: Arc<AtomicBool>,
+    fail_status: bool,
+    seen: Mutex<Vec<Value>>,
+}
+
+impl Stub {
+    fn new(paid: bool) -> Arc<Self> {
+        Arc::new(Self {
+            starts: AtomicUsize::new(0),
+            paid: Arc::new(AtomicBool::new(paid)),
+            fail_status: false,
+            seen: Mutex::new(Vec::new()),
+        })
+    }
 }
 
 impl PaymentProvider for Stub {
@@ -36,6 +49,7 @@ impl PaymentProvider for Stub {
             Ok(PaymentStarted {
                 url: Some("https://pay.example/1".into()),
                 data: json!({ "qrPayload": format!("pay:{}", payment.payment_id) }),
+                external_id: Some("ext-1".into()),
             })
         })
     }
@@ -43,10 +57,17 @@ impl PaymentProvider for Stub {
     fn status<'a>(
         &'a self,
         _state: &'a crate::state::AppState,
-        _payment: &'a PaymentRef,
+        payment: &'a PaymentRef,
     ) -> BoxFuture<'a, Result<PaymentState, crate::bxapi::BxError>> {
+        self.seen.lock().unwrap().push(payment.data.clone());
         let paid = self.paid.load(Ordering::SeqCst);
-        Box::pin(async move { Ok(PaymentState { paid, notice: None }) })
+        let fail = self.fail_status;
+        Box::pin(async move {
+            if fail {
+                return Err(crate::bxapi::BxError::new("provider_down", "down"));
+            }
+            Ok(PaymentState { paid, notice: None })
+        })
     }
 }
 
@@ -108,26 +129,33 @@ async fn order(db: &PgPool) -> i64 {
     crate::test_support::place_order(db, &fixture, None).await
 }
 
+async fn token(state: &crate::state::AppState, order_id: i64) -> String {
+    payment::new_checkout_token(state, order_id).await.unwrap()
+}
+
+fn cookie(token: &str) -> String {
+    format!("{}={token}", payment::CHECKOUT_COOKIE)
+}
+
 #[sqlx::test]
 async fn pay_starts_once_and_reuses(db: PgPool) {
+    pay_system(&db).await;
     let order_id = order(&db).await;
-    let stub = Arc::new(Stub {
-        starts: AtomicUsize::new(0),
-        paid: Arc::new(AtomicBool::new(false)),
-    });
+    let stub = Stub::new(false);
     let mut state = crate::test_support::test_state(db.clone());
+    let token = token(&state, order_id).await;
     state.project = Arc::new(project_with(stub.clone()));
     let app = crate::app(state);
-    let cookie = format!("{}={order_id}", payment::CHECKOUT_COOKIE);
+    let cookie = cookie(&token);
 
     let (status, json) = post(&app, "/api/v1/order/pay", json!({"id": order_id}), &cookie).await;
     assert_eq!(status, StatusCode::OK, "{json}");
-    assert_eq!(json["status"], "success");
     assert_eq!(json["data"]["success"], true);
     assert_eq!(
         json["data"]["payment"]["paymentUrl"],
         "https://pay.example/1"
     );
+
     let payment_id: i64 = sqlx::query_scalar("SELECT id FROM payments WHERE order_id = $1")
         .bind(order_id)
         .fetch_one(&db)
@@ -137,11 +165,40 @@ async fn pay_starts_once_and_reuses(db: PgPool) {
         json["data"]["payment"]["qrPayload"],
         format!("pay:{payment_id}")
     );
+    let external: String = sqlx::query_scalar("SELECT external_id FROM payments WHERE id = $1")
+        .bind(payment_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(external, "ext-1");
 
-    // Повторный запрос не создаёт второй платёж и не зовёт провайдера снова.
     let (_, again) = post(&app, "/api/v1/order/pay", json!({"id": order_id}), &cookie).await;
     assert_eq!(again["data"]["payment"], json["data"]["payment"]);
     assert_eq!(stub.starts.load(Ordering::SeqCst), 1);
+}
+
+#[sqlx::test]
+async fn concurrent_pay_calls_provider_once(db: PgPool) {
+    pay_system(&db).await;
+    let order_id = order(&db).await;
+    let stub = Stub::new(false);
+    let mut state = crate::test_support::test_state(db.clone());
+    let token = token(&state, order_id).await;
+    state.project = Arc::new(project_with(stub.clone()));
+    let app = crate::app(state);
+    let cookie = cookie(&token);
+
+    let (a, b) = tokio::join!(
+        post(&app, "/api/v1/order/pay", json!({"id": order_id}), &cookie),
+        post(&app, "/api/v1/order/pay", json!({"id": order_id}), &cookie),
+    );
+    assert_eq!(a.0, StatusCode::OK, "{}", a.1);
+    assert_eq!(b.0, StatusCode::OK, "{}", b.1);
+    assert_eq!(
+        stub.starts.load(Ordering::SeqCst),
+        1,
+        "провайдер вызван один раз"
+    );
     let payments: i64 = sqlx::query_scalar("SELECT count(*) FROM payments WHERE order_id = $1")
         .bind(order_id)
         .fetch_one(&db)
@@ -151,17 +208,17 @@ async fn pay_starts_once_and_reuses(db: PgPool) {
 }
 
 #[sqlx::test]
-async fn channel_marks_order_paid(db: PgPool) {
+async fn channel_marks_order_paid_with_notice(db: PgPool) {
     pay_system(&db).await;
     let order_id = order(&db).await;
-    let stub = Arc::new(Stub {
-        starts: AtomicUsize::new(0),
-        paid: Arc::new(AtomicBool::new(true)),
-    });
+    let stub = Stub::new(true);
     let mut state = crate::test_support::test_state(db.clone());
-    state.project = Arc::new(project_with(stub));
+    let token = token(&state, order_id).await;
+    state.project = Arc::new(project_with(stub.clone()));
     let app = crate::app(state);
-    let cookie = format!("{}={order_id}", payment::CHECKOUT_COOKIE);
+    let cookie = cookie(&token);
+    // Провайдеру нужен запущенный платёж: сначала pay.
+    post(&app, "/api/v1/order/pay", json!({"id": order_id}), &cookie).await;
 
     let (status, json) = get(
         &app,
@@ -173,6 +230,17 @@ async fn channel_marks_order_paid(db: PgPool) {
     assert_eq!(json["data"]["pull"], Value::Null);
     assert_eq!(json["data"]["state"]["paid"], true);
     assert_eq!(json["data"]["state"]["paymentType"], "qr");
+    assert!(
+        json["data"]["state"]["notice"]["title"].is_string(),
+        "фронт останавливает опрос только при paid && notice: {json}"
+    );
+
+    // Статус видит данные, которые вернул start.
+    let seen = stub.seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|data| data["qrPayload"].is_string()),
+        "{seen:?}"
+    );
 
     let paid: bool = sqlx::query_scalar("SELECT paid FROM orders WHERE id = $1")
         .bind(order_id)
@@ -189,56 +257,136 @@ async fn channel_marks_order_paid(db: PgPool) {
     .await
     .unwrap();
     assert_eq!(history, 1);
+
+    // Повторный опрос не дублирует историю.
+    get(
+        &app,
+        &format!("/api/v1/order/{order_id}/payment-channel"),
+        &cookie,
+    )
+    .await;
+    let history: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM order_status_history
+         WHERE order_id = $1 AND comment LIKE 'Оплата получена%'",
+    )
+    .bind(order_id)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(history, 1);
 }
 
 #[sqlx::test]
-async fn stranger_and_canceled_are_rejected(db: PgPool) {
+async fn provider_failure_does_not_break_polling(db: PgPool) {
+    pay_system(&db).await;
     let order_id = order(&db).await;
-    let stub = Arc::new(Stub {
-        starts: AtomicUsize::new(0),
-        paid: Arc::new(AtomicBool::new(false)),
-    });
+    let mut stub = Stub::new(false);
+    Arc::get_mut(&mut stub).unwrap().fail_status = true;
     let mut state = crate::test_support::test_state(db.clone());
+    let token = token(&state, order_id).await;
     state.project = Arc::new(project_with(stub));
     let app = crate::app(state);
 
-    let (_, json) = post(&app, "/api/v1/order/pay", json!({"id": order_id}), "").await;
+    let (status, json) = get(
+        &app,
+        &format!("/api/v1/order/{order_id}/payment-channel"),
+        &cookie(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["data"]["state"]["paid"], false);
+}
+
+#[sqlx::test]
+async fn foreign_and_missing_tokens_cannot_pay(db: PgPool) {
+    pay_system(&db).await;
+    let fixture = crate::test_support::order_fixture(&db).await;
+    let first = crate::test_support::place_order(&db, &fixture, None).await;
+    let second = crate::test_support::place_order(&db, &fixture, None).await;
+    let stub = Stub::new(false);
+    let mut state = crate::test_support::test_state(db.clone());
+    let foreign = token(&state, second).await;
+    state.project = Arc::new(project_with(stub));
+    let app = crate::app(state);
+
+    // Токен от другого заказа доступа не даёт.
+    let (_, json) = post(
+        &app,
+        "/api/v1/order/pay",
+        json!({"id": first}),
+        &cookie(&foreign),
+    )
+    .await;
     assert_eq!(json["errors"][0]["code"], "order_not_found");
 
+    // Голый id в cookie больше не работает.
+    let (_, json) = post(
+        &app,
+        "/api/v1/order/pay",
+        json!({"id": first}),
+        &format!("{}={first}", payment::CHECKOUT_COOKIE),
+    )
+    .await;
+    assert_eq!(json["errors"][0]["code"], "order_not_found");
+}
+
+#[sqlx::test]
+async fn canceled_order_is_rejected(db: PgPool) {
+    pay_system(&db).await;
+    let order_id = order(&db).await;
+    let stub = Stub::new(false);
+    let mut state = crate::test_support::test_state(db.clone());
+    let token = token(&state, order_id).await;
+    state.project = Arc::new(project_with(stub));
+    let app = crate::app(state);
     sqlx::query("UPDATE orders SET canceled = TRUE WHERE id = $1")
         .bind(order_id)
         .execute(&db)
         .await
         .unwrap();
-    let cookie = format!("{}={order_id}", payment::CHECKOUT_COOKIE);
-    let (status, json) = post(&app, "/api/v1/order/pay", json!({"id": order_id}), &cookie).await;
+
+    let (status, json) = post(
+        &app,
+        "/api/v1/order/pay",
+        json!({"id": order_id}),
+        &cookie(&token),
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
     assert_eq!(json["errors"][0]["code"], "payment_forbidden");
 }
 
 #[sqlx::test]
 async fn without_provider_payment_is_unavailable(db: PgPool) {
+    pay_system(&db).await;
     let order_id = order(&db).await;
-    let app = crate::app(crate::test_support::test_state(db.clone()));
-    let cookie = format!("{}={order_id}", payment::CHECKOUT_COOKIE);
+    let mut state = crate::test_support::test_state(db.clone());
+    let token = token(&state, order_id).await;
+    state.project = Arc::new(Project::default());
+    let app = crate::app(state);
 
-    let (_, json) = post(&app, "/api/v1/order/pay", json!({"id": order_id}), &cookie).await;
+    let (_, json) = post(
+        &app,
+        "/api/v1/order/pay",
+        json!({"id": order_id}),
+        &cookie(&token),
+    )
+    .await;
     assert_eq!(json["errors"][0]["code"], "payment_provider_missing");
 }
 
 #[sqlx::test]
-async fn checkout_cookie_keeps_recent_orders(db: PgPool) {
+async fn checkout_cookie_keeps_recent_tokens(db: PgPool) {
     let state = crate::test_support::test_state(db);
     let mut jar = axum_extra::extract::cookie::CookieJar::new();
     jar = jar.add(axum_extra::extract::cookie::Cookie::new(
         payment::CHECKOUT_COOKIE,
-        "5,7",
+        "aaa,bbb",
     ));
-    assert_eq!(payment::checkout_ids(&jar), vec![5, 7]);
+    assert_eq!(payment::checkout_tokens(&jar), ["aaa", "bbb"]);
 
-    // Новый заказ идёт первым, прежние сохраняются, дубли убираются.
-    let cookie = payment::checkout_cookie(&state, &jar, 9);
-    assert_eq!(cookie.value(), "9,5,7");
-    let cookie = payment::checkout_cookie(&state, &jar, 5);
-    assert_eq!(cookie.value(), "5,7");
+    let cookie = payment::checkout_cookie(&state, &jar, "ccc");
+    assert_eq!(cookie.value(), "ccc,aaa,bbb");
+    let cookie = payment::checkout_cookie(&state, &jar, "aaa");
+    assert_eq!(cookie.value(), "aaa,bbb");
 }

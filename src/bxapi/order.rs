@@ -522,7 +522,8 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
     if !messages.is_empty() {
         data["messages"] = json!(messages);
     }
-    let checkout = crate::payment::checkout_cookie(&state, &jar, order_id);
+    let token = crate::payment::new_checkout_token(&state, order_id).await?;
+    let checkout = crate::payment::checkout_cookie(&state, &jar, &token);
     let jar = jar.add(checkout);
     Ok((jar, success(data)).into_response())
 }

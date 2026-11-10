@@ -8,6 +8,7 @@ use axum::http::StatusCode;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::Utc;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool, types::Json};
 
 use crate::{
@@ -18,10 +19,11 @@ use crate::{
     state::AppState,
 };
 
-/// Cookie с заказами, оформленными в этой сессии: гость иначе не докажет доступ.
+/// Cookie с токенами оформленных заказов: гость иначе не докажет доступ.
 pub const CHECKOUT_COOKIE: &str = "CMS_CHECKOUT";
-const MAX_ORDERS: usize = 10;
+const MAX_TOKENS: usize = 10;
 const COOKIE_DAYS: i64 = 30;
+const TOKEN_DAYS: i64 = 30;
 
 #[derive(FromRow, Clone)]
 struct Order {
@@ -48,39 +50,56 @@ fn not_found() -> BxError {
     BxError::new("order_not_found", "Заказ не найден")
 }
 
-/// Заказы, оформленные в этой сессии.
-pub fn checkout_ids(jar: &CookieJar) -> Vec<i64> {
+fn token_hash(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// Токены оформленных заказов из cookie.
+pub fn checkout_tokens(jar: &CookieJar) -> Vec<String> {
     jar.get(CHECKOUT_COOKIE)
         .map(|cookie| {
             cookie
                 .value()
                 .split(',')
-                .filter_map(|id| id.trim().parse().ok())
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map(str::to_string)
                 .collect()
         })
         .unwrap_or_default()
 }
 
-/// Cookie для `order/submit`: последние оформленные заказы этой сессии.
-pub fn checkout_cookie(state: &AppState, jar: &CookieJar, order_id: i64) -> Cookie<'static> {
-    let mut ids = vec![order_id];
-    for id in checkout_ids(jar)
-        .into_iter()
-        .filter(|id| *id != order_id)
-        .take(MAX_ORDERS - 1)
-    {
-        ids.push(id);
+/// Выдаёт непрозрачный токен доступа к заказу (в БД только sha256).
+pub async fn new_checkout_token(state: &AppState, order_id: i64) -> sqlx::Result<String> {
+    let token = hex::encode(rand::random::<[u8; 32]>());
+    sqlx::query(
+        "INSERT INTO checkout_tokens (token_hash, order_id, expires_at)
+         VALUES ($1, $2, now() + make_interval(days => $3))",
+    )
+    .bind(token_hash(&token))
+    .bind(order_id)
+    .bind(TOKEN_DAYS as i32)
+    .execute(&state.db)
+    .await?;
+    Ok(token)
+}
+
+/// Cookie для `order/submit`: новый токен первым, прежние сохраняются без дублей.
+pub fn checkout_cookie(state: &AppState, jar: &CookieJar, token: &str) -> Cookie<'static> {
+    let mut tokens = vec![token.to_string()];
+    for old in checkout_tokens(jar) {
+        if !tokens.contains(&old) {
+            tokens.push(old);
+        }
     }
-    Cookie::build((
-        CHECKOUT_COOKIE,
-        ids.iter().map(i64::to_string).collect::<Vec<_>>().join(","),
-    ))
-    .path("/")
-    .http_only(true)
-    .same_site(SameSite::Lax)
-    .secure(state.config.cookie_secure)
-    .max_age(time::Duration::days(COOKIE_DAYS))
-    .build()
+    tokens.truncate(MAX_TOKENS);
+    Cookie::build((CHECKOUT_COOKIE, tokens.join(",")))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .secure(state.config.cookie_secure)
+        .max_age(time::Duration::days(COOKIE_DAYS))
+        .build()
 }
 
 fn provider(state: &AppState, pay_system_id: Option<i64>) -> Option<&dyn PaymentProvider> {
@@ -102,9 +121,24 @@ async fn accessible(state: &AppState, jar: &CookieJar, order_id: i64) -> Result<
     .fetch_optional(&state.db)
     .await?;
     let order = order.ok_or_else(not_found)?;
-    if checkout_ids(jar).contains(&order_id) {
-        return Ok(order);
+
+    let hashes: Vec<String> = checkout_tokens(jar)
+        .iter()
+        .map(|token| token_hash(token))
+        .collect();
+    if !hashes.is_empty() {
+        let ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT order_id FROM checkout_tokens
+             WHERE token_hash = ANY($1) AND expires_at > now()",
+        )
+        .bind(&hashes)
+        .fetch_all(&state.db)
+        .await?;
+        if ids.contains(&order_id) {
+            return Ok(order);
+        }
     }
+
     let user = auth::current_user_id(state, jar).await?;
     if user.is_some_and(|id| order.user_id == Some(id)) {
         Ok(order)
@@ -113,12 +147,28 @@ async fn accessible(state: &AppState, jar: &CookieJar, order_id: i64) -> Result<
     }
 }
 
-/// Неоплаченный платёж заказа (или последний, если все оплачены).
-async fn payment_of(db: &PgPool, order_id: i64) -> sqlx::Result<Option<Payment>> {
+/// Неоплаченный платёж заказа.
+async fn unpaid_payment(
+    conn: &mut sqlx::PgConnection,
+    order_id: i64,
+) -> sqlx::Result<Option<Payment>> {
+    sqlx::query_as(
+        "SELECT id, pay_system_id, sum::float8 AS sum, currency, paid, data
+         FROM payments WHERE order_id = $1 AND NOT paid
+         ORDER BY id
+         LIMIT 1
+         FOR UPDATE",
+    )
+    .bind(order_id)
+    .fetch_optional(conn)
+    .await
+}
+
+async fn last_payment(db: &PgPool, order_id: i64) -> sqlx::Result<Option<Payment>> {
     sqlx::query_as(
         "SELECT id, pay_system_id, sum::float8 AS sum, currency, paid, data
          FROM payments WHERE order_id = $1
-         ORDER BY paid, id
+         ORDER BY id DESC
          LIMIT 1",
     )
     .bind(order_id)
@@ -136,11 +186,18 @@ async fn pay_system(db: &PgPool, id: i64) -> sqlx::Result<(String, String)> {
     )
 }
 
+/// Данные для провайдера: в `status` он видит то, что вернул `start`.
 async fn reference(state: &AppState, order: &Order, payment: &Payment) -> sqlx::Result<PaymentRef> {
     let (code, api_type) = match payment.pay_system_id {
         Some(id) => pay_system(&state.db, id).await?,
         None => (String::new(), String::new()),
     };
+    let data = payment
+        .data
+        .0
+        .get("started")
+        .cloned()
+        .unwrap_or_else(|| payment.data.0.clone());
     Ok(PaymentRef {
         order_id: order.id,
         account_number: order.account_number.clone(),
@@ -150,7 +207,7 @@ async fn reference(state: &AppState, order: &Order, payment: &Payment) -> sqlx::
         pay_system_type: api_type,
         sum: payment.sum,
         currency: payment.currency.clone(),
-        data: payment.data.0.clone(),
+        data,
     })
 }
 
@@ -167,9 +224,22 @@ pub async fn start(state: &AppState, jar: &CookieJar, order_id: i64) -> Result<V
     if order.paid {
         return Ok(json!({ "success": true, "payment": Value::Null }));
     }
-    let payment = payment_of(&state.db, order_id)
+
+    // Строка платежа блокируется до конца транзакции: параллельный запрос
+    // дождётся и увидит уже сохранённый результат, второго вызова провайдера нет.
+    let mut tx = state.db.begin().await?;
+    let payment = unpaid_payment(&mut tx, order_id)
         .await?
         .ok_or_else(|| BxError::new("payment_not_found", "Платёж заказа не найден"))?;
+    if let Some(saved) = payment
+        .data
+        .0
+        .get("started")
+        .filter(|value| !value.is_null())
+    {
+        tx.commit().await?;
+        return Ok(json!({ "success": true, "payment": saved.clone() }));
+    }
     let provider = provider(state, payment.pay_system_id).ok_or_else(|| {
         BxError::new(
             "payment_provider_missing",
@@ -177,18 +247,24 @@ pub async fn start(state: &AppState, jar: &CookieJar, order_id: i64) -> Result<V
         )
     })?;
 
-    // Идемпотентность: повторный запрос отдаёт уже полученные данные.
-    if let Some(saved) = payment
-        .data
-        .0
-        .get("started")
-        .filter(|value| !value.is_null())
-    {
-        return Ok(json!({ "success": true, "payment": saved.clone() }));
-    }
-
     let reference = reference(state, &order, &payment).await?;
-    let PaymentStarted { url, data } = provider.start(state, &reference).await?;
+    let started = provider.start(state, &reference).await.map_err(|error| {
+        tracing::error!(
+            order_id,
+            payment_id = payment.id,
+            ?error,
+            "провайдер не запустил платёж"
+        );
+        BxError::new(
+            "payment_provider_failed",
+            "Платёжный провайдер временно недоступен",
+        )
+    })?;
+    let PaymentStarted {
+        url,
+        data,
+        external_id,
+    } = started;
     let mut payment_data = data;
     if let Some(url) = url {
         match payment_data.as_object_mut() {
@@ -198,11 +274,18 @@ pub async fn start(state: &AppState, jar: &CookieJar, order_id: i64) -> Result<V
             None => payment_data = json!({ "paymentUrl": url }),
         }
     }
-    sqlx::query("UPDATE payments SET data = jsonb_set(data, '{started}', $2, true) WHERE id = $1")
-        .bind(payment.id)
-        .bind(Json(payment_data.clone()))
-        .execute(&state.db)
-        .await?;
+    sqlx::query(
+        "UPDATE payments
+         SET data = jsonb_set(data, '{started}', $2, true),
+             external_id = COALESCE(NULLIF($3, ''), external_id)
+         WHERE id = $1",
+    )
+    .bind(payment.id)
+    .bind(Json(payment_data.clone()))
+    .bind(external_id.unwrap_or_default())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
 
     Ok(json!({ "success": true, "payment": payment_data }))
 }
@@ -210,7 +293,7 @@ pub async fn start(state: &AppState, jar: &CookieJar, order_id: i64) -> Result<V
 /// `GET /order/{id}/payment-channel`: состояние оплаты для опроса.
 pub async fn channel(state: &AppState, jar: &CookieJar, order_id: i64) -> Result<Value, BxError> {
     let order = accessible(state, jar, order_id).await?;
-    let payment = payment_of(&state.db, order_id).await?;
+    let payment = last_payment(&state.db, order_id).await?;
     let mut paid = order.paid || payment.as_ref().is_some_and(|p| p.paid);
     let mut notice = Value::Null;
     let mut payment_type = String::new();
@@ -223,13 +306,28 @@ pub async fn channel(state: &AppState, jar: &CookieJar, order_id: i64) -> Result
         let reference = reference(state, &order, payment).await?;
         payment_type = reference.pay_system_type.clone();
         if !paid && let Some(provider) = provider(state, payment.pay_system_id) {
-            let status = provider.status(state, &reference).await?;
-            notice = status.notice.unwrap_or(Value::Null);
-            if status.paid {
-                mark_paid(state, &order, payment).await?;
-                paid = true;
+            match provider.status(state, &reference).await {
+                Ok(status) => {
+                    notice = status.notice.unwrap_or(Value::Null);
+                    if status.paid {
+                        paid = mark_paid(state, &order, payment).await?;
+                    }
+                }
+                // Сбой провайдера не должен ломать опрос: отдаём последнее
+                // известное состояние, следующий опрос попробует снова.
+                Err(error) => {
+                    tracing::warn!(
+                        order_id,
+                        payment_id = payment.id,
+                        ?error,
+                        "провайдер не отдал статус"
+                    );
+                }
             }
         }
+    }
+    if paid && notice.is_null() {
+        notice = paid_notice();
     }
 
     Ok(json!({
@@ -248,29 +346,51 @@ pub async fn channel(state: &AppState, jar: &CookieJar, order_id: i64) -> Result
     }))
 }
 
-/// Оплата зафиксирована: платёж, заказ и запись в истории статусов.
-async fn mark_paid(state: &AppState, order: &Order, payment: &Payment) -> Result<(), BxError> {
+/// Уведомление об успешной оплате — фронт останавливает опрос и показывает модалку
+/// только при `paid && notice`.
+fn paid_notice() -> Value {
+    json!({
+        "title": "Оплата получена",
+        "text": "Заказ оплачен, мы начали его собирать.",
+        "link": { "text": "Мои заказы", "url": "/profile/" },
+        "plainText": "Оплата получена. Заказ оплачен, мы начали его собирать.",
+        "html": "<p>Оплата получена. Заказ оплачен, мы начали его собирать.</p>",
+    })
+}
+
+/// Оплата зафиксирована: оплата, пересчёт заказа и резервов, история статусов.
+/// Возвращает, оплачен ли заказ целиком.
+async fn mark_paid(state: &AppState, order: &Order, payment: &Payment) -> Result<bool, BxError> {
     let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE payments SET paid = TRUE, paid_at = now() WHERE id = $1")
-        .bind(payment.id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("UPDATE orders SET paid = TRUE, paid_at = now(), updated_at = now() WHERE id = $1")
+    // Порядок блокировок как в `set_paid_in`: заказ раньше оплаты.
+    sqlx::query("SELECT id FROM orders WHERE id = $1 FOR UPDATE")
         .bind(order.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let marked =
+        sqlx::query("UPDATE payments SET paid = TRUE, paid_at = now() WHERE id = $1 AND NOT paid")
+            .bind(payment.id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0;
+    let paid = crate::sale::repo::sync_paid_in(&mut tx, order.id)
+        .await?
+        .unwrap_or(order.paid);
+    if marked && paid {
+        sqlx::query(
+            "INSERT INTO order_status_history (order_id, status, user_id, comment)
+             VALUES ($1, $2, NULL, $3)",
+        )
+        .bind(order.id)
+        .bind(&order.status)
+        .bind(format!(
+            "Оплата получена {}",
+            Utc::now().format("%d.%m.%Y %H:%M")
+        ))
         .execute(&mut *tx)
         .await?;
-    sqlx::query(
-        "INSERT INTO order_status_history (order_id, status, user_id, comment)
-         VALUES ($1, $2, NULL, $3)",
-    )
-    .bind(order.id)
-    .bind(&order.status)
-    .bind(format!(
-        "Оплата получена {}",
-        Utc::now().format("%d.%m.%Y %H:%M")
-    ))
-    .execute(&mut *tx)
-    .await?;
+    }
     tx.commit().await?;
-    Ok(())
+    Ok(paid)
 }

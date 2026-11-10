@@ -327,6 +327,8 @@ pub struct PaymentRef {
 pub struct PaymentStarted {
     pub url: Option<String>,
     pub data: Value,
+    /// Идентификатор платежа у провайдера (сохраняется в `payments.external_id`).
+    pub external_id: Option<String>,
 }
 
 /// Состояние платежа у провайдера.
