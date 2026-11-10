@@ -5,26 +5,39 @@
 <div class="page-head">
   <h1>Настройки сайта</h1>
 </div>
-<form class="card form" method="post" action="/admin/settings">
+<form class="settings" method="post" action="/admin/settings">
 {% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
-<h2>Сайт</h2>
-<label>Название<input name="site_name" value="{{ input.site_name if input else settings.site_name }}" maxlength="255"></label>
-<p class="muted">Подставляется в письма как <code>#SITE_NAME#</code>.</p>
-<label>Домен<input name="server_name" value="{{ input.server_name if input else settings.server_name }}" maxlength="255" placeholder="example.ru"></label>
-<p class="muted">Подставляется в письма как <code>#SERVER_NAME#</code>.</p>
-<label>Отправитель по умолчанию<input name="email_from" value="{{ input.email_from if input else settings.email_from }}" maxlength="255" placeholder="no-reply@example.ru"></label>
-<p class="muted">Подставляется в письма как <code>#DEFAULT_EMAIL_FROM#</code>.</p>
-<h2>SMTP</h2>
-<p class="muted">Если SMTP не задан и <code>MAIL_SMTP_URL</code> пуст, письма сохраняются файлами <code>.eml</code>. Переменная окружения важнее настроек.</p>
-<label>Хост<input name="smtp_host" value="{{ input.smtp_host if input else settings.smtp_host }}" maxlength="255" placeholder="smtp.example.ru"></label>
-<label>Порт<input name="smtp_port" value="{{ input.smtp_port if input else settings.smtp_port }}" maxlength="5" placeholder="465"></label>
-<label>Пользователь<input name="smtp_user" value="{{ input.smtp_user if input else settings.smtp_user }}" maxlength="255"></label>
-<label>Пароль<input name="smtp_password" type="password" value="" autocomplete="new-password" placeholder="оставьте пустым, чтобы не менять"></label>
-<label>Шифрование<select name="smtp_secure">
+
+<section class="card settings-card">
+  <div class="settings-card-head">
+    <h2>Сайт</h2>
+    <p>Название и домен подставляются в письма; отправитель — адрес по умолчанию.</p>
+  </div>
+  <div class="grid-2">
+    <label>Название<input name="site_name" value="{{ input.site_name if input else settings.site_name }}" maxlength="255"><small><code>#SITE_NAME#</code></small></label>
+    <label>Домен<input name="server_name" value="{{ input.server_name if input else settings.server_name }}" maxlength="255" placeholder="example.ru"><small><code>#SERVER_NAME#</code></small></label>
+    <label class="wide">Отправитель по умолчанию<input name="email_from" value="{{ input.email_from if input else settings.email_from }}" maxlength="255" placeholder="no-reply@example.ru"><small><code>#DEFAULT_EMAIL_FROM#</code></small></label>
+  </div>
+</section>
+
+<section class="card settings-card">
+  <div class="settings-card-head">
+    <h2>Почта</h2>
+    <p>SMTP для писем. Если не задан, письма сохраняются файлами <code>.eml</code>; переменная <code>MAIL_SMTP_URL</code> важнее этих настроек.</p>
+  </div>
+  <div class="grid-2">
+    <label>Хост<input name="smtp_host" value="{{ input.smtp_host if input else settings.smtp_host }}" maxlength="255" placeholder="smtp.example.ru"></label>
+    <label>Порт<input name="smtp_port" value="{{ input.smtp_port if input else settings.smtp_port }}" maxlength="5" placeholder="465"></label>
+    <label>Пользователь<input name="smtp_user" value="{{ input.smtp_user if input else settings.smtp_user }}" maxlength="255"></label>
+    <label>Пароль<input name="smtp_password" type="password" value="" autocomplete="new-password" placeholder="оставьте пустым, чтобы не менять"></label>
+    <label class="wide">Шифрование<select name="smtp_secure">
 {% for value, label in [("auto", "Авто (465 — TLS, иначе STARTTLS)"), ("none", "Без шифрования"), ("starttls", "STARTTLS"), ("tls", "TLS")] %}
 {% set current = (input.smtp_secure if input else settings.smtp_secure) or "auto" %}
 <option value="{{ value }}" {% if current == value %}selected{% endif %}>{{ label }}</option>
 {% endfor %}</select></label>
-<button class="btn primary" type="submit">Сохранить</button>
+  </div>
+</section>
+
+<div class="settings-actions"><button class="btn primary" type="submit">Сохранить</button></div>
 </form>
 {% endblock %}

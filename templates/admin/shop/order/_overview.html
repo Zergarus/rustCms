@@ -2,24 +2,38 @@
 <section class="card form">
   <h2>Статус</h2>
   <form method="post" action="/admin/shop/orders/{{ order.id }}/status">
-    {% call ui.prop("Статус") %}<select name="status">{% for s in statuses %}<option value="{{ s[0] }}" {% if order.status == s[0] %}selected{% endif %}>{{ s[1] }}</option>{% endfor %}</select>{% endcall %}
-    {% call ui.prop("Комментарий") %}<input name="comment">{% endcall %}
-    <div class="form-actions"><button class="btn primary" type="submit">Сменить статус</button></div>
+    <div class="prop">
+      <div class="prop-label">Статус</div>
+      <div class="prop-val"><select name="status">{% for s in statuses %}<option value="{{ s[0] }}" {% if order.status == s[0] %}selected{% endif %}>{{ s[1] }}</option>{% endfor %}</select></div>
+    </div>
+    <div class="prop">
+      <div class="prop-label">Комментарий</div>
+      <div class="prop-val inline"><input name="comment"><button class="btn primary" type="submit">Сменить статус</button></div>
+    </div>
   </form>
   <form method="post" action="/admin/shop/orders/{{ order.id }}/paid">
     <input type="hidden" name="value" value="{% if order.paid %}N{% else %}Y{% endif %}">
-    {% call ui.prop("Оплата") %}{% if order.paid %}оплачен {{ (order.paid_at or "")[:16]|replace("T", " ") }}{% else %}не оплачен{% endif %}{% endcall %}
-    <div class="form-actions"><button class="btn" type="submit">{% if order.paid %}Снять оплату{% else %}Отметить оплату{% endif %}</button></div>
+    <div class="prop">
+      <div class="prop-label">Оплата</div>
+      <div class="prop-val inline">
+        <span class="muted">{% if order.paid %}оплачен {{ (order.paid_at or "")[:16]|replace("T", " ") }}{% else %}не оплачен{% endif %}</span>
+        <button class="btn" type="submit">{% if order.paid %}Снять оплату{% else %}Отметить оплату{% endif %}</button>
+      </div>
+    </div>
   </form>
   <form method="post" action="/admin/shop/orders/{{ order.id }}/cancel">
     {% if order.canceled %}
     <input type="hidden" name="value" value="N">
-    {% call ui.prop("Отмена") %}Отменён {{ (order.canceled_at or "")[:16]|replace("T", " ") }}{% if order.cancel_reason %}: {{ order.cancel_reason }}{% endif %}{% endcall %}
-    <div class="form-actions"><button class="btn" type="submit">Снять отмену</button></div>
+    <div class="prop">
+      <div class="prop-label">Отмена</div>
+      <div class="prop-val inline"><span class="muted">Отменён {{ (order.canceled_at or "")[:16]|replace("T", " ") }}{% if order.cancel_reason %}: {{ order.cancel_reason }}{% endif %}</span><button class="btn" type="submit">Снять отмену</button></div>
+    </div>
     {% else %}
     <input type="hidden" name="value" value="Y">
-    {% call ui.prop("Причина отмены") %}<input name="reason">{% endcall %}
-    <div class="form-actions"><button class="btn danger" type="submit">Отменить заказ</button></div>
+    <div class="prop">
+      <div class="prop-label">Причина отмены</div>
+      <div class="prop-val inline"><input name="reason"><button class="btn danger" type="submit">Отменить заказ</button></div>
+    </div>
     {% endif %}
   </form>
 </section>
