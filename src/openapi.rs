@@ -178,5 +178,8 @@ pub async fn document(State(_state): State<AppState>) -> impl IntoResponse {
             }
         }
     });
-    ([(axum::http::header::CONTENT_TYPE, "application/json")], Json(doc))
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        Json(doc),
+    )
 }

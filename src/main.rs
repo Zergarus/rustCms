@@ -39,13 +39,13 @@ mod mail_templates;
 #[cfg(test)]
 mod mail_templates_tests;
 mod metrics;
-mod openapi;
 #[cfg(test)]
 mod metrics_tests;
-mod passwords;
-mod payment;
+mod openapi;
 #[cfg(test)]
 mod openapi_tests;
+mod passwords;
+mod payment;
 #[cfg(test)]
 mod payment_tests;
 #[cfg(test)]

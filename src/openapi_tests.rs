@@ -34,9 +34,11 @@ async fn openapi_document_is_served(db: PgPool) {
         doc["components"]["schemas"]["Envelope"]["properties"]["status"]["enum"],
         serde_json::json!(["success", "error"])
     );
-    assert!(doc["paths"]["/api/v1/cart/items"]["post"]["parameters"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|p| p["name"] == "X-Bitrix-Csrf-Token"));
+    assert!(
+        doc["paths"]["/api/v1/cart/items"]["post"]["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "X-Bitrix-Csrf-Token")
+    );
 }
