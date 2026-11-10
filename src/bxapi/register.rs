@@ -9,11 +9,7 @@
 //! «не подтвердил», и «заблокирован администратором», а сброс пароля не должен
 //! снимать блокировку.
 
-use std::{
-    collections::HashMap,
-    sync::Mutex,
-    time::{Duration as StdDuration, Instant},
-};
+use std::collections::HashMap;
 
 use axum::{body::Bytes, extract::State, http::HeaderMap, response::IntoResponse};
 use axum_extra::extract::cookie::CookieJar;
@@ -32,11 +28,6 @@ const PASSWORD_MIN: usize = 6;
 const MAX_LOGIN: usize = 254;
 /// Не больше пяти попыток на (эндпоинт, IP, логин) за 15 минут.
 const ATTEMPT_LIMIT: u32 = 5;
-const ATTEMPT_WINDOW_SECS: u64 = 15 * 60;
-/// Предел карты счётчиков: старые записи вычищаются, при переполнении — сброс.
-const ATTEMPT_CAP: usize = 1024;
-
-static ATTEMPTS: Mutex<Option<HashMap<String, (u32, Instant)>>> = Mutex::new(None);
 
 fn token_hash(token: &str) -> String {
     auth::token_hash(token)
@@ -79,45 +70,22 @@ fn client_ip(headers: &HeaderMap) -> String {
     "unknown".into()
 }
 
-fn attempt_key(scope: &str, ip: &str, login: &str) -> String {
-    format!("{scope}|{ip}|{}", login.to_lowercase())
-}
-
-/// Ограничитель перебора: ключ (эндпоинт, IP, логин), карта ограничена по размеру.
+/// Ограничитель перебора: ключ (эндпоинт, IP, логин).
 fn throttle(scope: &str, ip: &str, login: &str) -> Result<(), BxError> {
-    let key = attempt_key(scope, ip, login);
-    let mut guard = ATTEMPTS.lock().unwrap_or_else(|e| e.into_inner());
-    let map = guard.get_or_insert_with(HashMap::new);
-    let now = Instant::now();
-    if map.len() >= ATTEMPT_CAP {
-        map.retain(|_, (_, at)| {
-            now.duration_since(*at) <= StdDuration::from_secs(ATTEMPT_WINDOW_SECS)
-        });
-        if map.len() >= ATTEMPT_CAP {
-            map.clear();
-        }
-    }
-    let entry = map.entry(key).or_insert((0, now));
-    if now.duration_since(entry.1) > StdDuration::from_secs(ATTEMPT_WINDOW_SECS) {
-        *entry = (0, now);
-    }
-    entry.0 += 1;
-    if entry.0 > ATTEMPT_LIMIT {
-        return Err(bad(
+    let key = format!("{scope}|{ip}|{}", login.to_lowercase());
+    if crate::throttle::check(&key, ATTEMPT_LIMIT) {
+        Ok(())
+    } else {
+        Err(bad(
             "too_many_requests",
             "Слишком много попыток. Попробуйте позже.",
-        ));
+        ))
     }
-    Ok(())
 }
 
 /// Успешная попытка не должна расходовать чужой бюджет.
 fn forgive(scope: &str, ip: &str, login: &str) {
-    let key = attempt_key(scope, ip, login);
-    let mut guard = ATTEMPTS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(map) = guard.as_mut() {
-        map.remove(&key);
-    }
+    crate::throttle::forgive(&format!("{scope}|{ip}|{}", login.to_lowercase()));
 }
 
 fn normalize_email(value: &str) -> Option<String> {

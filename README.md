@@ -125,7 +125,7 @@ cms import-bitrix 'mysql://user:pass@host:3306/db' --upload /path/to/site/upload
 
 ## API в формате bxapi
 
-Под `/api/v1/` — контракт модуля `mediagroup.bxapi` (обёртка `{status, data, errors}`, ключи в camelCase): `iblock/list`, `iblock/info/{apiCode}`, `iblock/{apiCode}/element/list`, `element/{id}`, `element/slug/{slug}`, `section/list` (с `hasElements`), `iblock/{apiCode}/search`, `nav/breadcrumbs`, `nav/legacy-redirect`, `base/csrf/token`, `auth/login|session|logout`, `location/search|set|current` (выбор города: у гостя — в cookie, у авторизованного — ещё и в профиле), `form/{code}` (проверка полей, запись в инфоблок, письмо по почтовому событию; формы `callback` и `brief` — как в модуле, свои — в модуле проекта).
+Под `/api/v1/` — контракт модуля `mediagroup.bxapi` (обёртка `{status, data, errors}`, ключи в camelCase): `iblock/list`, `iblock/info/{apiCode}`, `iblock/{apiCode}/element/list`, `element/{id}`, `element/slug/{slug}`, `section/list` (с `hasElements`), `iblock/{apiCode}/search`, `nav/breadcrumbs`, `nav/legacy-redirect`, `base/csrf/token`, `auth/login|session|logout`, `location/search|set|current` (выбор города: у гостя — в cookie, у авторизованного — ещё и в профиле), `form/{code}` (проверка полей, запись в коллекцию, письмо по почтовому событию; формы описываются в `config/forms.toml` или кодом проекта — см. раздел «Формы»).
 
 - `filter` — операторы `=`, `!`, `@`, `!@`, `%`, `<`, `>`, `<=`, `>=`, группы `logic: OR`, спецключи `iblockSectionId`, `sectionSubtreeId`, `sectionCode`, `iblockSection.*`, `offers` (торговые предложения), пути `prop.item.xmlId`, `prop.element.<поле>` (вложенные связи до 3 уровней);
 - `select` — поля, свойства и пути через точку, `image`/`imageExt` (+ `imageResize`), `detailPageUrl` (по шаблону URL инфоблока), `sectionName`, `sectionCode`, `catalogPrice` (у товара с предложениями — цена «от»), `catalogType`, `catalogQuantity`, `stocks`;
@@ -174,7 +174,11 @@ cms import-bitrix 'mysql://user:pass@host:3306/db' --upload /path/to/site/upload
 останавливает старт с сообщением, где искать ошибку.
 
 Эндпоинт принимает `application/json` и `multipart/form-data`: файлы
-сохраняются через общий механизм файлов, в поле коллекции пишется id файла.
+сохраняются через общий механизм файлов, в поле коллекции пишется id файла
+(для множественного файлового поля — массив). Ограничения: 20 МБ на тело,
+10 МБ на файл, не больше пяти файлов на заявку; расширения — белый список
+загрузчика (SVG и HTML отклоняются); файл для поля, не описанного в `files`,
+отклоняется с `file_not_allowed`. Заявки с одного IP ограничены 20 за 15 минут.
 Образец конфигурации — `config/forms.toml.example`. Так проектные фичи вроде
 отзывов или брифа делаются формой, без правок ядра.
 

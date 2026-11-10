@@ -37,6 +37,7 @@ mod stock;
 mod stock_api;
 #[cfg(test)]
 mod test_support;
+mod throttle;
 mod uploads;
 mod users;
 

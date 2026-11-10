@@ -28,6 +28,14 @@ struct Template {
 
 /// Подставляет `#КЛЮЧ#` из `fields`; неизвестные поля — пустая строка.
 /// HTML-сущности вида `&#8381;` не трогает.
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 pub fn substitute(template: &str, fields: &HashMap<String, String>) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
@@ -101,7 +109,17 @@ pub async fn send_event(
         let from = substitute(&t.email_from, &all);
         let to = substitute(&t.email_to, &all);
         let subject = substitute(&t.subject, &all);
-        let body = substitute(&t.body, &all);
+        // HTML-письмо: значения полей экранируются, иначе имя или сообщение
+        // пользователя вносит в письмо разметку и ссылки.
+        let body = if t.body_type == "html" {
+            let escaped: HashMap<String, String> = all
+                .iter()
+                .map(|(k, v)| (k.clone(), escape_html(v)))
+                .collect();
+            substitute(&t.body, &escaped)
+        } else {
+            substitute(&t.body, &all)
+        };
         let Some(from_box) = addresses(&from).into_iter().next() else {
             tracing::warn!(
                 template = t.id,

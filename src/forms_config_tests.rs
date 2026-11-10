@@ -281,3 +281,162 @@ Content-Type: application/pdf\r\n\r\n\
         .unwrap();
     assert_eq!(stored, 1);
 }
+
+#[test]
+fn unknown_keys_and_undeclared_mapping_fail() {
+    let err = from_toml(
+        r#"
+[forms.callback.field.name]
+rules = ["required"]
+"#,
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("unknown field"), "{err:#}");
+
+    let err = from_toml(
+        r#"
+[forms.callback.fields.name]
+rules = ["required"]
+
+[forms.callback.writer]
+collection = "callback"
+
+[forms.callback.writer.mapping]
+ghost = "NAME"
+"#,
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("ghost"), "{err:#}");
+}
+
+#[test]
+fn empty_form_is_rejected() {
+    let err = from_toml("[forms.nothing]\n").unwrap_err();
+    assert!(format!("{err:#}").contains("пустое"), "{err:#}");
+}
+
+#[sqlx::test]
+async fn file_rejected_by_extension_and_unclaimed(db: PgPool) {
+    let _ = collection(&db).await;
+    let spec = FormSpec {
+        code: "callback".into(),
+        rules: vec![("name".into(), vec![Rule::Required])],
+        writer: Some(WriterSpec {
+            collection: "callback".into(),
+            mapping: vec![("name".into(), "NAME".into())],
+        }),
+        notifier: None,
+        files: vec![("attachment".into(), "attachment".into())],
+    };
+    let mut state = crate::test_support::test_state(db.clone());
+    state.forms = registry(spec);
+    let app = crate::app(state);
+
+    let svg = "--XBOUNDARY\r\n\
+Content-Disposition: form-data; name=\"name\"\r\n\r\n\
+Иван\r\n\
+--XBOUNDARY\r\n\
+Content-Disposition: form-data; name=\"attachment\"; filename=\"x.svg\"\r\n\
+Content-Type: image/svg+xml\r\n\r\n\
+<svg/>\r\n\
+--XBOUNDARY--\r\n";
+    let (status, json) =
+        post_multipart(&app, "/api/v1/form/callback", svg.as_bytes().to_vec()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["errors"][0]["code"], "file_rejected");
+
+    let stray = "--XBOUNDARY\r\n\
+Content-Disposition: form-data; name=\"name\"\r\n\r\n\
+Иван\r\n\
+--XBOUNDARY\r\n\
+Content-Disposition: form-data; name=\"other\"; filename=\"scan.pdf\"\r\n\
+Content-Type: application/pdf\r\n\r\n\
+%PDF-1.4\r\n\
+--XBOUNDARY--\r\n";
+    let (status, json) =
+        post_multipart(&app, "/api/v1/form/callback", stray.as_bytes().to_vec()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["errors"][0]["code"], "file_not_allowed");
+}
+
+#[sqlx::test]
+async fn large_file_is_allowed(db: PgPool) {
+    let _ = collection(&db).await;
+    let spec = FormSpec {
+        code: "callback".into(),
+        rules: vec![("name".into(), vec![Rule::Required])],
+        writer: Some(WriterSpec {
+            collection: "callback".into(),
+            mapping: vec![("name".into(), "NAME".into())],
+        }),
+        notifier: None,
+        files: vec![("attachment".into(), "attachment".into())],
+    };
+    let mut state = crate::test_support::test_state(db.clone());
+    state.forms = registry(spec);
+    let app = crate::app(state);
+
+    // 3 МБ — больше старого лимита axum в 2 МБ, меньше лимита формы.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(
+        b"--XBOUNDARY\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nIvan\r\n",
+    );
+    payload.extend_from_slice(
+        b"--XBOUNDARY\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"scan.pdf\"\r\nContent-Type: application/pdf\r\n\r\n",
+    );
+    payload.extend(std::iter::repeat_n(b'x', 3 * 1024 * 1024));
+    payload.extend_from_slice(b"\r\n--XBOUNDARY--\r\n");
+
+    let (status, json) = post_multipart(&app, "/api/v1/form/callback", payload).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+}
+
+#[sqlx::test]
+async fn html_email_escapes_user_values(db: PgPool) {
+    let _ = collection(&db).await;
+    sqlx::query(
+        "INSERT INTO mail_templates (event_name, active, email_from, email_to, bcc, subject, body, body_type)
+         VALUES ('CALLBACK_FORM', TRUE, 'site@example.ru', 'manager@example.ru', '', 'Заявка', '<b>#AUTHOR#</b>', 'html')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let spec = FormSpec {
+        code: "callback".into(),
+        rules: vec![("name".into(), vec![Rule::Required])],
+        writer: None,
+        notifier: Some(NotifierSpec {
+            event: "CALLBACK_FORM".into(),
+            mapping: vec![("name".into(), "AUTHOR".into())],
+        }),
+        files: Vec::new(),
+    };
+    let mut state = crate::test_support::test_state(db.clone());
+    let mail_dir = state.config.mail_dir.clone();
+    state.forms = registry(spec);
+    let app = crate::app(state);
+
+    let (status, _) = post_json(
+        &app,
+        "/api/v1/form/callback",
+        json!({"name": "<script>alert(1)</script>"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut letter = String::new();
+    for _ in 0..50 {
+        letter = std::fs::read_dir(&mail_dir)
+            .map(|dir| {
+                dir.filter_map(|e| std::fs::read_to_string(e.unwrap().path()).ok())
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        if letter.contains("manager@example.ru") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(letter.contains("&lt;script&gt;"), "{letter}");
+    assert!(!letter.contains("<script>alert"), "{letter}");
+}

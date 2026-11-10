@@ -75,7 +75,10 @@ pub fn router() -> Router<AppState> {
         .route("/location/set", post(location::set))
         .route("/location/current", get(location::current))
         .route("/iblock/list", get(elements::iblock_list))
-        .route("/form/{code}", post(forms::submit))
+        .route(
+            "/form/{code}",
+            post(forms::submit).layer(DefaultBodyLimit::max(forms::MAX_BODY_BYTES)),
+        )
         .route("/nav/breadcrumbs", post(nav::breadcrumbs))
         .route("/nav/legacy-redirect", post(nav::legacy_redirect))
         .route("/iblock/{*rest}", post(dispatch_post).get(dispatch_get))

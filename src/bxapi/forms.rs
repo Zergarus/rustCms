@@ -21,7 +21,12 @@ use super::{
 use crate::{collection::Field, files, state::AppState, users::is_valid_email};
 
 /// Предел тела формы: файлы вложений не должны съедать память.
-const MAX_BODY_BYTES: usize = 20 * 1024 * 1024;
+pub(crate) const MAX_BODY_BYTES: usize = 20 * 1024 * 1024;
+/// Не больше пяти вложений на заявку и 10 МБ на файл.
+const MAX_FILES: usize = 5;
+const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
+/// Сколько заявок с одного IP на форму за окно.
+const FORM_LIMIT: u32 = 20;
 
 /// Загруженный файл формы до сохранения.
 struct Upload {
@@ -166,7 +171,31 @@ async fn write_element(
         }
     }
     for (code, file_id) in file_fields {
-        props.insert(to_snake(code), json!(file_id));
+        let Some(prop) = schema.prop(&to_snake(code)) else {
+            return Err(BxError::new(
+                "file_field_not_found",
+                format!("Файловое поле {code} не найдено в коллекции"),
+            ));
+        };
+        if prop.kind != "file" {
+            return Err(BxError::new(
+                "file_field_not_file",
+                format!("Поле {code} не файловое"),
+            ));
+        }
+        if prop.multiple {
+            props
+                .entry(prop.code.clone())
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .expect("массив файлов")
+                .push(json!(file_id));
+        } else if props.insert(prop.code.clone(), json!(file_id)).is_some() {
+            return Err(BxError::new(
+                "file_duplicate",
+                format!("В поле {code} можно загрузить только один файл"),
+            ));
+        }
     }
     if name.is_empty() {
         name = format!("Заявка от {}", chrono::Utc::now().format("%d.%m.%Y %H:%M"));
@@ -201,7 +230,22 @@ pub async fn submit(
         .headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.starts_with("multipart/form-data"));
+        .is_some_and(|v| v.to_ascii_lowercase().starts_with("multipart/form-data"));
+    let form = state.forms.get(&code).ok_or_else(|| {
+        BxError::with_status(
+            StatusCode::NOT_FOUND,
+            "form_not_found",
+            format!("Форма {code} не найдена"),
+        )
+    })?;
+    let limit_key = format!("form|{}|{code}", ip.as_deref().unwrap_or("unknown"));
+    if !crate::throttle::check(&limit_key, FORM_LIMIT) {
+        return Err(BxError::with_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_requests",
+            "Слишком много заявок. Попробуйте позже.",
+        ));
+    }
     let (body, uploads) = if is_multipart {
         read_multipart(parts, body).await?
     } else {
@@ -211,13 +255,6 @@ pub async fn submit(
         (parse_body(&bytes)?, Vec::new())
     };
 
-    let form = state.forms.get(&code).ok_or_else(|| {
-        BxError::with_status(
-            StatusCode::NOT_FOUND,
-            "form_not_found",
-            format!("Форма {code} не найдена"),
-        )
-    })?;
     for guard in &state.project.form_guards {
         guard.check(&state, &code, &body, ip.as_deref()).await?;
     }
@@ -251,7 +288,11 @@ async fn read_multipart(
         .map_err(|e| BxError::bad_request("invalid_multipart", e.to_string()))?
     {
         let name = field.name().unwrap_or_default().to_string();
-        match field.file_name().map(str::to_string) {
+        match field
+            .file_name()
+            .map(str::to_string)
+            .filter(|n| !n.is_empty())
+        {
             Some(file_name) => {
                 let content_type = field
                     .content_type()
@@ -287,16 +328,26 @@ async fn save_files(
     form: &FormSpec,
     uploads: Vec<Upload>,
 ) -> Result<Vec<(String, i64)>, BxError> {
-    let mut saved = Vec::new();
+    if uploads.len() > MAX_FILES {
+        return Err(BxError::bad_request(
+            "too_many_files",
+            format!("Не больше {MAX_FILES} файлов в заявке."),
+        ));
+    }
+    let mut saved: Vec<(String, i64)> = Vec::new();
     for upload in uploads {
         let Some((_, target)) = form.files.iter().find(|(field, _)| *field == upload.field) else {
-            tracing::warn!(
-                form = %form.code,
-                field = %upload.field,
-                "файл для незаявленного поля проигнорирован"
-            );
-            continue;
+            return Err(BxError::bad_request(
+                "file_not_allowed",
+                format!("Поле файла «{}» не описано в форме.", upload.field),
+            ));
         };
+        if upload.data.len() > MAX_FILE_BYTES {
+            return Err(BxError::bad_request(
+                "file_too_large",
+                format!("Файл «{}» больше 10 МБ.", upload.name),
+            ));
+        }
         let record = files::save(
             &state.db,
             &state.config.upload_dir,

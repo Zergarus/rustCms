@@ -60,13 +60,16 @@ impl Forms {
     /// Ошибка в файле останавливает старт: молча потерять форму хуже.
     pub fn load(project: &Project) -> anyhow::Result<Self> {
         let mut forms = Self::from_project(project);
-        let path = config_path();
+        let (path, explicit) = config_path();
         if path.exists() {
             let text = std::fs::read_to_string(&path)
                 .with_context(|| format!("не удалось прочитать {}", path.display()))?;
             let specs = from_toml(&text)
                 .with_context(|| format!("ошибка в конфигурации форм {}", path.display()))?;
             forms.merge(specs);
+        } else if explicit {
+            // FORMS_CONFIG задан явно — отсутствие файла это ошибка деплоя.
+            bail!("файл форм {} не найден", path.display());
         }
         Ok(forms)
     }
@@ -87,10 +90,11 @@ impl Forms {
     }
 }
 
-fn config_path() -> PathBuf {
-    std::env::var("FORMS_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| Path::new("config/forms.toml").to_path_buf())
+fn config_path() -> (PathBuf, bool) {
+    match std::env::var("FORMS_CONFIG") {
+        Ok(value) if !value.trim().is_empty() => (PathBuf::from(value), true),
+        _ => (Path::new("config/forms.toml").to_path_buf(), false),
+    }
 }
 
 fn spec_from_code(form: &FormConfig) -> FormSpec {
@@ -126,39 +130,72 @@ pub fn from_toml(text: &str) -> anyhow::Result<Vec<FormSpec>> {
     let file: FileConfig = toml::from_str(text).context("не удалось разобрать TOML")?;
     let mut specs = Vec::with_capacity(file.forms.len());
     for (code, form) in file.forms {
-        if code.trim().is_empty() {
+        let code = code.trim().to_string();
+        if code.is_empty() {
             bail!("пустой код формы");
         }
+        if form.fields.is_empty() && form.writer.is_none() && form.notifier.is_none() {
+            bail!("форма {code}: пустое описание — нет полей, writer и notifier");
+        }
         let mut rules = Vec::with_capacity(form.fields.len());
-        for (field, spec) in form.fields {
-            let mut parsed = Vec::with_capacity(spec.rules.len());
-            for raw in spec.rules {
-                parsed.push(parse_rule(&code, &field, &raw)?);
+        for (field, spec) in &form.fields {
+            if field.trim().is_empty() {
+                bail!("форма {code}: пустое имя поля");
             }
-            rules.push((field, parsed));
+            let mut parsed = Vec::with_capacity(spec.rules.len());
+            for raw in &spec.rules {
+                parsed.push(parse_rule(&code, field, raw)?);
+            }
+            rules.push((field.clone(), parsed));
         }
         rules.sort_by(|a, b| a.0.cmp(&b.0));
+        let writer = match form.writer {
+            Some(writer) if writer.collection.trim().is_empty() => {
+                bail!("форма {code}: пустая коллекция writer");
+            }
+            Some(writer) => Some(WriterSpec {
+                collection: writer.collection.trim().to_string(),
+                mapping: checked_mapping(&code, &form.fields, writer.mapping)?,
+            }),
+            None => None,
+        };
+        let notifier = match form.notifier {
+            Some(notifier) if notifier.event.trim().is_empty() => {
+                bail!("форма {code}: пустое событие notifier");
+            }
+            Some(notifier) => Some(NotifierSpec {
+                event: notifier.event.trim().to_string(),
+                mapping: checked_mapping(&code, &form.fields, notifier.mapping)?,
+            }),
+            None => None,
+        };
+        let files = checked_mapping(&code, &form.fields, form.files)?;
         specs.push(FormSpec {
             rules,
             code,
-            writer: form.writer.map(|writer| WriterSpec {
-                collection: writer.collection,
-                mapping: sorted(writer.mapping),
-            }),
-            notifier: form.notifier.map(|notifier| NotifierSpec {
-                event: notifier.event,
-                mapping: sorted(notifier.mapping),
-            }),
-            files: sorted(form.files),
+            writer,
+            notifier,
+            files,
         });
     }
     Ok(specs)
 }
 
-fn sorted(map: HashMap<String, String>) -> Vec<(String, String)> {
-    let mut pairs: Vec<(String, String)> = map.into_iter().collect();
+/// Маппинг «поле формы → цель»: все поля должны быть объявлены в `fields`.
+fn checked_mapping(
+    form: &str,
+    fields: &HashMap<String, FileField>,
+    map: HashMap<String, String>,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let mut pairs: Vec<(String, String)> = Vec::with_capacity(map.len());
+    for (field, target) in map {
+        if !fields.contains_key(&field) {
+            bail!("форма {form}: поле «{field}» есть в маппинге, но не объявлено в fields");
+        }
+        pairs.push((field, target));
+    }
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
-    pairs
+    Ok(pairs)
 }
 
 fn parse_rule(form: &str, field: &str, raw: &str) -> anyhow::Result<Rule> {
@@ -170,12 +207,14 @@ fn parse_rule(form: &str, field: &str, raw: &str) -> anyhow::Result<Rule> {
 }
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct FileConfig {
     #[serde(default)]
     forms: HashMap<String, FileForm>,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct FileForm {
     #[serde(default)]
     fields: HashMap<String, FileField>,
@@ -186,12 +225,14 @@ struct FileForm {
 }
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct FileField {
     #[serde(default)]
     rules: Vec<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileWriter {
     collection: String,
     #[serde(default)]
@@ -199,6 +240,7 @@ struct FileWriter {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileNotifier {
     event: String,
     #[serde(default)]
