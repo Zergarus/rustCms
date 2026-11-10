@@ -4,8 +4,8 @@ use sqlx::PgPool;
 
 use super::{
     bulk::{BulkAction, BulkParam, Confirm},
-    spec::{Column, EnumOption, FieldType, Filter, FilterSql, ListSpec},
-    state::Sort,
+    spec::{Column, EnumOption, FieldType, Filter, FilterSql, ListSpec, QuickFilter, QuickOption},
+    state::{Cond, Op, Sort, Val},
 };
 use crate::{
     access::{Access, ORDERS_MANAGE},
@@ -34,6 +34,28 @@ fn col(code: &str, title: &str, expr: &str, ty: FieldType) -> Column {
         editable: None,
         edit_expr: None,
         badge: false,
+    }
+}
+
+fn quick(
+    code: &'static str,
+    label: &'static str,
+    values: &[(&'static str, Option<&str>)],
+) -> QuickFilter {
+    QuickFilter {
+        code,
+        label,
+        options: values
+            .iter()
+            .map(|(option, value)| QuickOption {
+                label: option,
+                cond: value.map(|value| Cond {
+                    code: code.into(),
+                    op: Op::Eq,
+                    val: Val::One(value.into()),
+                }),
+            })
+            .collect(),
     }
 }
 
@@ -194,6 +216,18 @@ pub(crate) async fn build_spec(db: &PgPool, can_share: bool) -> sqlx::Result<Lis
         sections: false,
         peek_url: Some("/admin/shop/orders/{id}/peek".into()),
         open_url: "/admin/shop/orders/{id}".into(),
+        quick: vec![
+            quick(
+                "paid",
+                "Оплата",
+                &[("Любая", None), ("Оплачен", Some("Y")), ("Не оплачен", Some("N"))],
+            ),
+            quick(
+                "canceled",
+                "Отмена",
+                &[("Любая", None), ("Отменён", Some("Y")), ("Не отменён", Some("N"))],
+            ),
+        ],
         can_share,
         muted_expr: Some("o.canceled".into()),
         label_expr: "COALESCE(o.account_number, o.id::text)".into(),

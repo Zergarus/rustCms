@@ -1510,30 +1510,21 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn tree_collapsed_saved_and_rendered(db: PgPool) {
+    async fn tree_moved_to_sidebar(db: PgPool) {
         let c = content_fixture(&db).await;
         let app = app(&db);
         let cookie = admin_cookie(&db).await;
         let url = list_path(c.collection_id);
         let tree = format!("/admin/collections/{}/tree/collapsed", c.collection_id);
+        // Дерево разделов теперь в боковом меню, а не панелью рядом с таблицей
         let (_, _, out) = full_get(&app, &url, &cookie).await;
-        assert!(!out.contains("has-tree tree-collapsed"));
+        assert!(out.contains("class=\"nav-tree\""), "{out}");
+        assert!(!out.contains("id=\"list-tree\""), "{out}");
+        // Свёрнутость дерева по-прежнему сохраняется (пригодится для сайдбара)
         let (st, _, _) = hx_post(&app, &tree, &cookie, "value=1").await;
         assert_eq!(st, StatusCode::NO_CONTENT);
-        let (_, _, out) = full_get(&app, &url, &cookie).await;
-        assert!(out.contains("has-tree tree-collapsed"), "{out}");
-        // запоминание списка не затирает флаг
-        full_get(&app, &format!("{url}?per=20"), &cookie).await;
-        // голый адрес редиректит на явное запомненное состояние
-        let (st, h, _) = full_get(&app, &url, &cookie).await;
-        assert_eq!(st, StatusCode::FOUND);
-        let to = h[header::LOCATION].to_str().unwrap().to_string();
-        let (_, _, out) = full_get(&app, &to, &cookie).await;
-        assert!(out.contains("tree-collapsed"));
-        let (st, _, _) = hx_post(&app, &tree, &cookie, "value=0").await;
-        assert_eq!(st, StatusCode::NO_CONTENT);
-        let (_, _, out) = full_get(&app, &url, &cookie).await;
-        assert!(!out.contains("has-tree tree-collapsed"));
+        let (st, _, out) = full_get(&app, &url, &cookie).await;
+        assert_eq!(st, StatusCode::OK, "{out}");
         // без права на чтение коллекции — 403
         let nobody = permitted_cookie(&db, "nobody", &[]).await;
         let (st, _, _) = hx_post(&app, &tree, &nobody, "value=1").await;

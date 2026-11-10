@@ -101,6 +101,21 @@ pub struct Filter {
     pub join: Option<String>,
 }
 
+/// Быстрый фильтр над списком: набор готовых условий по одному коду.
+#[derive(Debug, Clone)]
+pub struct QuickFilter {
+    pub code: &'static str,
+    pub label: &'static str,
+    pub options: Vec<QuickOption>,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuickOption {
+    pub label: &'static str,
+    /// `None` — «любое значение»: фильтр по этому коду снимается.
+    pub cond: Option<super::state::Cond>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ListSpec {
     pub key: String,
@@ -117,6 +132,8 @@ pub struct ListSpec {
     pub peek_url: Option<String>,
     /// Шаблон с `{id}`.
     pub open_url: String,
+    /// Быстрые фильтры над таблицей.
+    pub quick: Vec<QuickFilter>,
     pub can_share: bool,
     /// Булево SQL-выражение: строки с истиной выводятся приглушёнными.
     pub muted_expr: Option<String>,
@@ -218,6 +235,7 @@ pub(crate) fn test_spec() -> ListSpec {
         sections: false,
         peek_url: None,
         open_url: "/admin/test/{id}".into(),
+        quick: Vec::new(),
         can_share: false,
         muted_expr: None,
         label_expr: "t.id::text".into(),

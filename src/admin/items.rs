@@ -3787,22 +3787,20 @@ mod list_tests {
         item(&db, fx.collection_id, None, "Х3").await;
         let app = crate::app(test_state(db.clone()));
         let cookie = admin_cookie(&db).await;
-        // Раздел А выбран: Подраздел Б виден в дереве
-        let (_, _, b) = get_raw(
+        // Дерево в сайдбаре, а фрагмент подраздела по-прежнему считает поддерево
+        let (s, _, b) = get_raw(
             &app,
             &format!(
-                "/admin/collections/{}/items?section={}",
+                "/admin/collections/{}/tree?parent={}",
                 fx.collection_id, fx.section_id
             ),
             &cookie,
         )
         .await;
+        assert_eq!(s, StatusCode::OK);
         let html = String::from_utf8_lossy(&b);
-        // А: своя запись + две в подразделе; Б: две; без раздела: одна; всего четыре
-        assert_eq!(node_count(&html, "Раздел А"), "3", "{html}");
-        assert_eq!(node_count(&html, "Подраздел Б"), "2");
-        assert_eq!(node_count(&html, "Без раздела"), "1");
-        assert_eq!(node_count(&html, "Вся коллекция"), "4");
+        assert_eq!(node_count(&html, "Подраздел Б"), "2", "{html}");
+        assert!(!html.contains("Раздел А"), "{html}");
     }
 
     #[sqlx::test]

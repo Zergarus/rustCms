@@ -6,10 +6,10 @@ use super::{
     bulk::{BulkAction, BulkParam, Confirm},
     spec::{
         CellEdit, Column, EditKind, EditTarget, EnumOption, FieldType, Filter, FilterSql, Join,
-        ListSpec, StdField,
+        ListSpec, QuickFilter, QuickOption, StdField,
     },
     sql::Scope,
-    state::{SectionSel, Sort},
+    state::{Cond, Op, SectionSel, Sort, Val},
 };
 use crate::{
     access::{Access, COLLECTIONS_MANAGE, Level},
@@ -41,6 +41,50 @@ fn is_catalog_code(code: &str) -> bool {
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
     };
     code == "qty" || code == "instock" || numbered("price_") || numbered("store_")
+}
+
+/// Быстрые фильтры списка записей: активность и дата изменения.
+fn collection_quick() -> Vec<QuickFilter> {
+    let bool_quick = |code: &'static str, label: &'static str| QuickFilter {
+        code,
+        label,
+        options: [
+            ("Любая", None),
+            ("Активные", Some("Y")),
+            ("Неактивные", Some("N")),
+        ]
+        .into_iter()
+        .map(|(option, value)| QuickOption {
+            label: option,
+            cond: value.map(|value| Cond {
+                code: code.into(),
+                op: Op::Eq,
+                val: Val::One(value.into()),
+            }),
+        })
+        .collect(),
+    };
+    let date_quick = QuickFilter {
+        code: "updated_at",
+        label: "Изменена",
+        options: [
+            ("Любая", None, Op::Eq),
+            ("Сегодня", Some(()), Op::Today),
+            ("7 дней", Some(()), Op::D7),
+            ("30 дней", Some(()), Op::D30),
+        ]
+        .into_iter()
+        .map(|(option, selected, op)| QuickOption {
+            label: option,
+            cond: selected.map(|_| Cond {
+                code: "updated_at".into(),
+                op,
+                val: Val::None,
+            }),
+        })
+        .collect(),
+    };
+    vec![bool_quick("active", "Активность"), date_quick]
 }
 
 fn col(code: &str, title: &str, expr: &str, ty: FieldType) -> Column {
@@ -418,6 +462,7 @@ pub async fn collection_spec(db: &PgPool, user: &Access, c: &Collection) -> sqlx
         sections: true,
         peek_url: c.is_catalog.then(|| "/admin/items/{id}/peek".to_string()),
         open_url: "/admin/items/{id}".into(),
+        quick: collection_quick(),
         can_share: user.collection_level(id) >= Level::Write || user.can(COLLECTIONS_MANAGE),
         muted_expr: Some("NOT ci.active".into()),
         label_expr: "ci.name".into(),

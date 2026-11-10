@@ -174,6 +174,21 @@ struct PageLink {
 }
 
 #[derive(Serialize)]
+struct QuickOptionView {
+    label: &'static str,
+    url: String,
+    active: bool,
+}
+
+#[derive(Serialize)]
+struct QuickView {
+    label: &'static str,
+    active: bool,
+    current: Option<&'static str>,
+    options: Vec<QuickOptionView>,
+}
+
+#[derive(Serialize)]
 struct PerLink {
     value: i64,
     url: String,
@@ -584,6 +599,44 @@ pub async fn run_list(
         next.page = 1;
         url_of(spec, path, &next)
     };
+    let quick: Vec<QuickView> = spec
+        .quick
+        .iter()
+        .map(|filter| {
+            let current = st.filters.iter().find(|cond| cond.code == filter.code);
+            let mut current_label = None;
+            let options: Vec<QuickOptionView> = filter
+                .options
+                .iter()
+                .map(|option| {
+                    let active = match &option.cond {
+                        Some(cond) => current == Some(cond),
+                        None => current.is_none(),
+                    };
+                    if active {
+                        current_label = Some(option.label);
+                    }
+                    let mut next = st.clone();
+                    next.filters.retain(|cond| cond.code != filter.code);
+                    if let Some(cond) = &option.cond {
+                        next.filters.push(cond.clone());
+                    }
+                    next.page = 1;
+                    QuickOptionView {
+                        label: option.label,
+                        url: url_of(spec, path, &next),
+                        active,
+                    }
+                })
+                .collect();
+            QuickView {
+                label: filter.label,
+                active: current.is_some(),
+                current: current_label,
+                options,
+            }
+        })
+        .collect();
     let per_links: Vec<PerLink> = [20, 50, 100]
         .into_iter()
         .map(|n| {
@@ -623,6 +676,8 @@ pub async fn run_list(
         heads,
         rows => row_views,
         chips,
+        quick,
+        has_filters => !st.filters.is_empty() || st.section.is_some(),
         reset_url,
         per_links,
         total,

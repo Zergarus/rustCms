@@ -267,6 +267,32 @@ td { padding: 8px var(--sp-3); }
 .stock-table td.num input { width: 140px; text-align: right; }
 .stock-table tr.muted td { color: var(--muted); }
 
+/* Быстрые фильтры над таблицей */
+.quick-filters { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin: 0 0 var(--sp-3); }
+.qf { position: relative; }
+.qf > summary { list-style: none; cursor: pointer; }
+.qf > summary::-webkit-details-marker { display: none; }
+.qf.on > summary { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-text); }
+.qf-menu {
+  position: absolute; left: 0; top: calc(100% + 4px); z-index: 40;
+  display: grid; min-width: 220px; padding: var(--sp-1);
+  background: var(--panel); border: 1px solid var(--border-strong);
+  border-radius: var(--r-md); box-shadow: var(--shadow-pop);
+}
+.qf-menu a { padding: 6px var(--sp-2); border-radius: var(--r-sm); color: var(--text); font-size: var(--fs-base); white-space: nowrap; }
+.qf-menu a:hover { background: var(--hover); text-decoration: none; }
+.qf-menu a.on { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
+
+/* Дерево разделов активной коллекции в боковом меню */
+.nav-tree { margin: 2px 0 6px 14px; padding-left: 6px; border-left: 1px solid var(--border); max-height: 38vh; overflow: auto; }
+.nav-branch > summary { list-style: none; cursor: pointer; }
+.nav-branch > summary::-webkit-details-marker { display: none; }
+.nav-branch > summary a { color: inherit; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-tree-children { margin-left: 10px; padding-left: 4px; border-left: 1px solid var(--border); }
+.nav-tree .nav { min-height: 26px; font-size: var(--fs-sm); }
+.nav-tree .nav-count { font-size: var(--fs-xs); }
+.nav-tree-setup { color: var(--muted); }
+
 /* Список всех открытых вкладок */
 .tabs-all { position: relative; flex: none; }
 .tabs-all > summary { list-style: none; cursor: pointer; }

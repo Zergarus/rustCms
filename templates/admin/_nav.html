@@ -1,6 +1,22 @@
 {#- Меню строится только из user.shell.nav -#}
 {% import "_ui.html" as ui %}
 {% set nav = user.shell.nav %}
+{% macro tree_nodes(nodes, base) %}
+{% for n in nodes %}
+{% if n.children %}
+<details class="nav-branch"{% if n.open %} open{% endif %}>
+  <summary class="nav sub{% if n.active %} on{% endif %}" style="padding-left:{{ 8 + n.depth * 12 }}px">
+    <a class="grow" href="{{ base }}?section={{ n.id }}">{{ n.name }}</a>
+    <span class="nav-count">{{ n.count }}</span>
+  </summary>
+  <div class="nav-tree-children">{{ tree_nodes(n.children, base) }}</div>
+</details>
+{% else %}
+<a class="nav sub{% if n.active %} on{% endif %}" href="{{ base }}?section={{ n.id }}" style="padding-left:{{ 8 + n.depth * 12 }}px"><span class="grow">{{ n.name }}</span><span class="nav-count">{{ n.count }}</span></a>
+{% endif %}
+{% endfor %}
+{% endmacro %}
+
 {% macro modules(nav, ui) %}
   <details class="nav-group" data-nav-group="modules" open>
     <summary class="grp"><span class="grp-label">Модули</span></summary>
@@ -37,6 +53,14 @@
     {% for v in it.views %}
     <a class="nav sub{% if v.active %} on{% endif %}" href="{{ v.url|safe }}"{% if v.active %} aria-current="page"{% endif %}><span class="star" aria-hidden="true">★</span><span class="grow">{{ v.label }}</span></a>
     {% endfor %}
+    {% if nav.tree and ("/admin/collections/" ~ nav.tree.collection_id ~ "/") in it.url %}
+    <div class="nav-tree">
+      <a class="nav sub{% if nav.tree.active_all %} on{% endif %}" href="{{ nav.tree.url }}">Все разделы <span class="nav-count">{{ nav.tree.total }}</span></a>
+      {{ tree_nodes(nav.tree.nodes, nav.tree.url) }}
+      {% if nav.tree.without_count %}<a class="nav sub{% if nav.tree.active_without %} on{% endif %}" href="{{ nav.tree.url }}?section=none">Без раздела <span class="nav-count">{{ nav.tree.without_count }}</span></a>{% endif %}
+      <a class="nav sub nav-tree-setup" href="{{ nav.tree.sections_url }}">Настроить разделы</a>
+    </div>
+    {% endif %}
     {% endfor %}
     {% if g.code == "content" and nav.more_collections %}
     <a class="nav more" href="/admin/collections">{{ ui.icon("plus") }}<span class="grow">Ещё…</span></a>

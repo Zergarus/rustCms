@@ -2246,6 +2246,18 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn orders_have_quick_filters(db: sqlx::PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (status, _, page) = get_raw(&app, "/admin/shop/orders", &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        let page = String::from_utf8_lossy(&page);
+        assert!(page.contains("quick-filters"), "{page}");
+        assert!(page.contains("Оплата"), "{page}");
+        assert!(page.contains("paid=eq"), "{page}");
+    }
+
+    #[sqlx::test]
     async fn order_aside_totals(db: sqlx::PgPool) {
         let f = order_fixture(&db).await;
         let id = place_order(&db, &f, None).await;

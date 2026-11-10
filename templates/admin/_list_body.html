@@ -69,12 +69,27 @@
     {% for c in chips %}
     <span class="chip{% if c.section %} section{% endif %}"><span class="chip-main"{% if c.code %} data-chip="{{ c.code }}"{% endif %}><span class="lbl">{{ c.label }}</span>{% if c.op %}<span class="op">{{ c.op }}</span>{% endif %}<span class="val">{{ c.value }}</span></span><a class="chip-x" data-chip-remove href="{{ c.url }}" hx-get="{{ c.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true" aria-label="Убрать: {{ c.label }}">✕</a></span>
     {% endfor %}
-    <button type="button" class="add-filter js-only" id="list-add-filter" data-hotkey="/" aria-haspopup="dialog">+ Фильтр <kbd>F</kbd></button>
+    <button type="button" class="add-filter js-only" id="list-add-filter" data-hotkey="/" aria-haspopup="dialog">Фильтры{% if chips %} · {{ chips|length }}{% endif %} <kbd>F</kbd></button>
     {% if only_toggle %}<label class="only"><input type="checkbox"{% if only_toggle.checked %} checked{% endif %} hx-get="{{ only_toggle.url }}" hx-trigger="change" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true"> только этот раздел</label>{% endif %}
     {% if chips %}<a class="btn ghost sm" href="{{ reset_url }}" hx-get="{{ reset_url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">Сбросить всё</a>{% endif %}
     <button type="button" class="btn ghost sm js-only cols-btn" id="list-cols" aria-haspopup="dialog">Колонки</button>
   </div>
   </div>
+  {% if quick %}
+  <div class="quick-filters">
+    {% for q in quick %}
+    <details class="qf{% if q.active %} on{% endif %}">
+      <summary class="btn">{% if q.current %}{{ q.label }}: {{ q.current }}{% else %}{{ q.label }}{% endif %}</summary>
+      <div class="qf-menu">
+        {% for o in q.options %}
+        <a class="{% if o.active %}on{% endif %}" href="{{ o.url }}" hx-get="{{ o.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">{{ o.label }}</a>
+        {% endfor %}
+      </div>
+    </details>
+    {% endfor %}
+    {% if has_filters %}<a class="btn ghost sm" href="{{ reset_url }}" hx-get="{{ reset_url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">Сбросить всё</a>{% endif %}
+  </div>
+  {% endif %}
   {% for n in notices %}<div class="list-notice">{{ n }}</div>{% endfor %}
   {% if rows %}
   <div class="card table-wrap">

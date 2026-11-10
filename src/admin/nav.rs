@@ -402,6 +402,33 @@ pub(crate) struct NavGroup {
     pub items: Vec<NavItem>,
 }
 
+/// Узел дерева разделов активной коллекции (плоский список с глубиной).
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct NavSection {
+    pub id: i64,
+    pub name: String,
+    pub depth: usize,
+    pub count: i64,
+    pub active: bool,
+    /// Раскрыть ветку: в ней есть активный раздел или его предок.
+    pub open: bool,
+    pub children: Vec<NavSection>,
+}
+
+/// Дерево разделов коллекции, открытой в списке записей.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct NavTree {
+    pub collection_id: i64,
+    pub collection_name: String,
+    pub url: String,
+    pub sections_url: String,
+    pub total: i64,
+    pub without_count: i64,
+    pub active_all: bool,
+    pub active_without: bool,
+    pub nodes: Vec<NavSection>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Nav {
     pub mode: Mode,
@@ -413,6 +440,130 @@ pub(crate) struct Nav {
     pub more_collections: bool,
     /// G-переходы: d, o, c, u — только доступные.
     pub goto: Vec<(char, String)>,
+    /// Разделы коллекции, если открыт её список записей.
+    pub tree: Option<NavTree>,
+}
+
+type SectionRow = (i64, String, Option<i64>, bool);
+type SectionChildren<'a> = std::collections::HashMap<Option<i64>, Vec<&'a SectionRow>>;
+
+/// Дерево разделов для коллекции, чей список записей открыт.
+async fn nav_tree(
+    db: &PgPool,
+    _user: &Access,
+    ctx: &NavCtx,
+    path: &str,
+    query: &str,
+) -> sqlx::Result<Option<NavTree>> {
+    let Some(rest) = path.strip_prefix("/admin/collections/") else {
+        return Ok(None);
+    };
+    let Some((id, tail)) = rest.split_once('/') else {
+        return Ok(None);
+    };
+    if tail != "items" {
+        return Ok(None);
+    }
+    let Ok(collection_id) = id.parse::<i64>() else {
+        return Ok(None);
+    };
+    let Some(collection) = ctx.collections.iter().find(|c| c.id == collection_id) else {
+        return Ok(None);
+    };
+    let rows: Vec<SectionRow> = sqlx::query_as(
+        "SELECT id, name, parent_id, active FROM collection_sections
+         WHERE collection_id = $1 ORDER BY sort, id",
+    )
+    .bind(collection_id)
+    .fetch_all(db)
+    .await?;
+    let counts: Vec<(Option<i64>, i64)> = sqlx::query_as(
+        "SELECT section_id, count(*) FROM collection_items
+         WHERE collection_id = $1 GROUP BY section_id",
+    )
+    .bind(collection_id)
+    .fetch_all(db)
+    .await?;
+    let own = |id: Option<i64>| {
+        counts
+            .iter()
+            .find(|(section, _)| *section == id)
+            .map_or(0, |(_, n)| *n)
+    };
+    let mut children: SectionChildren = std::collections::HashMap::new();
+    for row in &rows {
+        children.entry(row.2).or_default().push(row);
+    }
+    // Счётчик узла — поддерево: своя запись плюс все вложенные разделы.
+    fn subtree_sum(id: i64, children: &SectionChildren, own: &dyn Fn(Option<i64>) -> i64) -> i64 {
+        own(Some(id))
+            + children
+                .get(&Some(id))
+                .into_iter()
+                .flatten()
+                .map(|row| subtree_sum(row.0, children, own))
+                .sum::<i64>()
+    }
+    let totals: std::collections::HashMap<i64, i64> = rows
+        .iter()
+        .map(|row| (row.0, subtree_sum(row.0, &children, &own)))
+        .collect();
+    let count_of = |id: Option<i64>| match id {
+        Some(id) => totals.get(&id).copied().unwrap_or(0),
+        None => own(None),
+    };
+    let mut current: Option<Option<i64>> = None;
+    for (key, value) in form_urlencoded::parse(query.as_bytes()) {
+        if key == "section" {
+            current = Some(if value == "none" {
+                None
+            } else {
+                value.parse().ok()
+            });
+        }
+    }
+    let current_id = current.flatten();
+    fn build(
+        parent: Option<i64>,
+        depth: usize,
+        children: &SectionChildren,
+        current: Option<i64>,
+        count_of: &dyn Fn(Option<i64>) -> i64,
+    ) -> Vec<NavSection> {
+        if depth > 10 {
+            return Vec::new();
+        }
+        children
+            .get(&parent)
+            .into_iter()
+            .flatten()
+            .map(|row| {
+                let nested = build(Some(row.0), depth + 1, children, current, count_of);
+                let open = nested.iter().any(|node| node.active || node.open);
+                NavSection {
+                    id: row.0,
+                    name: row.1.clone(),
+                    depth,
+                    count: count_of(Some(row.0)),
+                    active: current == Some(row.0),
+                    open,
+                    children: nested,
+                }
+            })
+            .collect()
+    }
+    let nodes = build(None, 0, &children, current_id, &count_of);
+    Ok(Some(NavTree {
+        collection_id,
+        collection_name: collection.name.clone(),
+        url: format!("/admin/collections/{collection_id}/items"),
+        sections_url: format!("/admin/collections/{collection_id}/sections"),
+        total: collection.count,
+        without_count: count_of(None),
+        active_all: current.is_none(),
+        active_without: current == Some(None),
+        nodes,
+    }))
 }
 
 const CMS_GROUPS: [(&str, &str); 3] = [
@@ -609,12 +760,14 @@ pub(crate) async fn build(
     .map(|(key, _, url)| (key, url.to_string()))
     .collect();
 
+    let tree = nav_tree(db, user, ctx, path, query).await?;
     Ok(Nav {
         mode,
         groups,
         shop,
         more_collections,
         goto,
+        tree,
     })
 }
 
@@ -933,6 +1086,40 @@ mod tests {
             .find(|s| s.code.starts_with("collection:"))
             .unwrap();
         assert!(sec.create.is_none());
+    }
+
+    #[sqlx::test]
+    async fn tree_is_shown_for_collection_list(db: PgPool) {
+        let f = test_support::content_fixture(&db).await;
+        let user = access(&db, "root", None).await;
+        let ctx = load_ctx(&db, &user).await.unwrap();
+        let nav = build(
+            &db,
+            &user,
+            &ctx,
+            &format!(
+                "/admin/collections/{}/items?section={}",
+                f.collection_id, f.section_id
+            ),
+        )
+        .await
+        .unwrap();
+        let tree = nav.tree.expect("дерево разделов");
+        assert_eq!(tree.collection_id, f.collection_id);
+        assert!(
+            tree.nodes
+                .iter()
+                .any(|node| node.id == f.section_id && node.active && node.count == 1),
+            "{:?}",
+            tree.nodes
+        );
+        assert!(
+            build(&db, &user, &ctx, "/admin/users")
+                .await
+                .unwrap()
+                .tree
+                .is_none()
+        );
     }
 
     #[sqlx::test]

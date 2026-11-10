@@ -670,5 +670,12 @@
   }
   document.addEventListener('htmx:afterSettle', revealActiveTab);
   revealActiveTab();
+  // Активный раздел в дереве сайдбара всегда виден в своей прокрутке
+  function revealActiveSection() {
+    const active = document.querySelector('.nav-tree .on');
+    if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+  document.addEventListener('htmx:afterSettle', revealActiveSection);
+  revealActiveSection();
   init();
 })();

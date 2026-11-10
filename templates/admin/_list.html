@@ -13,8 +13,7 @@
     {% for a in page.actions %}<a class="btn{% if a.primary %} primary{% endif %}" href="{{ a.url }}"{% if a.hotkey %} data-hotkey="{{ a.hotkey }}"{% endif %}>{{ a.label }}</a>{% endfor %}
   </div>
 </div>
-<div hx-history="false" class="list-layout{% if page.tree %} has-tree{% if tree_collapsed %} tree-collapsed{% endif %}{% endif %}" id="list-layout">
-  {% if page.tree %}<aside id="list-tree" class="list-tree">{% set tree = page.tree %}{% include "_tree.html" %}</aside>{% endif %}
+<div hx-history="false" class="list-layout" id="list-layout">
   <div class="list-main">
     {% include "_list_body.html" %}
   </div>
