@@ -409,6 +409,10 @@ pub struct Project {
     pub form_extensions: Vec<FormExtension>,
     /// Платёжные провайдеры проекта по id платёжной системы.
     pub payment_extensions: Vec<PaymentExtension>,
+    /// Свои HTTP-маршруты проекта (например `/1c/api/*`, счёт и чек).
+    /// Монтируются в общий роутер до слоёв логирования; CORS и проверки проект
+    /// добавляет сам.
+    pub routes: Option<axum::Router<AppState>>,
     /// Обработчик товаров при обмене с 1С (`None` — ничего не делается).
     pub import_hook: Option<Arc<dyn ImportHook>>,
     /// Реквизиты заказа при выгрузке в 1С (`None` — только реквизиты модуля).
@@ -507,6 +511,7 @@ impl Default for Project {
             form_guards: Vec::new(),
             form_extensions: Vec::new(),
             payment_extensions: Vec::new(),
+            routes: None,
             import_hook: None,
             order_export_hook: None,
             order_import_hook: None,

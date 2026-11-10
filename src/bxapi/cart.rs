@@ -110,6 +110,23 @@ async fn owner(state: &AppState, jar: &CookieJar) -> Result<Option<Owner>, BxErr
         .map(Owner::Guest))
 }
 
+/// Покупатель для записи в корзину от имени гостя или пользователя: создаёт
+/// запись и cookie, если их ещё нет.
+pub(crate) async fn ensure_buyer(
+    state: &AppState,
+    jar: CookieJar,
+) -> Result<(i64, CookieJar), BxError> {
+    let (owner, jar) = match owner(state, &jar).await? {
+        Some(owner) => (owner, jar),
+        None => {
+            let token = hex::encode(rand::random::<[u8; 32]>());
+            let jar = jar.add(buyer_cookie(state, token.clone()));
+            (Owner::Guest(token), jar)
+        }
+    };
+    Ok((repo::ensure_buyer(&state.db, &owner).await?, jar))
+}
+
 async fn current_buyer(state: &AppState, jar: &CookieJar) -> Result<Option<i64>, BxError> {
     match owner(state, jar).await? {
         Some(o) => Ok(repo::find_buyer(&state.db, &o).await?),

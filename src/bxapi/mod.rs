@@ -66,6 +66,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/profile/orders", get(profile_orders::orders))
         .route("/profile/orders/{id}", get(profile_orders::order))
+        .route("/profile/orders/{id}/repeat", post(profile_orders::repeat))
         .route("/auth/register", post(register::register))
         .route("/auth/confirm-registration", post(register::confirm))
         .route("/auth/forgot-password", post(register::forgot))

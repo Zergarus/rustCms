@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::IntoResponse,
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, FixedOffset, Local, SecondsFormat, Utc};
@@ -458,6 +459,66 @@ pub async fn order(
     Ok(success(
         json!({ "order": order_json(&order, &refs, cfg, &state.project.cart) }),
     ))
+}
+
+/// `POST /profile/orders/{id}/repeat` — положить позиции заказа в корзину.
+///
+/// Недоступные товары пропускаются: оформление всё равно перепроверит остатки.
+pub async fn repeat(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+) -> BxResult {
+    let user = require_user(&state, &jar).await?;
+    let Some(order) = crate::sale::repo::load(&state.db, id).await? else {
+        return Err(BxError::with_status(
+            StatusCode::NOT_FOUND,
+            "order_not_found",
+            "Заказ не найден",
+        ));
+    };
+    if order.user_id != Some(user) {
+        return Err(BxError::with_status(
+            StatusCode::NOT_FOUND,
+            "order_not_found",
+            "Заказ не найден",
+        ));
+    }
+
+    let (buyer, jar) = super::cart::ensure_buyer(&state, jar).await?;
+    let ids: Vec<i64> = order.items.iter().map(|item| item.product_id).collect();
+    let infos = crate::catalog::load(&state.db, &ids).await?;
+    let (mut added, mut skipped) = (0, 0);
+    for item in &order.items {
+        let available = infos
+            .get(&item.product_id)
+            .is_some_and(crate::catalog::sellable);
+        if !available {
+            skipped += 1;
+            continue;
+        }
+        let result = crate::cart::repo::add(
+            &state.db,
+            buyer,
+            item.product_id,
+            item.store_id,
+            item.quantity,
+            &item.name,
+            &item.props,
+        )
+        .await;
+        if result.is_ok() {
+            added += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+
+    Ok((
+        jar,
+        success(json!({ "orderId": id, "added": added, "skipped": skipped })),
+    )
+        .into_response())
 }
 
 #[cfg(test)]

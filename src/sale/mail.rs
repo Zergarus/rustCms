@@ -39,8 +39,20 @@ fn quantity(q: f64) -> String {
     }
 }
 
+/// Свойство заказа по коду (без учёта регистра).
+fn by_code(o: &OrderView, code: &str) -> Option<String> {
+    o.properties
+        .iter()
+        .find(|p| p.code.eq_ignore_ascii_case(code) && !p.value.is_empty())
+        .map(|p| p.value.clone())
+}
+
 /// Поля почтового события заказа (`#ORDER_ID#`, `#PRICE#`, `#ORDER_LIST#`…).
-pub fn order_fields(o: &OrderView, sale_email: &str) -> HashMap<String, String> {
+pub fn order_fields(
+    o: &OrderView,
+    sale_email: &str,
+    store: Option<&str>,
+) -> HashMap<String, String> {
     let prop = |pick: fn(&repo::OrderPropertyValue) -> bool| {
         o.properties
             .iter()
@@ -49,6 +61,14 @@ pub fn order_fields(o: &OrderView, sale_email: &str) -> HashMap<String, String> 
     };
     let email = prop(|p| p.is_email).unwrap_or_else(|| o.user_email.clone());
     let user = prop(|p| p.is_payer).unwrap_or_else(|| o.user_name.clone());
+    let phone = prop(|p| p.is_phone)
+        .or_else(|| by_code(o, "PHONE"))
+        .unwrap_or_default();
+    let fio = prop(|p| p.is_payer).unwrap_or_else(|| o.user_name.clone());
+    // Поля адреса и склада, которых не хватало письму администратора.
+    let city = by_code(o, "CITY").unwrap_or_default();
+    let address = by_code(o, "ADDRESS").unwrap_or_default();
+    let store = store.unwrap_or_default().to_string();
     let list: Vec<String> = o
         .items
         .iter()
@@ -99,6 +119,12 @@ pub fn order_fields(o: &OrderView, sale_email: &str) -> HashMap<String, String> 
             money(o.delivery_price, &o.currency),
         ),
         ("EMAIL".to_string(), email),
+        ("FIO".to_string(), fio),
+        ("PHONE".to_string(), phone),
+        ("CITY".to_string(), city),
+        ("ADDRESS".to_string(), address),
+        ("STORE".to_string(), store),
+        ("USER_DESCRIPTION".to_string(), o.user_comment.clone()),
         ("BCC".to_string(), sale_email.to_string()),
         ("SALE_EMAIL".to_string(), sale_email.to_string()),
         ("ORDER_LIST".to_string(), list.join("\n")),
@@ -122,7 +148,20 @@ pub async fn notify(state: &AppState, event: &str, order_id: i64) {
         )
         .fetch_optional(&state.db)
         .await?;
-        let fields = order_fields(&order, sale_email.as_deref().unwrap_or_default());
+        let store: Option<String> = match order.shipment.as_ref().and_then(|s| s.store_id) {
+            Some(id) => {
+                sqlx::query_scalar("SELECT name FROM catalog_stores WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&state.db)
+                    .await?
+            }
+            None => None,
+        };
+        let fields = order_fields(
+            &order,
+            sale_email.as_deref().unwrap_or_default(),
+            store.as_deref(),
+        );
         crate::mail::send_event(&state.db, &state.config, event, &fields).await
     }
     .await;
@@ -214,7 +253,7 @@ mod tests {
 
     #[test]
     fn order_fields_like_bitrix() {
-        let f = order_fields(&view(), "shop@transopt.net");
+        let f = order_fields(&view(), "shop@transopt.net", None);
         assert_eq!(f["ORDER_ID"], "42");
         assert_eq!(f["ORDER_REAL_ID"], "42");
         assert_eq!(f["ORDER_ACCOUNT_NUMBER_ENCODE"], "42");
@@ -249,7 +288,7 @@ mod tests {
             prop("PRODUCT.XML_ID", "Product XML_ID", "PX1"),
             prop("CATALOG.XML_ID", "Catalog XML_ID", "catalog"),
         ];
-        let f = order_fields(&v, "");
+        let f = order_fields(&v, "", None);
         assert_eq!(
             f["ORDER_LIST"],
             "Масло ATF (4 л) (Объём: 4 л; Бренд: Mobil) - 1 шт.: 594.22 руб.\nКомплект шариков - 1 шт.: 500 руб."
@@ -260,9 +299,48 @@ mod tests {
     fn order_fields_fallback_to_user() {
         let mut v = view();
         v.properties.clear();
-        let f = order_fields(&v, "");
+        let f = order_fields(&v, "", None);
         assert_eq!(f["EMAIL"], "user@b.ru");
         assert_eq!(f["ORDER_USER"], "Профиль");
+    }
+
+    /// Поля письма администратору: адрес, телефон, склад и ФИО.
+    #[test]
+    fn admin_mail_fields() {
+        let mut v = view();
+        v.properties.push(crate::sale::repo::OrderPropertyValue {
+            property_id: 10,
+            code: "CITY".into(),
+            name: "Город".into(),
+            value: "Москва".into(),
+            is_email: false,
+            is_phone: false,
+            is_payer: false,
+        });
+        v.properties.push(crate::sale::repo::OrderPropertyValue {
+            property_id: 11,
+            code: "ADDRESS".into(),
+            name: "Адрес".into(),
+            value: "ул. Ленина, 1".into(),
+            is_email: false,
+            is_phone: false,
+            is_payer: false,
+        });
+        v.properties.push(crate::sale::repo::OrderPropertyValue {
+            property_id: 12,
+            code: "PHONE".into(),
+            name: "Телефон".into(),
+            value: "+7 900 000-00-00".into(),
+            is_email: false,
+            is_phone: true,
+            is_payer: false,
+        });
+        let f = order_fields(&v, "", Some("Склад на Ленина"));
+        assert_eq!(f["CITY"], "Москва");
+        assert_eq!(f["ADDRESS"], "ул. Ленина, 1");
+        assert_eq!(f["PHONE"], "+7 900 000-00-00");
+        assert_eq!(f["STORE"], "Склад на Ленина");
+        assert_eq!(f["FIO"], f["ORDER_USER"]);
     }
 
     /// В `SALE_NEW_ORDER` Битрикса поля скидки нет — скидка позиции в строке состава.
@@ -272,7 +350,7 @@ mod tests {
         v.items[0].quantity = 2.0;
         v.items[0].base_price = 694.22;
         v.items[0].discount_price = 100.0;
-        let f = order_fields(&v, "");
+        let f = order_fields(&v, "", None);
         assert_eq!(
             f["ORDER_LIST"],
             "Фильтр АКПП - 2 шт.: 594.22 руб. (скидка 200 руб.)\nКомплект шариков - 1 шт.: 500 руб."

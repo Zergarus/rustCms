@@ -118,3 +118,26 @@ project.payment_extensions.push(PaymentExtension {
 Факт оплаты ядро всё равно перепроверяет через `status` и сверяет сумму с
 `payments.sum`; данные, которые `start` вернул в `data`, приходят в
 `PaymentRef.data` в `status`.
+
+## Свои HTTP-маршруты
+
+Проекту не нужно форкать CMS ради собственного API (`/1c/api/*`, документы,
+вебхуки внешних сервисов). В `Project` есть `routes`:
+
+```rust
+use axum::{routing::{get, post}, Router, Json, extract::State, http::StatusCode};
+
+async fn users_discount(State(state): State<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
+    // State<AppState> даёт БД, настройки и реестры
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+let routes = Router::new()
+    .route("/1c/api/users/discount", post(users_discount));
+
+project.routes = Some(routes);
+```
+
+Маршруты монтируются в общий роутер до слоёв логирования. CORS, авторизация и
+rate-limit — на совести проекта: общие middleware админки и bxapi к ним не
+применяются.

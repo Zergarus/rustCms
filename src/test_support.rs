@@ -171,6 +171,22 @@ pub async fn user_cookie(db: &PgPool, login: &str, admin: bool) -> (i64, String)
     (user.id, format!("{}={token}", crate::auth::SESSION_COOKIE))
 }
 
+/// Пользователь и cookie витрины (таблица `site_sessions`, `CMS_SID`).
+pub async fn site_cookie(db: &PgPool, login: &str) -> (i64, String) {
+    let (user_id, _) = user_cookie(db, login, false).await;
+    let token = hex::encode(rand::random::<[u8; 32]>());
+    sqlx::query(
+        "INSERT INTO site_sessions (token_hash, user_id, expires_at)
+         VALUES ($1, $2, now() + interval '1 day')",
+    )
+    .bind(crate::bxapi::auth::token_hash(&token))
+    .bind(user_id)
+    .execute(db)
+    .await
+    .unwrap();
+    (user_id, format!("CMS_SID={token}"))
+}
+
 pub async fn admin_cookie(db: &PgPool) -> String {
     user_cookie(db, "smoke", true).await.1
 }

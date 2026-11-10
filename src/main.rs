@@ -27,6 +27,8 @@ mod payment;
 #[cfg(test)]
 mod payment_tests;
 #[cfg(test)]
+mod project_extension_tests;
+#[cfg(test)]
 mod register_tests;
 mod sale;
 mod seo;
@@ -229,7 +231,7 @@ fn cors_layer(config: &Config) -> CorsLayer {
 
 /// Роутер приложения: админка, наш API, bxapi и файлы.
 pub(crate) fn app(state: AppState) -> Router {
-    Router::new()
+    let mut app = Router::new()
         .route("/", get(|| async { Redirect::to("/admin") }))
         .route(
             "/payment/webhook/{code}",
@@ -249,9 +251,12 @@ pub(crate) fn app(state: AppState) -> Router {
                 HeaderValue::from_static("nosniff"),
             )),
         )
-        .merge(exchange::http::router())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .merge(exchange::http::router());
+    // Маршруты проекта монтируются до слоёв: они получают общее логирование.
+    if let Some(routes) = state.project.routes.clone() {
+        app = app.merge(routes);
+    }
+    app.layer(TraceLayer::new_for_http()).with_state(state)
 }
 
 async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
