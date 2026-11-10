@@ -15,6 +15,7 @@ mod palette;
 mod sections;
 mod seo;
 mod seo_sitemap;
+mod settings;
 pub(crate) mod shell;
 pub(crate) mod shop;
 mod sku;
@@ -60,6 +61,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         )
         .route("/seo/sitemap/{id}/delete", post(seo_sitemap::delete))
         .route("/seo/{kind}/{id}", get(seo::form).post(seo::save))
+        .route("/settings", get(settings::form).post(settings::save))
         .route("/logout", post(auth_pages::logout))
         .route(
             "/collections",

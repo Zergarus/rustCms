@@ -272,6 +272,13 @@ pub(crate) fn sections(user: &Access, ctx: &NavCtx) -> Vec<Section> {
             Mode::Cms,
         );
         add("modules", "Модули", "/admin/modules", "system", Mode::Cms);
+        add(
+            "settings",
+            "Настройки сайта",
+            "/admin/settings",
+            "system",
+            Mode::Cms,
+        );
     }
 
     if ctx.shop_enabled {

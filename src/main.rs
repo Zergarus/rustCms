@@ -26,6 +26,9 @@ mod sale;
 mod seo;
 #[cfg(test)]
 mod seo_tests;
+mod settings;
+#[cfg(test)]
+mod settings_tests;
 mod sitemap;
 #[cfg(test)]
 mod sitemap_tests;

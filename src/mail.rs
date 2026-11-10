@@ -10,6 +10,10 @@ use chrono::Utc;
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
     message::{Mailbox, header::ContentType},
+    transport::smtp::{
+        authentication::Credentials,
+        client::{Tls, TlsParameters},
+    },
 };
 use sqlx::{FromRow, PgPool};
 
@@ -146,32 +150,61 @@ pub async fn send_event(
             ContentType::TEXT_PLAIN
         };
         let message = builder.header(content_type).body(body)?;
-        deliver(config, event, message).await?;
+        deliver(db, config, event, message).await?;
         sent += 1;
     }
     Ok(sent)
 }
 
-async fn deliver(config: &Config, event: &str, message: Message) -> anyhow::Result<()> {
-    match &config.mail_smtp_url {
-        Some(url) => {
-            let transport = AsyncSmtpTransport::<Tokio1Executor>::from_url(url)
+/// SMTP из окружения (деплой) или из настроек в БД; `None` — письма пишутся в `.eml`.
+async fn transport(
+    db: &PgPool,
+    config: &Config,
+) -> anyhow::Result<Option<AsyncSmtpTransport<Tokio1Executor>>> {
+    if let Some(url) = &config.mail_smtp_url {
+        return Ok(Some(
+            AsyncSmtpTransport::<Tokio1Executor>::from_url(url)
                 .context("MAIL_SMTP_URL")?
-                .build();
-            transport.send(message).await.context("отправка письма")?;
-        }
-        None => {
-            tokio::fs::create_dir_all(&config.mail_dir).await?;
-            let name = format!(
-                "{}_{event}_{:08x}.eml",
-                Utc::now().format("%Y%m%d-%H%M%S"),
-                rand::random::<u32>()
-            );
-            let path = config.mail_dir.join(name);
-            tokio::fs::write(&path, message.formatted()).await?;
-            tracing::info!(path = %path.display(), event, "письмо сохранено (SMTP не настроен)");
-        }
+                .build(),
+        ));
     }
+    let Some(smtp) = crate::settings::smtp(db).await? else {
+        return Ok(None);
+    };
+    let mut builder =
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&smtp.host).port(smtp.port);
+    if !smtp.user.is_empty() {
+        builder = builder.credentials(Credentials::new(smtp.user.clone(), smtp.password.clone()));
+    }
+    let tls = match smtp.secure.as_str() {
+        "none" => Tls::None,
+        "tls" => Tls::Wrapper(TlsParameters::new(smtp.host.clone())?),
+        "starttls" => Tls::Required(TlsParameters::new(smtp.host.clone())?),
+        _ if smtp.port == 465 => Tls::Wrapper(TlsParameters::new(smtp.host.clone())?),
+        _ => Tls::Required(TlsParameters::new(smtp.host.clone())?),
+    };
+    Ok(Some(builder.tls(tls).build()))
+}
+
+async fn deliver(
+    db: &PgPool,
+    config: &Config,
+    event: &str,
+    message: Message,
+) -> anyhow::Result<()> {
+    if let Some(transport) = transport(db, config).await? {
+        transport.send(message).await.context("отправка письма")?;
+        return Ok(());
+    }
+    tokio::fs::create_dir_all(&config.mail_dir).await?;
+    let name = format!(
+        "{}_{event}_{:08x}.eml",
+        Utc::now().format("%Y%m%d-%H%M%S"),
+        rand::random::<u32>()
+    );
+    let path = config.mail_dir.join(name);
+    tokio::fs::write(&path, message.formatted()).await?;
+    tracing::info!(path = %path.display(), event, "письмо сохранено (SMTP не настроен)");
     Ok(())
 }
 
