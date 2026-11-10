@@ -4,7 +4,11 @@
 //! `mediagroup.bxapi`. Провайдер (ЮKassa, СБП, счёт) подключает проект через
 //! `PaymentExtension`; ядро хранит платёж и состояние оплаты.
 
-use axum::http::StatusCode;
+use axum::{
+    body::Bytes,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -13,8 +17,9 @@ use sqlx::{FromRow, PgPool, types::Json};
 
 use crate::{
     bxapi::{
-        BxError, auth,
-        project::{PaymentProvider, PaymentRef, PaymentStarted},
+        BxError, BxResult, auth,
+        project::{PaymentProvider, PaymentRef, PaymentStarted, PaymentState},
+        success,
     },
     state::AppState,
 };
@@ -393,4 +398,215 @@ async fn mark_paid(state: &AppState, order: &Order, payment: &Payment) -> Result
     }
     tx.commit().await?;
     Ok(paid)
+}
+
+/// `POST /payment/webhook/{code}`: уведомление провайдера.
+///
+/// Тело — только чтобы понять, о каком платеже речь; оплату подтверждает
+/// отдельный запрос к провайдеру, сумма сверяется.
+pub async fn webhook_handler(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> BxResult {
+    let payload = serde_json::from_slice(&body)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).to_string()));
+    Ok(success(webhook(&state, &code, &headers, &payload).await?))
+}
+
+async fn webhook(
+    state: &AppState,
+    code: &str,
+    headers: &HeaderMap,
+    payload: &Value,
+) -> Result<Value, BxError> {
+    let pay_system_id: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM pay_systems WHERE code = $1 AND active")
+            .bind(code)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some(pay_system_id) = pay_system_id else {
+        return Err(BxError::with_status(
+            StatusCode::NOT_FOUND,
+            "payment_webhook_unknown",
+            "Неизвестный платёжный провайдер",
+        ));
+    };
+    let Some(provider) = provider(state, Some(pay_system_id)) else {
+        return Err(BxError::with_status(
+            StatusCode::NOT_FOUND,
+            "payment_webhook_unknown",
+            "Неизвестный платёжный провайдер",
+        ));
+    };
+    let hook = provider
+        .webhook(state, payload, headers)
+        .await
+        .map_err(|error| {
+            tracing::warn!(code, ?error, "уведомление провайдера отклонено");
+            BxError::with_status(
+                StatusCode::FORBIDDEN,
+                "payment_webhook_rejected",
+                "Уведомление отклонено",
+            )
+        })?;
+
+    let payment: Option<Payment> = sqlx::query_as(
+        "SELECT id, pay_system_id, sum::float8 AS sum, currency, paid, data
+         FROM payments WHERE id = $1",
+    )
+    .bind(hook.payment_id)
+    .fetch_optional(&state.db)
+    .await?;
+    // Неизвестный платёж и повтор уведомления — успех: провайдеру нечего чинить.
+    let Some(payment) = payment.filter(|payment| !payment.paid) else {
+        return Ok(json!({ "success": true }));
+    };
+    let order = order_by_id(&state.db, payment_order_id(&state.db, payment.id).await?)
+        .await?
+        .ok_or_else(not_found)?;
+    if order.canceled {
+        return Ok(json!({ "success": true }));
+    }
+    let reference = reference(state, &order, &payment).await?;
+    let status = provider.status(state, &reference).await.map_err(|error| {
+        tracing::error!(
+            payment_id = payment.id,
+            ?error,
+            "провайдер не подтвердил статус"
+        );
+        BxError::new(
+            "payment_provider_failed",
+            "Платёжный провайдер временно недоступен",
+        )
+    })?;
+    apply_status(state, &order, &payment, status).await?;
+    Ok(json!({ "success": true }))
+}
+
+async fn payment_order_id(db: &PgPool, payment_id: i64) -> sqlx::Result<i64> {
+    sqlx::query_scalar("SELECT order_id FROM payments WHERE id = $1")
+        .bind(payment_id)
+        .fetch_one(db)
+        .await
+}
+
+async fn order_by_id(db: &PgPool, order_id: i64) -> sqlx::Result<Option<Order>> {
+    sqlx::query_as(
+        "SELECT id, user_id, status, account_number, price::float8 AS price, canceled, paid
+         FROM orders WHERE id = $1",
+    )
+    .bind(order_id)
+    .fetch_optional(db)
+    .await
+}
+
+/// Фиксирует оплату, только если провайдер подтвердил её и сумма совпала.
+async fn apply_status(
+    state: &AppState,
+    order: &Order,
+    payment: &Payment,
+    status: PaymentState,
+) -> Result<bool, BxError> {
+    if !status.paid {
+        return Ok(false);
+    }
+    if let Some(amount) = status.amount
+        && (amount - payment.sum).abs() > 0.01
+    {
+        tracing::warn!(
+            payment_id = payment.id,
+            amount,
+            sum = payment.sum,
+            "провайдер подтвердил другую сумму"
+        );
+        return Ok(false);
+    }
+    mark_paid(state, order, payment).await
+}
+
+/// Строка сверки: неоплаченный платёж с полями заказа.
+#[derive(FromRow)]
+struct ReconcileRow {
+    payment_id: i64,
+    pay_system_id: Option<i64>,
+    sum: f64,
+    currency: String,
+    data: Json<Value>,
+    order_id: i64,
+    order_status: String,
+    account_number: String,
+    order_price: f64,
+    canceled: bool,
+    order_paid: bool,
+}
+
+/// Фоновая сверка: подтверждает «забытые» оплаты у провайдера.
+pub async fn reconcile(state: &AppState) -> Result<usize, BxError> {
+    let rows: Vec<ReconcileRow> = sqlx::query_as(
+        "SELECT p.id AS payment_id, p.pay_system_id, p.sum::float8 AS sum, p.currency, p.data,
+                o.id AS order_id, o.status AS order_status, o.account_number,
+                o.price::float8 AS order_price, o.canceled, o.paid AS order_paid
+         FROM payments p
+         JOIN orders o ON o.id = p.order_id
+         WHERE NOT p.paid AND NOT o.canceled AND o.created_at > now() - interval '30 days'
+         ORDER BY p.id
+         LIMIT 50",
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut confirmed = 0;
+    for row in rows {
+        let Some(provider) = provider(state, row.pay_system_id) else {
+            continue;
+        };
+        let order = Order {
+            id: row.order_id,
+            user_id: None,
+            status: row.order_status,
+            account_number: row.account_number,
+            price: row.order_price,
+            canceled: row.canceled,
+            paid: row.order_paid,
+        };
+        let payment = Payment {
+            id: row.payment_id,
+            pay_system_id: row.pay_system_id,
+            sum: row.sum,
+            currency: row.currency,
+            paid: false,
+            data: row.data,
+        };
+        let reference = reference(state, &order, &payment).await?;
+        match provider.status(state, &reference).await {
+            Ok(status) => {
+                if apply_status(state, &order, &payment, status).await? {
+                    confirmed += 1;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    payment_id = payment.id,
+                    ?error,
+                    "сверка: провайдер не ответил"
+                );
+            }
+        }
+    }
+    Ok(confirmed)
+}
+
+/// Раз в 10 минут сверяет неоплаченные платежи.
+pub fn spawn(state: AppState) {
+    tokio::spawn(async move {
+        let mut timer = tokio::time::interval(std::time::Duration::from_secs(600));
+        loop {
+            timer.tick().await;
+            if let Err(error) = reconcile(&state).await {
+                tracing::warn!(?error, "фоновая сверка платежей не удалась");
+            }
+        }
+    });
 }

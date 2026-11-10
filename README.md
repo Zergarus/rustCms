@@ -139,7 +139,9 @@ cms import-bitrix 'mysql://user:pass@host:3306/db' --upload /path/to/site/upload
 
 `POST /api/v1/order/pay` (тело `{ "id": заказ }`) запускает оплату, `GET /api/v1/order/{id}/payment-channel` отдаёт состояние для опроса. Платёж создаётся при оформлении заказа, повторный `pay` переиспользует его и не списывает дважды. Гость доказывает доступ cookie `CMS_CHECKOUT` (ставится при `order/submit`, последние 10 заказов), владелец — сессией.
 
-Провайдер (ЮKassa, СБП, счёт) — код проекта: `PaymentExtension { pay_system_id, provider }` в `Project`, трейт `PaymentProvider` с двумя методами — `start` создаёт платёж у провайдера и отдаёт данные (`paymentUrl`, `qrPayload`, …), `status` опрашивает состояние. Без провайдера `pay` отвечает `payment_provider_missing`; `payment-channel` возвращает `pull: null` и фронт переходит на опрос. Оплата фиксируется в `payments`, `orders.paid` и истории статусов.
+Провайдер (ЮKassa, СБП, счёт) — код проекта: `PaymentExtension { pay_system_id, provider }` в `Project`, трейт `PaymentProvider` с тремя методами — `start` создаёт платёж у провайдера и отдаёт данные (`paymentUrl`, `qrPayload`, …), `status` опрашивает состояние, `webhook` проверяет подпись уведомления и говорит, о каком платеже речь.
+
+Уведомления: `POST /payment/webhook/{code}` (`code` — код платёжной системы). Тело уведомления не доказывает оплату: ядро перепроверяет статус и сумму у провайдера, иначе любой, зная id платежа, закрывал бы заказ. Раз в 10 минут фоновая сверка обходит неоплаченные платежи за 30 дней и подтверждает их у провайдера — оплата не теряется, если вкладку закрыли. Без провайдера `pay` отвечает `payment_provider_missing`; `payment-channel` возвращает `pull: null` и фронт переходит на опрос. Оплата фиксируется в `payments`, `orders.paid` и истории статусов.
 
 ## Корзина
 

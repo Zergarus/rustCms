@@ -15,7 +15,7 @@ use tower::ServiceExt;
 use crate::{
     bxapi::project::{
         BoxFuture, PaymentExtension, PaymentProvider, PaymentRef, PaymentStarted, PaymentState,
-        Project,
+        PaymentWebhook, Project,
     },
     payment,
 };
@@ -23,7 +23,10 @@ use crate::{
 struct Stub {
     starts: AtomicUsize,
     paid: Arc<AtomicBool>,
+    amount: Option<f64>,
     fail_status: bool,
+    webhook_payment: i64,
+    webhook_ok: bool,
     seen: Mutex<Vec<Value>>,
 }
 
@@ -32,7 +35,10 @@ impl Stub {
         Arc::new(Self {
             starts: AtomicUsize::new(0),
             paid: Arc::new(AtomicBool::new(paid)),
+            amount: None,
             fail_status: false,
+            webhook_payment: 0,
+            webhook_ok: true,
             seen: Mutex::new(Vec::new()),
         })
     }
@@ -61,12 +67,37 @@ impl PaymentProvider for Stub {
     ) -> BoxFuture<'a, Result<PaymentState, crate::bxapi::BxError>> {
         self.seen.lock().unwrap().push(payment.data.clone());
         let paid = self.paid.load(Ordering::SeqCst);
+        let amount = self.amount;
         let fail = self.fail_status;
         Box::pin(async move {
             if fail {
                 return Err(crate::bxapi::BxError::new("provider_down", "down"));
             }
-            Ok(PaymentState { paid, notice: None })
+            Ok(PaymentState {
+                paid,
+                amount,
+                notice: None,
+            })
+        })
+    }
+
+    fn webhook<'a>(
+        &'a self,
+        _state: &'a crate::state::AppState,
+        _payload: &'a Value,
+        _headers: &'a axum::http::HeaderMap,
+    ) -> BoxFuture<'a, Result<PaymentWebhook, crate::bxapi::BxError>> {
+        let ok = self.webhook_ok;
+        let payment_id = self.webhook_payment;
+        Box::pin(async move {
+            if !ok {
+                return Err(crate::bxapi::BxError::with_status(
+                    axum::http::StatusCode::FORBIDDEN,
+                    "bad_signature",
+                    "bad signature",
+                ));
+            }
+            Ok(PaymentWebhook { payment_id })
         })
     }
 }
@@ -389,4 +420,137 @@ async fn checkout_cookie_keeps_recent_tokens(db: PgPool) {
     assert_eq!(cookie.value(), "ccc,aaa,bbb");
     let cookie = payment::checkout_cookie(&state, &jar, "aaa");
     assert_eq!(cookie.value(), "aaa,bbb");
+}
+
+async fn payment_of(db: &PgPool, order_id: i64) -> (i64, f64) {
+    sqlx::query_as("SELECT id, sum::float8 FROM payments WHERE order_id = $1")
+        .bind(order_id)
+        .fetch_one(db)
+        .await
+        .unwrap()
+}
+
+/// Заказ, платёж и приложение с настроенным провайдером.
+async fn setup(db: &PgPool, paid: bool, amount: Option<f64>) -> (Router, i64, i64) {
+    pay_system(db).await;
+    let order_id = order(db).await;
+    let (payment_id, _sum) = payment_of(db, order_id).await;
+    let mut stub = Stub::new(paid);
+    {
+        let inner = Arc::get_mut(&mut stub).unwrap();
+        inner.amount = amount;
+        inner.webhook_payment = payment_id;
+    }
+    let mut state = crate::test_support::test_state(db.clone());
+    state.project = Arc::new(project_with(stub));
+    (crate::app(state), order_id, payment_id)
+}
+
+async fn webhook(app: &Router, code: &str, body: Value) -> (StatusCode, Value) {
+    let req = Request::post(format!("/payment/webhook/{code}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[sqlx::test]
+async fn webhook_confirms_payment_once(db: PgPool) {
+    let (app, order_id, _) = setup(&db, true, Some(100.0)).await;
+
+    let (status, json) = webhook(&app, "qr", json!({"event": "paid"})).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["data"]["success"], true);
+
+    let paid: bool = sqlx::query_scalar("SELECT paid FROM orders WHERE id = $1")
+        .bind(order_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(paid);
+
+    // Повтор уведомления идемпотентен: ни ошибки, ни второй записи истории.
+    webhook(&app, "qr", json!({"event": "paid"})).await;
+    let history: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM order_status_history
+         WHERE order_id = $1 AND comment LIKE 'Оплата получена%'",
+    )
+    .bind(order_id)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(history, 1);
+}
+
+#[sqlx::test]
+async fn webhook_body_is_not_proof_of_payment(db: PgPool) {
+    // Провайдер говорит «не оплачено», хотя в теле пришло paid:true.
+    let (app, order_id, _) = setup(&db, false, None).await;
+    let (status, json) = webhook(&app, "qr", json!({"paid": true})).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let paid: bool = sqlx::query_scalar("SELECT paid FROM orders WHERE id = $1")
+        .bind(order_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(!paid, "тело уведомления не подтверждает оплату");
+}
+
+#[sqlx::test]
+async fn webhook_amount_mismatch_is_rejected(db: PgPool) {
+    let (app, order_id, _) = setup(&db, true, Some(1.0)).await;
+    webhook(&app, "qr", json!({"paid": true})).await;
+
+    let paid: bool = sqlx::query_scalar("SELECT paid FROM orders WHERE id = $1")
+        .bind(order_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(!paid, "чужая сумма не закрывает заказ");
+}
+
+#[sqlx::test]
+async fn webhook_rejects_unknown_and_bad_signature(db: PgPool) {
+    let (app, _, _) = setup(&db, true, Some(100.0)).await;
+
+    let (status, json) = webhook(&app, "nope", json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(json["errors"][0]["code"], "payment_webhook_unknown");
+
+    // Подпись проверяет провайдер проекта; ошибка не раскрывает деталей.
+    let mut stub = Stub::new(true);
+    Arc::get_mut(&mut stub).unwrap().webhook_ok = false;
+    let mut state = crate::test_support::test_state(db.clone());
+    state.project = Arc::new(project_with(stub));
+    let strict = crate::app(state);
+    let (status, json) = webhook(&strict, "qr", json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+    assert_eq!(json["errors"][0]["code"], "payment_webhook_rejected");
+}
+
+#[sqlx::test]
+async fn reconcile_confirms_forgotten_payment(db: PgPool) {
+    let (_, order_id, _) = setup(&db, true, Some(100.0)).await;
+    let mut stub = Stub::new(true);
+    Arc::get_mut(&mut stub).unwrap().amount = Some(100.0);
+    let mut state = crate::test_support::test_state(db.clone());
+    state.project = Arc::new(project_with(stub));
+
+    let confirmed = payment::reconcile(&state).await.unwrap();
+    assert_eq!(confirmed, 1);
+    let paid: bool = sqlx::query_scalar("SELECT paid FROM orders WHERE id = $1")
+        .bind(order_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(paid);
 }

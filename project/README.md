@@ -82,7 +82,16 @@ impl PaymentProvider for YooKassa {
     fn status<'a>(&'a self, _state: &'a AppState, payment: &'a PaymentRef)
         -> BoxFuture<'a, Result<PaymentState, BxError>>
     {
-        Box::pin(async move { Ok(PaymentState { paid: false, notice: None }) })
+        Box::pin(async move { Ok(PaymentState { paid: false, amount: None, notice: None }) })
+    }
+
+    fn webhook<'a>(&'a self, _state: &'a AppState, payload: &'a Value, headers: &'a HeaderMap)
+        -> BoxFuture<'a, Result<PaymentWebhook, BxError>>
+    {
+        Box::pin(async move {
+            // проверка подписи/секрета; вернуть id нашего платежа
+            Ok(PaymentWebhook { payment_id: payment_id_from(payload)? })
+        })
     }
 }
 
@@ -98,3 +107,8 @@ project.payment_extensions.push(PaymentExtension {
 `external_id` сохраняется в `payments.external_id` и годится для запроса статуса.
 Ошибку из `start`/`status` ядро логирует и наружу отдаёт безопасный код
 `payment_provider_failed`; сбой `status` не ломает опрос.
+
+`webhook` вызывается публичным `POST /payment/webhook/{код системы}`. Тело —
+только чтобы найти платёж; факт оплаты ядро перепроверяет через `status`, а
+сумму сверяет с `payments.sum`. Поэтому в `start` кладите в `data` идентификатор
+платежа провайдера: он придёт в `PaymentRef.data` при `status` и `webhook`.

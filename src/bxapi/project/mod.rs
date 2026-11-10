@@ -335,7 +335,16 @@ pub struct PaymentStarted {
 #[derive(Clone, Debug)]
 pub struct PaymentState {
     pub paid: bool,
+    /// Сумма, которую подтвердил провайдер: ядро сверяет её с суммой платежа.
+    pub amount: Option<f64>,
     pub notice: Option<Value>,
+}
+
+/// Разобранное уведомление провайдера: о каком нашем платеже речь.
+/// Факт оплаты по нему не доверяем — ядро перепроверит статус у провайдера.
+#[derive(Clone, Debug)]
+pub struct PaymentWebhook {
+    pub payment_id: i64,
 }
 
 /// Платёжный провайдер проекта: ЮKassa, СБП, счёт и т.п.
@@ -351,6 +360,14 @@ pub trait PaymentProvider: Send + Sync {
         state: &'a AppState,
         payment: &'a PaymentRef,
     ) -> BoxFuture<'a, Result<PaymentState, BxError>>;
+
+    /// Проверяет подпись/секрет уведомления и говорит, о каком платеже речь.
+    fn webhook<'a>(
+        &'a self,
+        state: &'a AppState,
+        payload: &'a Value,
+        headers: &'a axum::http::HeaderMap,
+    ) -> BoxFuture<'a, Result<PaymentWebhook, BxError>>;
 }
 
 /// Привязка провайдера к платёжной системе.

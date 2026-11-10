@@ -231,6 +231,10 @@ fn cors_layer(config: &Config) -> CorsLayer {
 pub(crate) fn app(state: AppState) -> Router {
     Router::new()
         .route("/", get(|| async { Redirect::to("/admin") }))
+        .route(
+            "/payment/webhook/{code}",
+            axum::routing::post(payment::webhook_handler),
+        )
         .nest("/api", api::router().layer(cors_layer(&state.config)))
         .nest("/api/v1", bxapi::router().layer(cors_layer(&state.config)))
         .nest(
@@ -265,6 +269,7 @@ async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
     };
 
     currency::auto::spawn(state.clone());
+    payment::spawn(state.clone());
     stock::cleaner::spawn(state.clone());
     stock::rebuild::spawn(state.clone());
     let app = app(state.clone());
