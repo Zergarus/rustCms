@@ -1,5 +1,6 @@
 //! Админ-панель: серверный рендер (MiniJinja) + HTMX.
 
+mod audit;
 mod auth_pages;
 mod card;
 mod collections;
@@ -64,6 +65,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/seo/{kind}/{id}", get(seo::form).post(seo::save))
         .route("/settings", get(settings::form).post(settings::save))
         .route("/mail", get(mail::list).post(mail::create))
+        .route("/audit", get(audit::list))
         .route("/mail/new", get(mail::new_form))
         .route("/mail/{id}", get(mail::edit_form).post(mail::update))
         .route("/mail/{id}/delete", post(mail::delete))

@@ -40,6 +40,16 @@ pub async fn save(
         .into_response());
     }
     settings::save(&state.db, &input).await?;
+    crate::audit::record(
+        &state,
+        user.user.id,
+        &user.user.login,
+        "settings",
+        "settings",
+        "main",
+        "настройки сайта и SMTP",
+    )
+    .await;
     Ok(flash::redirect(
         "/admin/settings",
         "Настройки сохранены",

@@ -77,6 +77,16 @@ pub async fn create(
             .into_response());
     }
     let id = mail_templates::create(&state.db, &form).await?;
+    crate::audit::record(
+        &state,
+        user.user.id,
+        &user.user.login,
+        "create",
+        "mail_template",
+        id,
+        format!("шаблон {}", form.event_name.trim()),
+    )
+    .await;
     Ok(Redirect::to(&format!("/admin/mail/{id}")).into_response())
 }
 
@@ -93,6 +103,16 @@ pub async fn update(
             .into_response());
     }
     mail_templates::update(&state.db, id, &form).await?;
+    crate::audit::record(
+        &state,
+        user.user.id,
+        &user.user.login,
+        "update",
+        "mail_template",
+        id,
+        format!("шаблон {}", form.event_name.trim()),
+    )
+    .await;
     Ok(flash::redirect(
         &format!("/admin/mail/{id}"),
         "Шаблон сохранён",
@@ -107,6 +127,16 @@ pub async fn delete(
 ) -> AppResult<Response> {
     user.require(SETTINGS_MANAGE)?;
     mail_templates::delete(&state.db, id).await?;
+    crate::audit::record(
+        &state,
+        user.user.id,
+        &user.user.login,
+        "delete",
+        "mail_template",
+        id,
+        "шаблон удалён",
+    )
+    .await;
     Ok(flash::redirect(
         "/admin/mail",
         "Шаблон удалён",

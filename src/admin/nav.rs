@@ -283,6 +283,15 @@ pub(crate) fn sections(user: &Access, ctx: &NavCtx) -> Vec<Section> {
         );
         add("mail", "Письма", "/admin/mail", "system", Mode::Cms);
     }
+    if user.is_super() {
+        add(
+            "audit",
+            "Журнал действий",
+            "/admin/audit",
+            "system",
+            Mode::Cms,
+        );
+    }
 
     if ctx.shop_enabled {
         let shop = user.can(crate::access::SHOP_MANAGE);

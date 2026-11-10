@@ -1464,7 +1464,19 @@ pub async fn update(
     user.require_collection(element.collection_id, Level::Write)?;
     let ctx = load_collection(&state, element.collection_id).await?;
     require_parent_write(&user, &ctx.collection)?;
-    save(&state, user, ctx, Some(id), multipart).await
+    let (actor_id, actor_login) = (user.user.id, user.user.login.clone());
+    let response = save(&state, user, ctx, Some(id), multipart).await?;
+    crate::audit::record(
+        &state,
+        actor_id,
+        &actor_login,
+        "update",
+        "item",
+        id,
+        "запись изменена",
+    )
+    .await;
+    Ok(response)
 }
 
 /// Запрос из панели быстрого просмотра: HTMX с целью `#peek`.
@@ -1612,6 +1624,20 @@ pub async fn set_active(
     peek_item(&state, &user, id, Level::Write).await?;
     let active = form.active == "on";
     repo::set_item_active(&state.db, id, active).await?;
+    crate::audit::record(
+        &state,
+        user.user.id,
+        &user.user.login,
+        "update",
+        "item",
+        id,
+        if active {
+            "запись включена"
+        } else {
+            "запись отключена"
+        },
+    )
+    .await;
     if !is_peek(&headers) {
         return Ok(flash::redirect(
             &format!("/admin/items/{id}"),
@@ -1651,6 +1677,16 @@ pub async fn delete(
     Path(id): Path<i64>,
 ) -> AppResult<Redirect> {
     let element = delete_one(&state.db, &user, id).await?;
+    crate::audit::record(
+        &state,
+        user.user.id,
+        &user.user.login,
+        "delete",
+        "item",
+        element.id,
+        format!("удалена запись «{}»", element.name),
+    )
+    .await;
     if let Some(product) = element.product_id {
         // Предложение: назад на вкладку предложений товара
         return Ok(Redirect::to(&format!("/admin/items/{product}?tab=offers")));

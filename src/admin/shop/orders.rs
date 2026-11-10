@@ -666,6 +666,7 @@ pub async fn set_status(
     Form(form): Form<StatusForm>,
 ) -> AppResult<Response> {
     require_orders(&user)?;
+    let (actor_id, actor_login) = (user.user.id, user.user.login.clone());
     let from_peek = is_peek(&headers);
     match actions::change_status(
         &state.db,
@@ -688,6 +689,16 @@ pub async fn set_status(
         }
         Err(ActionError::Db(e)) => return Err(e.into()),
     }
+    crate::audit::record(
+        &state,
+        actor_id,
+        &actor_login,
+        "status",
+        "order",
+        id,
+        format!("статус → {}", form.status),
+    )
+    .await;
     if from_peek {
         return peek_panel(&state, id, Some(("Статус изменён", FlashKind::Ok)), true).await;
     }
@@ -710,6 +721,7 @@ pub async fn set_paid(
     Form(form): Form<FlagForm>,
 ) -> AppResult<Response> {
     require_orders(&user)?;
+    let (actor_id, actor_login) = (user.user.id, user.user.login.clone());
     let paid = form.value == "Y";
     match actions::change_paid(&state.db, id, paid).await {
         Ok(Some(event)) => send(&state, &event, id),
@@ -719,6 +731,20 @@ pub async fn set_paid(
         }
         Err(ActionError::Db(e)) => return Err(e.into()),
     }
+    crate::audit::record(
+        &state,
+        actor_id,
+        &actor_login,
+        "paid",
+        "order",
+        id,
+        if paid {
+            "оплачен"
+        } else {
+            "оплата снята"
+        },
+    )
+    .await;
     if is_peek(&headers) {
         return peek_panel(&state, id, Some(("Оплата сохранена", FlashKind::Ok)), true).await;
     }
@@ -732,12 +758,27 @@ pub async fn set_canceled(
     Form(form): Form<FlagForm>,
 ) -> AppResult<Response> {
     require_orders(&user)?;
+    let (actor_id, actor_login) = (user.user.id, user.user.login.clone());
     let cancel = form.value == "Y";
     match actions::change_canceled(&state.db, id, cancel, form.reason.trim()).await {
         Ok(event) => {
             if let Some(event) = event {
                 send(&state, &event, id);
             }
+            crate::audit::record(
+                &state,
+                actor_id,
+                &actor_login,
+                "cancel",
+                "order",
+                id,
+                if cancel {
+                    format!("отмена: {}", form.reason.trim())
+                } else {
+                    "отмена снята".to_string()
+                },
+            )
+            .await;
             Ok(back(id, "", "Отмена заказа сохранена"))
         }
         Err(ActionError::NotFound) => Ok(back(id, "", "Отмена заказа сохранена")),

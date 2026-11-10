@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% set section = "system" %}
+{% block title %}Журнал действий{% endblock %}
+{% block content %}
+<div class="page-head"><h1>Журнал действий</h1></div>
+<form class="card" method="get" action="/admin/audit">
+  <label>Сущность<input name="entity" value="{{ filters.entity }}" placeholder="item, order, settings"></label>
+  <label>Пользователь<input name="login" value="{{ filters.login }}" placeholder="логин"></label>
+  <button class="btn" type="submit">Показать</button>
+</form>
+{% if entries %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>Когда</th><th>Кто</th><th>Действие</th><th>Объект</th><th>Что</th></tr></thead>
+    <tbody>
+      {% for entry in entries %}
+      <tr>
+        <td>{{ entry.created_at }}</td>
+        <td>{{ entry.user_login }}</td>
+        <td><code>{{ entry.action }}</code></td>
+        <td>{{ entry.entity }}{% if entry.entity_id %} #{{ entry.entity_id }}{% endif %}</td>
+        <td>{{ entry.summary }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card"><p>Записей нет.</p></div>
+{% endif %}
+{% endblock %}

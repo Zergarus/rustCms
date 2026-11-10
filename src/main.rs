@@ -2,6 +2,9 @@ mod access;
 mod admin;
 mod api;
 mod apikeys;
+mod audit;
+#[cfg(test)]
+mod audit_tests;
 mod auth;
 mod bxapi;
 mod cart;
