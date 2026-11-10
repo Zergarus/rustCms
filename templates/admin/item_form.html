@@ -104,6 +104,12 @@
           {{ file_list(key, multi[key]) }}
           <input type="file" name="upload_{{ key }}" {% if p.multiple %}multiple{% endif %}>
         </div>
+      {% elif p.kind == "blocks" %}
+        <div class="field">
+          <span class="field-label">{{ p.name }}{% if p.is_required %} *{% endif %}</span>
+          <textarea name="{{ key }}" class="blocks-input" data-collection="{{ collection.id }}" rows="6">{{ form[key] }}</textarea>
+          <small>Блоки сохраняются как JSON; редактор подключается скриптом.</small>
+        </div>
       {% else %}
         <label>{{ p.name }}{% if p.is_required %} *{% endif %}
           {% if p.kind == "list" %}
