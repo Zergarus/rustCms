@@ -1,5 +1,6 @@
 //! Коллекции — настраиваемые типы контента (аналог коллекций Битрикса).
 
+pub mod blocks;
 pub mod fields;
 pub mod repo;
 pub mod sku;
