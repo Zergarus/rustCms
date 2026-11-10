@@ -23,8 +23,8 @@
       <input name="max_use" type="number" min="0" value="{{ add.max_use }}">
     </label>
     <div class="grid-2">
-      <label>Начало активности <input name="active_from" type="datetime-local" value="{{ add.active_from }}"></label>
-      <label>Окончание активности <input name="active_to" type="datetime-local" value="{{ add.active_to }}"></label>
+      <label>Начало активности <input name="active_from" value="{{ add.active_from }}" placeholder="ДД.ММ.ГГГГ ЧЧ:ММ"></label>
+      <label>Окончание активности <input name="active_to" value="{{ add.active_to }}" placeholder="ДД.ММ.ГГГГ ЧЧ:ММ"></label>
     </div>
     <label>ID пользователя <small>пусто — любому покупателю</small>
       <input name="user_id" value="{{ add.user_id }}">
@@ -49,8 +49,8 @@
       <input name="max_use" type="number" min="0" value="{{ generate.max_use }}">
     </label>
     <div class="grid-2">
-      <label>Начало активности <input name="active_from" type="datetime-local" value="{{ generate.active_from }}"></label>
-      <label>Окончание активности <input name="active_to" type="datetime-local" value="{{ generate.active_to }}"></label>
+      <label>Начало активности <input name="active_from" value="{{ generate.active_from }}" placeholder="ДД.ММ.ГГГГ ЧЧ:ММ"></label>
+      <label>Окончание активности <input name="active_to" value="{{ generate.active_to }}" placeholder="ДД.ММ.ГГГГ ЧЧ:ММ"></label>
     </div>
     <div class="form-actions"><button class="btn primary" type="submit">Сгенерировать</button></div>
   </form>

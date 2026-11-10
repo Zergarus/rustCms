@@ -9,7 +9,7 @@ use axum::{
     extract::{Path, Query, State},
     response::{Html, IntoResponse, Redirect, Response},
 };
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use minijinja::context;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -83,18 +83,28 @@ fn shown_date(dt: Option<DateTime<Utc>>) -> String {
 }
 
 fn parse_date(raw: &str, label: &str, errors: &mut Vec<String>) -> Option<DateTime<Utc>> {
-    match raw.trim() {
-        "" => None,
-        raw => match NaiveDateTime::parse_from_str(raw, DATETIME_FORMAT) {
-            Ok(dt) => dt
-                .and_local_timezone(msk())
-                .single()
-                .map(|d| d.with_timezone(&Utc)),
-            Err(_) => {
-                errors.push(format!("{label}: неверная дата"));
-                None
-            }
-        },
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    // `ДД.ММ.ГГГГ ЧЧ:ММ`, `ДД.ММ.ГГГГ` и старый ISO `ГГГГ-ММ-ДДTЧЧ:ММ`.
+    let parsed = NaiveDateTime::parse_from_str(raw, "%d.%m.%Y %H:%M")
+        .or_else(|_| NaiveDateTime::parse_from_str(raw, DATETIME_FORMAT))
+        .ok()
+        .or_else(|| {
+            NaiveDate::parse_from_str(raw, "%d.%m.%Y")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+        });
+    match parsed {
+        Some(dt) => dt
+            .and_local_timezone(msk())
+            .single()
+            .map(|d| d.with_timezone(&Utc)),
+        None => {
+            errors.push(format!("{label}: ожидается ДД.ММ.ГГГГ ЧЧ:ММ"));
+            None
+        }
     }
 }
 
@@ -2169,6 +2179,23 @@ mod tests {
 
     use crate::smoke_tests::{get, post_form};
     use crate::test_support::{admin_cookie, content_fixture, permitted_cookie, test_state};
+
+    #[test]
+    fn parse_date_accepts_ru_and_iso() {
+        let mut errors = Vec::new();
+        let ru = super::parse_date("27.09.2026 10:30", "Начало", &mut errors)
+            .expect("дата ДД.ММ.ГГГГ ЧЧ:ММ");
+        assert_eq!(
+            ru.with_timezone(&super::msk())
+                .format("%d.%m.%Y %H:%M")
+                .to_string(),
+            "27.09.2026 10:30"
+        );
+        let iso = super::parse_date("2026-09-27T10:30", "Начало", &mut errors).unwrap();
+        assert_eq!(iso, ru);
+        assert!(super::parse_date("вчера", "Начало", &mut errors).is_none());
+        assert!(!errors.is_empty());
+    }
 
     fn app(db: &PgPool) -> axum::Router {
         crate::app(test_state(db.clone()))
