@@ -9,7 +9,7 @@ use minijinja::context;
 
 use super::{flash, render};
 use crate::{
-    access::Access,
+    access::{Access, SETTINGS_MANAGE},
     error::AppResult,
     settings::{self, SettingsForm},
     state::AppState,
@@ -19,7 +19,7 @@ pub async fn form(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
 ) -> AppResult<Html<String>> {
-    user.require_super()?;
+    user.require(SETTINGS_MANAGE)?;
     let settings = settings::load(&state.db).await?;
     render(&state, "settings.html", context! { user, settings })
 }
@@ -29,7 +29,7 @@ pub async fn save(
     Extension(user): Extension<Access>,
     Form(input): Form<SettingsForm>,
 ) -> AppResult<Response> {
-    user.require_super()?;
+    user.require(SETTINGS_MANAGE)?;
     if let Err(error) = input.validate() {
         let settings = settings::load(&state.db).await?;
         return Ok(render(

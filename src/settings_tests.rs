@@ -94,14 +94,28 @@ async fn settings_invalid_port_is_not_saved(db: PgPool) {
 }
 
 #[sqlx::test]
-async fn settings_require_super(db: PgPool) {
+async fn settings_require_permission(db: PgPool) {
     let app = crate::app(crate::test_support::test_state(db.clone()));
-    let cookie = crate::test_support::permitted_cookie(&db, "manager", &[]).await;
 
+    // Без права — 403 на чтение и запись.
+    let cookie = crate::test_support::permitted_cookie(&db, "manager", &[]).await;
     let (status, _, _) = crate::test_support::get_raw(&app, "/admin/settings", &cookie).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let status = save(&app, &cookie, &[("site_name", "Взлом")]).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Право «Настройки сайта и письма» открывает обе страницы.
+    let cookie = crate::test_support::permitted_cookie(&db, "editor", &["settings.manage"]).await;
+    let (status, _, _) = crate::test_support::get_raw(&app, "/admin/settings", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = crate::test_support::get_raw(&app, "/admin/mail", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = crate::test_support::get_raw(&app, "/admin/users", &cookie).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "чужие разделы не открываются"
+    );
 }
 
 #[sqlx::test]

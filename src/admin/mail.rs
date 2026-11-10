@@ -9,7 +9,7 @@ use minijinja::context;
 
 use super::{flash, render};
 use crate::{
-    access::Access,
+    access::{Access, SETTINGS_MANAGE},
     error::AppResult,
     mail_templates::{self, Template, TemplateForm},
     state::AppState,
@@ -42,7 +42,7 @@ pub async fn list(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
 ) -> AppResult<Html<String>> {
-    user.require_super()?;
+    user.require(SETTINGS_MANAGE)?;
     let templates = mail_templates::list(&state.db).await?;
     render(&state, "mail_list.html", context! { user, templates })
 }
@@ -51,7 +51,7 @@ pub async fn new_form(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
 ) -> AppResult<Html<String>> {
-    user.require_super()?;
+    user.require(SETTINGS_MANAGE)?;
     page(&state, user, None, TemplateForm::default(), None).await
 }
 
@@ -60,7 +60,7 @@ pub async fn edit_form(
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
 ) -> AppResult<Html<String>> {
-    user.require_super()?;
+    user.require(SETTINGS_MANAGE)?;
     let template = mail_templates::get(&state.db, id).await?;
     page(&state, user, Some(id), form_of(&template), None).await
 }
@@ -70,7 +70,7 @@ pub async fn create(
     Extension(user): Extension<Access>,
     Form(form): Form<TemplateForm>,
 ) -> AppResult<Response> {
-    user.require_super()?;
+    user.require(SETTINGS_MANAGE)?;
     if let Err(error) = form.validate() {
         return Ok(page(&state, user, None, form, Some(error))
             .await?
@@ -86,7 +86,7 @@ pub async fn update(
     Path(id): Path<i64>,
     Form(form): Form<TemplateForm>,
 ) -> AppResult<Response> {
-    user.require_super()?;
+    user.require(SETTINGS_MANAGE)?;
     if let Err(error) = form.validate() {
         return Ok(page(&state, user, Some(id), form, Some(error))
             .await?
@@ -105,7 +105,7 @@ pub async fn delete(
     Extension(user): Extension<Access>,
     Path(id): Path<i64>,
 ) -> AppResult<Response> {
-    user.require_super()?;
+    user.require(SETTINGS_MANAGE)?;
     mail_templates::delete(&state.db, id).await?;
     Ok(flash::redirect(
         "/admin/mail",

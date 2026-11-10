@@ -272,6 +272,8 @@ pub(crate) fn sections(user: &Access, ctx: &NavCtx) -> Vec<Section> {
             Mode::Cms,
         );
         add("modules", "Модули", "/admin/modules", "system", Mode::Cms);
+    }
+    if user.can(crate::access::SETTINGS_MANAGE) {
         add(
             "settings",
             "Настройки сайта",

@@ -104,7 +104,7 @@ async fn invalid_template_is_not_saved(db: PgPool) {
 }
 
 #[sqlx::test]
-async fn mail_admin_requires_super(db: PgPool) {
+async fn mail_admin_requires_permission(db: PgPool) {
     let app = crate::app(crate::test_support::test_state(db.clone()));
     let cookie = crate::test_support::permitted_cookie(&db, "editor", &[]).await;
     let (status, _, _) = crate::test_support::get_raw(&app, "/admin/mail", &cookie).await;

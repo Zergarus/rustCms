@@ -22,6 +22,8 @@ pub const EXCHANGE_1C: &str = "exchange.1c";
 pub const EXCHANGE_1C_SALE: &str = "exchange.1c.sale";
 pub const DISCOUNTS_MANAGE: &str = "discounts.manage";
 pub const PURCHASE_INFO: &str = "catalog.purchase_info";
+/// Настройки сайта и почтовые шаблоны.
+pub const SETTINGS_MANAGE: &str = "settings.manage";
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct PermissionDef {
@@ -40,6 +42,11 @@ pub const PERMISSIONS: &[PermissionDef] = &[
         code: COLLECTIONS_MANAGE,
         name: "Управление коллекциями",
         description: "Создание и настройка коллекций и полей, изменение записей во всех коллекциях",
+    },
+    PermissionDef {
+        code: SETTINGS_MANAGE,
+        name: "Настройки сайта и письма",
+        description: "Название сайта, домен, отправитель, SMTP и почтовые шаблоны",
     },
     PermissionDef {
         code: USERS_MANAGE,
