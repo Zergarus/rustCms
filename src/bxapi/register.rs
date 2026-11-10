@@ -140,7 +140,7 @@ async fn consume(
     .await?)
 }
 
-pub async fn register(State(state): State<AppState>, body: Bytes) -> BxResult {
+pub async fn register(State(state): State<AppState>, jar: CookieJar, body: Bytes) -> BxResult {
     let body = parse_body(&body)?;
     let name = text(&body, "name");
     let email = text(&body, "email");
@@ -225,11 +225,16 @@ pub async fn register(State(state): State<AppState>, body: Bytes) -> BxResult {
     )
     .await;
 
-    Ok(success(json!({
-        "user": Value::Null,
-        "csrfToken": auth::csrf_token(),
-        "pending": true,
-    })))
+    let (token, jar) = auth::csrf_token_with_cookie(&state, jar);
+    Ok((
+        jar,
+        success(json!({
+            "user": Value::Null,
+            "csrfToken": token,
+            "pending": true,
+        })),
+    )
+        .into_response())
 }
 
 pub async fn confirm(
@@ -269,11 +274,8 @@ pub async fn confirm(
     forgive("confirm", &ip, &login);
 
     let (jar, user) = auth::sign_in(&state, jar, user_id, false).await?;
-    Ok((
-        jar,
-        success(json!({ "user": user, "csrfToken": auth::csrf_token() })),
-    )
-        .into_response())
+    let (token, jar) = auth::csrf_token_with_cookie(&state, jar);
+    Ok((jar, success(json!({ "user": user, "csrfToken": token }))).into_response())
 }
 
 pub async fn forgot(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> BxResult {
@@ -392,20 +394,26 @@ pub async fn reset(
         .await?;
     if !active {
         // Заблокированного администратором не авторизуем, но пароль уже сменён.
-        return Ok(success(json!({
-            "user": Value::Null,
-            "csrfToken": auth::csrf_token(),
-            "changed": true,
-            "authorized": false,
-        })));
+        let (token, jar) = auth::csrf_token_with_cookie(&state, jar);
+        return Ok((
+            jar,
+            success(json!({
+                "user": Value::Null,
+                "csrfToken": token,
+                "changed": true,
+                "authorized": false,
+            })),
+        )
+            .into_response());
     }
 
     let (jar, user) = auth::sign_in(&state, jar, user_id, false).await?;
+    let (token, jar) = auth::csrf_token_with_cookie(&state, jar);
     Ok((
         jar,
         success(json!({
             "user": user,
-            "csrfToken": auth::csrf_token(),
+            "csrfToken": token,
             "changed": true,
             "authorized": true,
         })),

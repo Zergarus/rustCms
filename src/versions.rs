@@ -9,7 +9,6 @@ use sqlx::{FromRow, PgPool, types::Json};
 use crate::{
     access::Access,
     error::{AppError, AppResult},
-    state::AppState,
 };
 
 #[derive(Clone, Debug, FromRow, Serialize)]
@@ -25,7 +24,7 @@ pub struct Revision {
 }
 
 /// Пишет снимок текущего состояния записи. Ошибка не ломает сохранение.
-pub async fn snapshot(state: &AppState, item_id: i64, action: &str, user_id: i64, login: &str) {
+pub async fn snapshot(db: &PgPool, item_id: i64, action: &str, user_id: i64, login: &str) {
     let result = sqlx::query(
         "INSERT INTO item_revisions (item_id, collection_id, user_id, user_login, action, data)
          SELECT i.id, i.collection_id, $2, $3, $4, to_jsonb(i)
@@ -35,7 +34,7 @@ pub async fn snapshot(state: &AppState, item_id: i64, action: &str, user_id: i64
     .bind(user_id)
     .bind(login)
     .bind(action)
-    .execute(&state.db)
+    .execute(db)
     .await;
     if let Err(error) = result {
         tracing::warn!(?error, item_id, "снимок версии записи не сохранён");
@@ -55,28 +54,66 @@ pub async fn history(db: &PgPool, item_id: i64) -> AppResult<Vec<Revision>> {
 }
 
 /// Возвращает запись к снимку и пишет версию восстановления.
-pub async fn restore(state: &AppState, user: &Access, revision_id: i64) -> AppResult<i64> {
+pub async fn restore(db: &PgPool, user: &Access, revision_id: i64) -> AppResult<i64> {
     let row: Option<(i64, Json<serde_json::Value>)> =
         sqlx::query_as("SELECT item_id, data FROM item_revisions WHERE id = $1")
             .bind(revision_id)
-            .fetch_optional(&state.db)
+            .fetch_optional(db)
             .await?;
     let (item_id, data) = row.ok_or(AppError::NotFound)?;
     let collection_id: i64 =
         sqlx::query_scalar("SELECT collection_id FROM collection_items WHERE id = $1")
             .bind(item_id)
-            .fetch_optional(&state.db)
+            .fetch_optional(db)
             .await?
             .ok_or(AppError::NotFound)?;
     user.require_collection(collection_id, crate::access::Level::Write)?;
+    let collection = crate::collection::repo::get_collection(db, collection_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    // Права на товар — как у обычной правки предложения.
+    if let Some(parent) = collection.product_collection_id {
+        user.require_collection(parent, crate::access::Level::Write)?;
+    }
 
+    // Код уникален в коллекции: занятый код даёт понятную ошибку, а не 500.
+    let code = data
+        .0
+        .get("code")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if !code.is_empty() {
+        let taken: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM collection_items WHERE collection_id = $1 AND code = $2 AND id <> $3",
+        )
+        .bind(collection_id)
+        .bind(code)
+        .bind(item_id)
+        .fetch_optional(db)
+        .await?;
+        if taken.is_some() {
+            return Err(AppError::BadRequest(format!(
+                "Код «{code}» уже занят другой записью"
+            )));
+        }
+    }
+
+    // Восстанавливаем строку целиком; ссылки на удалённые файлы/разделы/товар — NULL.
     sqlx::query(
         "UPDATE collection_items SET
              name = data->>'name',
              code = data->>'code',
+             xml_id = COALESCE(data->>'xml_id', ''),
              active = COALESCE((data->>'active')::boolean, TRUE),
              sort = COALESCE((data->>'sort')::int, 500),
-             section_id = NULLIF(data->>'section_id', '')::bigint,
+             section_id = (SELECT s.id FROM collection_sections s
+                           WHERE s.id = NULLIF(data->>'section_id', '')::bigint),
+             preview_picture_id = (SELECT f.id FROM files f
+                                   WHERE f.id = NULLIF(data->>'preview_picture_id', '')::bigint),
+             detail_picture_id = (SELECT f.id FROM files f
+                                  WHERE f.id = NULLIF(data->>'detail_picture_id', '')::bigint),
+             product_id = (SELECT i.id FROM collection_items i
+                           WHERE i.id = NULLIF(data->>'product_id', '')::bigint),
              preview_text = COALESCE(data->>'preview_text', ''),
              detail_text = COALESCE(data->>'detail_text', ''),
              published_at = (data->>'published_at')::timestamptz,
@@ -87,12 +124,12 @@ pub async fn restore(state: &AppState, user: &Access, revision_id: i64) -> AppRe
     )
     .bind(item_id)
     .bind(&data.0)
-    .execute(&state.db)
+    .execute(db)
     .await?;
 
-    snapshot(state, item_id, "restore", user.user.id, &user.user.login).await;
+    snapshot(db, item_id, "restore", user.user.id, &user.user.login).await;
     crate::audit::record(
-        state,
+        db,
         user.user.id,
         &user.user.login,
         "restore",

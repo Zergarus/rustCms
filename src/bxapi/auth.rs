@@ -58,6 +58,19 @@ pub(crate) fn csrf_token() -> String {
     hex::encode(rand::random::<[u8; 16]>())
 }
 
+/// Новый CSRF-токен и cookie к нему: ответы auth отдают токен, а guard требует,
+/// чтобы он совпал с cookie. Один источник для всех ответов с `csrfToken`.
+pub(crate) fn csrf_token_with_cookie(state: &AppState, jar: CookieJar) -> (String, CookieJar) {
+    let token = csrf_token();
+    let cookie = Cookie::build((super::CSRF_COOKIE, token.clone()))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .secure(state.config.cookie_secure)
+        .build();
+    (token, jar.add(cookie))
+}
+
 fn session_cookie(state: &AppState, token: String, remember: bool) -> Cookie<'static> {
     let mut cookie = Cookie::build((COOKIE, token))
         .path("/")
@@ -170,11 +183,8 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar, body: Bytes) -
     }
 
     let (jar, user) = sign_in(&state, jar, user_id, remember).await?;
-    Ok((
-        jar,
-        success(json!({ "user": user, "csrfToken": csrf_token() })),
-    )
-        .into_response())
+    let (token, jar) = csrf_token_with_cookie(&state, jar);
+    Ok((jar, success(json!({ "user": user, "csrfToken": token }))).into_response())
 }
 
 /// Открывает новую сессию посетителя: закрывает старую из cookie, чистит

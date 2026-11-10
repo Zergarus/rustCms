@@ -210,6 +210,18 @@ pub async fn handle(
         }
     }
 
+    // Правка ячейки — такое же изменение записи: версия и журнал.
+    crate::versions::snapshot(&state.db, row, "update", user.user.id, &user.user.login).await;
+    crate::audit::record(
+        &state.db,
+        user.user.id,
+        &user.user.login,
+        "update",
+        "item",
+        row,
+        "правка в списке",
+    )
+    .await;
     let resp = views::rerender(&state, &user, list_key, &expected, raw("query")).await?;
     Ok(views::with_toast(
         resp,

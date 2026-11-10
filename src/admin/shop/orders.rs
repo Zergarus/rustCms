@@ -667,6 +667,10 @@ pub async fn set_status(
 ) -> AppResult<Response> {
     require_orders(&user)?;
     let (actor_id, actor_login) = (user.user.id, user.user.login.clone());
+    let before: Option<String> = sqlx::query_scalar("SELECT status FROM orders WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
     let from_peek = is_peek(&headers);
     match actions::change_status(
         &state.db,
@@ -689,16 +693,22 @@ pub async fn set_status(
         }
         Err(ActionError::Db(e)) => return Err(e.into()),
     }
-    crate::audit::record(
-        &state,
-        actor_id,
-        &actor_login,
-        "status",
-        "order",
-        id,
-        format!("статус → {}", form.status),
-    )
-    .await;
+    let after: Option<String> = sqlx::query_scalar("SELECT status FROM orders WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
+    if after.as_deref() == Some(form.status.as_str()) && before.as_deref() != after.as_deref() {
+        crate::audit::record(
+            &state.db,
+            actor_id,
+            &actor_login,
+            "status",
+            "order",
+            id,
+            format!("статус → {}", form.status),
+        )
+        .await;
+    }
     if from_peek {
         return peek_panel(&state, id, Some(("Статус изменён", FlashKind::Ok)), true).await;
     }
@@ -722,6 +732,10 @@ pub async fn set_paid(
 ) -> AppResult<Response> {
     require_orders(&user)?;
     let (actor_id, actor_login) = (user.user.id, user.user.login.clone());
+    let before: Option<bool> = sqlx::query_scalar("SELECT paid FROM orders WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
     let paid = form.value == "Y";
     match actions::change_paid(&state.db, id, paid).await {
         Ok(Some(event)) => send(&state, &event, id),
@@ -731,20 +745,26 @@ pub async fn set_paid(
         }
         Err(ActionError::Db(e)) => return Err(e.into()),
     }
-    crate::audit::record(
-        &state,
-        actor_id,
-        &actor_login,
-        "paid",
-        "order",
-        id,
-        if paid {
-            "оплачен"
-        } else {
-            "оплата снята"
-        },
-    )
-    .await;
+    let after: Option<bool> = sqlx::query_scalar("SELECT paid FROM orders WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
+    if after == Some(paid) && before != after {
+        crate::audit::record(
+            &state.db,
+            actor_id,
+            &actor_login,
+            "paid",
+            "order",
+            id,
+            if paid {
+                "оплачен"
+            } else {
+                "оплата снята"
+            },
+        )
+        .await;
+    }
     if is_peek(&headers) {
         return peek_panel(&state, id, Some(("Оплата сохранена", FlashKind::Ok)), true).await;
     }
@@ -759,26 +779,37 @@ pub async fn set_canceled(
 ) -> AppResult<Response> {
     require_orders(&user)?;
     let (actor_id, actor_login) = (user.user.id, user.user.login.clone());
+    let before: Option<bool> = sqlx::query_scalar("SELECT canceled FROM orders WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
     let cancel = form.value == "Y";
     match actions::change_canceled(&state.db, id, cancel, form.reason.trim()).await {
         Ok(event) => {
             if let Some(event) = event {
                 send(&state, &event, id);
             }
-            crate::audit::record(
-                &state,
-                actor_id,
-                &actor_login,
-                "cancel",
-                "order",
-                id,
-                if cancel {
-                    format!("отмена: {}", form.reason.trim())
-                } else {
-                    "отмена снята".to_string()
-                },
-            )
-            .await;
+            let after: Option<bool> =
+                sqlx::query_scalar("SELECT canceled FROM orders WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&state.db)
+                    .await?;
+            if after == Some(cancel) && before != after {
+                crate::audit::record(
+                    &state.db,
+                    actor_id,
+                    &actor_login,
+                    "cancel",
+                    "order",
+                    id,
+                    if cancel {
+                        format!("отмена: {}", form.reason.trim())
+                    } else {
+                        "отмена снята".to_string()
+                    },
+                )
+                .await;
+            }
             Ok(back(id, "", "Отмена заказа сохранена"))
         }
         Err(ActionError::NotFound) => Ok(back(id, "", "Отмена заказа сохранена")),

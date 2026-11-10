@@ -103,3 +103,46 @@ async fn get_requests_do_not_need_token(db: PgPool) {
     let (status, _, json) = send(&app, req).await;
     assert_eq!(status, StatusCode::OK, "{json}");
 }
+
+/// Login отдаёт токен и cookie, и этого токена хватает следующему POST.
+#[sqlx::test]
+async fn login_token_is_accepted_afterwards(db: PgPool) {
+    crate::test_support::user_cookie(&db, "buyer", false).await;
+    let app = with_csrf(db.clone());
+    let (token, cookie) = token(&app).await;
+
+    let req = Request::post("/api/v1/auth/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::COOKIE, cookie)
+        .header(crate::bxapi::CSRF_HEADER, token)
+        .body(Body::from(
+            r#"{"login":"buyer","password":"password123","remember":false}"#,
+        ))
+        .unwrap();
+    let (status, headers, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let fresh = json["data"]["csrfToken"].as_str().unwrap().to_string();
+    let set_cookie: Vec<String> = headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::to_string)
+        .collect();
+    assert!(
+        set_cookie
+            .iter()
+            .any(|value| value.contains(&format!("{}={fresh}", crate::bxapi::CSRF_COOKIE))),
+        "cookie должна обновиться вместе с токеном: {set_cookie:?}"
+    );
+
+    let req = Request::post("/api/v1/auth/logout")
+        .header(
+            header::COOKIE,
+            format!("{}={fresh}", crate::bxapi::CSRF_COOKIE),
+        )
+        .header(crate::bxapi::CSRF_HEADER, fresh)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+}

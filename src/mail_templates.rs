@@ -146,9 +146,12 @@ pub async fn update(db: &PgPool, id: i64, form: &TemplateForm) -> AppResult<()> 
 }
 
 pub async fn delete(db: &PgPool, id: i64) -> AppResult<()> {
-    sqlx::query("DELETE FROM mail_templates WHERE id = $1")
+    let deleted = sqlx::query("DELETE FROM mail_templates WHERE id = $1")
         .bind(id)
         .execute(db)
         .await?;
+    if deleted.rows_affected() == 0 {
+        return Err(crate::error::AppError::NotFound);
+    }
     Ok(())
 }

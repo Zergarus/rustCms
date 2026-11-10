@@ -98,3 +98,29 @@ async fn audit_page_requires_super_and_shows_entries(db: PgPool) {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(audit_rows(&db, "settings").await, 1);
 }
+
+/// Повторная установка того же флага не пишет новую запись.
+#[sqlx::test]
+async fn repeated_paid_flag_is_logged_once(db: PgPool) {
+    let fixture = crate::test_support::order_fixture(&db).await;
+    let order_id = crate::test_support::place_order(&db, &fixture, None).await;
+    let app = crate::app(crate::test_support::test_state(db.clone()));
+    let cookie = crate::test_support::admin_cookie(&db).await;
+    for _ in 0..2 {
+        let (status, _, _) = crate::test_support::post_form_raw(
+            &app,
+            &format!("/admin/shop/orders/{order_id}/paid"),
+            &cookie,
+            "value=Y&reason=",
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+    }
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE entity = 'order' AND action = 'paid'",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+}

@@ -226,6 +226,7 @@ async fn currency_rates(db: &PgPool, config: &Config, args: &[String]) -> anyhow
 fn cors_layer(config: &Config) -> CorsLayer {
     let layer = CorsLayer::new().allow_methods(Any).allow_headers(Any);
     if config.cors_origins.iter().any(|o| o == "*") {
+        // С `*` браузер не разрешает credentials — это режим разработки.
         layer.allow_origin(Any)
     } else {
         let origins: Vec<HeaderValue> = config
@@ -233,7 +234,8 @@ fn cors_layer(config: &Config) -> CorsLayer {
             .iter()
             .filter_map(|o| o.parse().ok())
             .collect();
-        layer.allow_origin(origins)
+        // Cookie CSRF уходят только при разрешённых credentials.
+        layer.allow_origin(origins).allow_credentials(true)
     }
 }
 

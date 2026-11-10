@@ -78,7 +78,7 @@ pub async fn create(
     }
     let id = mail_templates::create(&state.db, &form).await?;
     crate::audit::record(
-        &state,
+        &state.db,
         user.user.id,
         &user.user.login,
         "create",
@@ -104,7 +104,7 @@ pub async fn update(
     }
     mail_templates::update(&state.db, id, &form).await?;
     crate::audit::record(
-        &state,
+        &state.db,
         user.user.id,
         &user.user.login,
         "update",
@@ -128,7 +128,7 @@ pub async fn delete(
     user.require(SETTINGS_MANAGE)?;
     mail_templates::delete(&state.db, id).await?;
     crate::audit::record(
-        &state,
+        &state.db,
         user.user.id,
         &user.user.login,
         "delete",

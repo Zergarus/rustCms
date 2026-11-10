@@ -1282,7 +1282,7 @@ async fn save(
             match saved {
                 Ok(saved_id) => {
                     crate::versions::snapshot(
-                        state,
+                        &state.db,
                         saved_id,
                         if item_id.is_some() {
                             "update"
@@ -1478,16 +1478,19 @@ pub async fn update(
     require_parent_write(&user, &ctx.collection)?;
     let (actor_id, actor_login) = (user.user.id, user.user.login.clone());
     let response = save(&state, user, ctx, Some(id), multipart).await?;
-    crate::audit::record(
-        &state,
-        actor_id,
-        &actor_login,
-        "update",
-        "item",
-        id,
-        "запись изменена",
-    )
-    .await;
+    // Ошибки валидации возвращают 200 с формой: повода для записи нет.
+    if response.status().is_redirection() {
+        crate::audit::record(
+            &state.db,
+            actor_id,
+            &actor_login,
+            "update",
+            "item",
+            id,
+            "запись изменена",
+        )
+        .await;
+    }
     Ok(response)
 }
 
@@ -1636,8 +1639,9 @@ pub async fn set_active(
     peek_item(&state, &user, id, Level::Write).await?;
     let active = form.active == "on";
     repo::set_item_active(&state.db, id, active).await?;
+    crate::versions::snapshot(&state.db, id, "update", user.user.id, &user.user.login).await;
     crate::audit::record(
-        &state,
+        &state.db,
         user.user.id,
         &user.user.login,
         "update",
@@ -1690,7 +1694,7 @@ pub async fn delete(
 ) -> AppResult<Redirect> {
     let element = delete_one(&state.db, &user, id).await?;
     crate::audit::record(
-        &state,
+        &state.db,
         user.user.id,
         &user.user.login,
         "delete",
@@ -1742,11 +1746,34 @@ pub(crate) async fn bulk_run(
             ctx.user
                 .require_collection(collection_id, Level::Write)
                 .map_err(|_| "нет права".to_string())?;
-            repo::set_item_active(db, item.id, action == "activate")
+            let changed = repo::set_item_active(db, item.id, action == "activate")
                 .await
-                .map_err(db_err)?
-                .then_some(())
-                .ok_or_else(|| NOT_FOUND.to_string())
+                .map_err(db_err)?;
+            if changed {
+                crate::versions::snapshot(
+                    db,
+                    item.id,
+                    "update",
+                    ctx.user.user.id,
+                    &ctx.user.user.login,
+                )
+                .await;
+                crate::audit::record(
+                    db,
+                    ctx.user.user.id,
+                    &ctx.user.user.login,
+                    "update",
+                    "item",
+                    item.id,
+                    if action == "activate" {
+                        "массово: запись включена".to_string()
+                    } else {
+                        "массово: запись отключена".to_string()
+                    },
+                )
+                .await;
+            }
+            changed.then_some(()).ok_or_else(|| NOT_FOUND.to_string())
         }
         "move" => {
             ctx.user
@@ -1762,14 +1789,45 @@ pub(crate) async fn bulk_run(
                 }
                 Some(sid)
             };
-            repo::move_item(db, item.id, section)
+            let changed = repo::move_item(db, item.id, section)
                 .await
-                .map_err(db_err)?
-                .then_some(())
-                .ok_or_else(|| NOT_FOUND.to_string())
+                .map_err(db_err)?;
+            if changed {
+                crate::versions::snapshot(
+                    db,
+                    item.id,
+                    "update",
+                    ctx.user.user.id,
+                    &ctx.user.user.login,
+                )
+                .await;
+                crate::audit::record(
+                    db,
+                    ctx.user.user.id,
+                    &ctx.user.user.login,
+                    "update",
+                    "item",
+                    item.id,
+                    "массово: запись перемещена",
+                )
+                .await;
+            }
+            changed.then_some(()).ok_or_else(|| NOT_FOUND.to_string())
         }
         "delete" => match delete_one(db, ctx.user, item.id).await {
-            Ok(_) => Ok(()),
+            Ok(element) => {
+                crate::audit::record(
+                    db,
+                    ctx.user.user.id,
+                    &ctx.user.user.login,
+                    "delete",
+                    "item",
+                    element.id,
+                    format!("массово: удалена запись «{}»", element.name),
+                )
+                .await;
+                Ok(())
+            }
             Err(AppError::NotFound) => Err(NOT_FOUND.into()),
             Err(AppError::Forbidden) => Err("нет права".into()),
             Err(AppError::Db(e)) => Err(db_err(e)),
@@ -1806,7 +1864,7 @@ pub async fn restore_version(
     Extension(user): Extension<Access>,
     Path((id, revision)): Path<(i64, i64)>,
 ) -> AppResult<Redirect> {
-    crate::versions::restore(&state, &user, revision).await?;
+    crate::versions::restore(&state.db, &user, revision).await?;
     Ok(Redirect::to(&format!("/admin/items/{id}")))
 }
 

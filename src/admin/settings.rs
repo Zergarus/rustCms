@@ -41,7 +41,7 @@ pub async fn save(
     }
     settings::save(&state.db, &input).await?;
     crate::audit::record(
-        &state,
+        &state.db,
         user.user.id,
         &user.user.login,
         "settings",

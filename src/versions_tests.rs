@@ -16,7 +16,7 @@ async fn snapshot_history_and_restore(db: PgPool) {
         .unwrap();
 
     // Первая версия — исходное имя.
-    versions::snapshot(&state, content.item_id, "create", user_id, "smoke").await;
+    versions::snapshot(&db, content.item_id, "create", user_id, "smoke").await;
     sqlx::query(
         "UPDATE collection_items SET name = 'Новое имя', field_values = '{\"x\":1}' WHERE id = $1",
     )
@@ -24,7 +24,7 @@ async fn snapshot_history_and_restore(db: PgPool) {
     .execute(&db)
     .await
     .unwrap();
-    versions::snapshot(&state, content.item_id, "update", user_id, "smoke").await;
+    versions::snapshot(&db, content.item_id, "update", user_id, "smoke").await;
 
     let history = versions::history(&db, content.item_id).await.unwrap();
     assert_eq!(history.len(), 2);
@@ -44,13 +44,14 @@ async fn snapshot_history_and_restore(db: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::SEE_OTHER, "восстановление версии");
-    let (name, values): (String, sqlx::types::Json<serde_json::Value>) =
-        sqlx::query_as("SELECT name, field_values FROM collection_items WHERE id = $1")
+    let (name, xml_id, values): (String, String, sqlx::types::Json<serde_json::Value>) =
+        sqlx::query_as("SELECT name, xml_id, field_values FROM collection_items WHERE id = $1")
             .bind(content.item_id)
             .fetch_one(&db)
             .await
             .unwrap();
     assert_eq!(name, "Первая новость");
+    assert_eq!(xml_id, "", "xml_id тоже восстанавливается");
     assert!(values.0.get("color").is_some(), "{values:?}");
 
     // Восстановление — новая версия в истории и запись в журнале действий.
@@ -146,4 +147,56 @@ async fn post_multipart(
         .await
         .unwrap();
     (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+/// Старый код занят другой записью — понятная ошибка, а не 500.
+#[sqlx::test]
+async fn restore_rejects_taken_code(db: PgPool) {
+    let content = crate::test_support::content_fixture(&db).await;
+    let app = crate::app(crate::test_support::test_state(db.clone()));
+    let cookie = crate::test_support::admin_cookie(&db).await;
+    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE login = 'smoke'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+
+    // Снимок с кодом pervaya, затем код записи меняется.
+    versions::snapshot(&db, content.item_id, "create", user_id, "smoke").await;
+    sqlx::query("UPDATE collection_items SET code = 'changed' WHERE id = $1")
+        .bind(content.item_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    // Код pervaya теперь занят другой записью.
+    sqlx::query(
+        "INSERT INTO collection_items (collection_id, code, name) VALUES ($1, 'pervaya', 'Другая')",
+    )
+    .bind(content.collection_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let revision: i64 =
+        sqlx::query_scalar("SELECT id FROM item_revisions WHERE item_id = $1 ORDER BY id LIMIT 1")
+            .bind(content.item_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    let (status, _, _) = crate::test_support::post_form_raw(
+        &app,
+        &format!(
+            "/admin/items/{}/revisions/{revision}/restore",
+            content.item_id
+        ),
+        &cookie,
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "занятый код");
+    let code: String = sqlx::query_scalar("SELECT code FROM collection_items WHERE id = $1")
+        .bind(content.item_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(code, "changed", "запись не изменилась");
 }

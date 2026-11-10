@@ -4,7 +4,7 @@
 
 use sqlx::{FromRow, PgPool};
 
-use crate::{error::AppResult, state::AppState};
+use crate::error::AppResult;
 
 #[derive(Clone, Debug, FromRow, serde::Serialize)]
 pub struct Entry {
@@ -21,7 +21,7 @@ pub struct Entry {
 /// Пишет запись журнала. `action` — `create` | `update` | `delete` | `status` |
 /// `paid` | `cancel` | `settings`, `entity` — `item`, `order`, `settings`, …
 pub async fn record(
-    state: &AppState,
+    db: &PgPool,
     user_id: i64,
     login: &str,
     action: &str,
@@ -39,7 +39,7 @@ pub async fn record(
     .bind(entity)
     .bind(entity_id.to_string())
     .bind(summary.into())
-    .execute(&state.db)
+    .execute(db)
     .await;
     if let Err(error) = result {
         tracing::warn!(?error, entity, action, "запись журнала действий не удалась");
