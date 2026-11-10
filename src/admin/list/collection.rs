@@ -56,6 +56,7 @@ fn col(code: &str, title: &str, expr: &str, ty: FieldType) -> Column {
         currency_expr: None,
         editable: None,
         edit_expr: None,
+        badge: false,
     }
 }
 

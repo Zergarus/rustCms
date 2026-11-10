@@ -507,6 +507,9 @@ pub async fn run_list(
                     let flag = match (c.ty, &v) {
                         (FieldType::Bool, Value::Bool(true)) => "ok",
                         (FieldType::Bool, Value::Bool(false)) => "none",
+                        _ if c.badge && !matches!(v, Value::Null) && v.as_str() != Some("") => {
+                            "badge"
+                        }
                         _ => "",
                     };
                     CellView {

@@ -86,6 +86,8 @@ pub struct Column {
     pub editable: Option<CellEdit>,
     /// SQL-выражение сырого значения для редактора (не подпись из `expr`).
     pub edit_expr: Option<String>,
+    /// Показывать значение меткой (badge), а не обычным текстом.
+    pub badge: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +178,7 @@ pub(crate) fn test_spec() -> ListSpec {
             currency_expr: None,
             editable: None,
             edit_expr: None,
+            badge: false,
         }
     }
     let mut columns = vec![

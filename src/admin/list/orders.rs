@@ -33,6 +33,7 @@ fn col(code: &str, title: &str, expr: &str, ty: FieldType) -> Column {
         currency_expr: None,
         editable: None,
         edit_expr: None,
+        badge: false,
     }
 }
 
@@ -88,16 +89,18 @@ pub(crate) async fn build_spec(db: &PgPool, can_share: bool) -> sqlx::Result<Lis
     price.currency_expr = Some("o.currency".into());
     let mut canceled = col("canceled", "Отменён", "o.canceled", FieldType::Bool);
     canceled.default = false;
+    let mut status = col(
+        "status",
+        "Статус",
+        "COALESCE(s.name, o.status)",
+        FieldType::Enum,
+    );
+    status.badge = true;
     let columns = vec![
         number,
         col("created_at", "Дата", "o.created_at", FieldType::Date),
         col("buyer", "Покупатель", BUYER_SQL, FieldType::Text),
-        col(
-            "status",
-            "Статус",
-            "COALESCE(s.name, o.status)",
-            FieldType::Enum,
-        ),
+        status,
         price,
         col("paid", "Оплата", "o.paid", FieldType::Bool),
         col("delivery", "Доставка", DELIVERY_SQL, FieldType::Text),
@@ -214,6 +217,17 @@ mod tests {
         let mut ids: Vec<i64> = rows.into_iter().map(|r| r.id).collect();
         ids.sort_unstable();
         ids
+    }
+
+    #[sqlx::test]
+    async fn status_column_is_badge(db: PgPool) {
+        let spec = build_spec(&db, false).await.unwrap();
+        let status = spec
+            .columns
+            .iter()
+            .find(|column| column.code == "status")
+            .expect("колонка статуса");
+        assert!(status.badge, "статус должен показываться меткой");
     }
 
     /// Старая форма фильтров: номер, статус, период, покупатель, оплата, отмена.
