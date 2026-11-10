@@ -96,7 +96,6 @@ use axum::{
     response::Redirect,
     routing::get,
 };
-use minijinja::{Environment, path_loader};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower_http::{
     cors::{Any, CorsLayer},
