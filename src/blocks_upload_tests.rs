@@ -136,3 +136,38 @@ async fn foreign_collection_is_forbidden(db: PgPool) {
         .unwrap();
     assert_eq!(before, after);
 }
+
+#[sqlx::test]
+async fn image_with_text_extension_is_rejected(db: PgPool) {
+    let content = crate::test_support::content_fixture(&db).await;
+    let app = crate::app(crate::test_support::test_state(db.clone()));
+    let cookie = crate::test_support::admin_cookie(&db).await;
+    let (status, body) = upload(
+        &app,
+        &cookie,
+        Some(content.collection_id),
+        "photo.txt",
+        "image/png",
+        PNG,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+}
+
+#[sqlx::test]
+async fn huge_file_is_rejected(db: PgPool) {
+    let content = crate::test_support::content_fixture(&db).await;
+    let app = crate::app(crate::test_support::test_state(db.clone()));
+    let cookie = crate::test_support::admin_cookie(&db).await;
+    let big = vec![0u8; 10 * 1024 * 1024 + 1024];
+    let (status, _) = upload(
+        &app,
+        &cookie,
+        Some(content.collection_id),
+        "big.png",
+        "image/png",
+        &big,
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}

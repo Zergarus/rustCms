@@ -98,6 +98,8 @@ fn property_value(state_enums: &[(i64, String, String)], prop: &Field, value: &V
             return None;
         }
         match prop.kind.as_str() {
+            // Блоки приходят от формы строкой JSON: проверяем и нормализуем как поле коллекции.
+            "blocks" => crate::collection::blocks::from_form(&raw).ok(),
             "list" => state_enums
                 .iter()
                 .find(|(_, xml, val)| *xml == raw || *val == raw)

@@ -3,7 +3,6 @@
 use axum::{
     Json,
     extract::{Multipart, Query, State},
-    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
@@ -59,6 +58,15 @@ pub async fn upload(
                 "файл не является изображением".into(),
             ));
         }
+        // Расширение берётся из имени: не даём сохранить картинку как .txt.
+        let image_extension = files::allowed_extension(&name).is_some_and(|extension| {
+            matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp")
+        });
+        if !image_extension {
+            return Err(AppError::Unprocessable(
+                "у файла должно быть расширение картинки (jpg, png, gif, webp)".into(),
+            ));
+        }
         let record = files::save(
             &state.db,
             &state.config.upload_dir,
@@ -68,7 +76,11 @@ pub async fn upload(
             &data,
         )
         .await
-        .map_err(|error| AppError::BadRequest(error.to_string()))?;
+        .map_err(|error| match error {
+            // Отказ по содержимому/имени — ошибка клиента, остальное — 500 без деталей.
+            files::SaveError::Rejected(message) => AppError::Unprocessable(message),
+            other => AppError::Other(anyhow::anyhow!(other)),
+        })?;
         return Ok(Json(json!({
             "status": "success",
             "data": { "path": record.url(), "id": record.id },
@@ -77,6 +89,3 @@ pub async fn upload(
     }
     Err(AppError::BadRequest("файл не передан".into()))
 }
-
-#[allow(dead_code)]
-const _: StatusCode = StatusCode::OK;

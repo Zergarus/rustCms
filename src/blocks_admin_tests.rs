@@ -112,6 +112,16 @@ async fn broken_json_is_field_error(db: PgPool) {
     blocks_field(&db, content.collection_id).await;
     let app = crate::app(crate::test_support::test_state(db.clone()));
     let cookie = crate::test_support::admin_cookie(&db).await;
+    // Прежнее значение поля не должно пострадать от битого JSON.
+    sqlx::query(
+        "UPDATE collection_items
+         SET field_values = field_values || '{\"blocks\": [{\"type\": \"divider\"}]}'
+         WHERE id = $1",
+    )
+    .bind(content.item_id)
+    .execute(&db)
+    .await
+    .unwrap();
     let section = content.section_id.to_string();
     let fields = [
         ("name", "Первая новость"),
@@ -131,11 +141,92 @@ async fn broken_json_is_field_error(db: PgPool) {
     assert_eq!(status, StatusCode::OK);
     assert!(page.contains("JSON-массив"), "{page}");
 
-    let stored: Option<Value> =
+    let stored: Value =
         sqlx::query_scalar("SELECT field_values->'blocks' FROM collection_items WHERE id = $1")
             .bind(content.item_id)
             .fetch_one(&db)
             .await
             .unwrap();
-    assert_eq!(stored, None, "значение не сохранилось");
+    assert_eq!(
+        stored,
+        json!([{ "type": "divider" }]),
+        "значение не изменилось"
+    );
+}
+
+#[sqlx::test]
+async fn too_many_blocks_is_error(db: PgPool) {
+    let content = crate::test_support::content_fixture(&db).await;
+    blocks_field(&db, content.collection_id).await;
+    let app = crate::app(crate::test_support::test_state(db.clone()));
+    let cookie = crate::test_support::admin_cookie(&db).await;
+    let blocks = json!(
+        (0..201)
+            .map(|_| json!({ "type": "divider" }))
+            .collect::<Vec<_>>()
+    )
+    .to_string();
+    let section = content.section_id.to_string();
+    let fields = [
+        ("name", "Первая новость"),
+        ("code", "pervaya"),
+        ("active", "on"),
+        ("sort", "500"),
+        ("section_id", section.as_str()),
+        ("prop_blocks", blocks.as_str()),
+    ];
+    let (status, page) = post_multipart(
+        &app,
+        &format!("/admin/items/{}", content.item_id),
+        &cookie,
+        &fields,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("не больше 200"), "{page}");
+}
+
+#[sqlx::test]
+async fn html_block_is_cleaned_and_escaped(db: PgPool) {
+    let content = crate::test_support::content_fixture(&db).await;
+    blocks_field(&db, content.collection_id).await;
+    let app = crate::app(crate::test_support::test_state(db.clone()));
+    let cookie = crate::test_support::admin_cookie(&db).await;
+    let blocks = json!([{
+        "type": "html",
+        "html": "<script>alert(1)</script><p>ok</p>"
+    }])
+    .to_string();
+    let section = content.section_id.to_string();
+    let fields = [
+        ("name", "Первая новость"),
+        ("code", "pervaya"),
+        ("active", "on"),
+        ("sort", "500"),
+        ("section_id", section.as_str()),
+        ("prop_blocks", blocks.as_str()),
+    ];
+    let (status, _) = post_multipart(
+        &app,
+        &format!("/admin/items/{}", content.item_id),
+        &cookie,
+        &fields,
+    )
+    .await;
+    assert!(status.is_redirection(), "{status}");
+
+    let stored: String = sqlx::query_scalar(
+        "SELECT field_values->'blocks'->0->>'html' FROM collection_items WHERE id = $1",
+    )
+    .bind(content.item_id)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(stored, "<p>ok</p>");
+
+    let (_, _, page) =
+        crate::test_support::get_raw(&app, &format!("/admin/items/{}", content.item_id), &cookie)
+            .await;
+    let page = String::from_utf8_lossy(&page);
+    assert!(!page.contains("<script>alert(1)</script>"), "{page}");
 }

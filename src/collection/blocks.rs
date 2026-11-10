@@ -22,7 +22,13 @@ pub fn from_form(raw: &str) -> Result<Value, String> {
     if !value.is_array() {
         return Err("Блоки: ожидается JSON-массив".to_string());
     }
-    Ok(Value::Array(normalize(&value)?))
+    let blocks = normalize(&value)?;
+    // Пустое поле — как у остальных: null, а не пустой массив.
+    Ok(if blocks.is_empty() {
+        Value::Null
+    } else {
+        Value::Array(blocks)
+    })
 }
 
 /// Проверяет, нормализует и очищает блоки; пустые отбрасывает.
@@ -116,7 +122,9 @@ fn normalize_block(item: &Value, number: usize) -> Result<Option<Value>, String>
                 let src = image
                     .get("image")
                     .and_then(Value::as_str)
-                    .unwrap_or("")
+                    .ok_or_else(|| {
+                        format!("Блок {number}: у картинки {} нет поля image", index + 1)
+                    })?
                     .trim();
                 if src.is_empty() {
                     continue;
@@ -357,6 +365,25 @@ mod tests {
     #[test]
     fn from_form_empty_is_null() {
         assert_eq!(from_form("  ").unwrap(), Value::Null);
+        assert_eq!(from_form("[]").unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn gallery_image_must_be_string() {
+        let err = norm(json!([{ "type": "gallery", "images": [{ "image": 123 }] }])).unwrap_err();
+        assert!(err.contains("image"), "{err}");
+    }
+
+    #[test]
+    fn html_drops_script_links() {
+        let out = norm(json!([{
+            "type": "html",
+            "html": "<a href=\"javascript:alert(1)\">x</a>"
+        }]))
+        .unwrap();
+        let html = out[0]["html"].as_str().unwrap_or_default();
+        assert!(!html.contains("javascript"), "{html}");
+        assert!(html.contains(">x</a>"), "{html}");
     }
 
     #[test]

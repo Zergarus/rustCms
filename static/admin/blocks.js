@@ -3,6 +3,7 @@
 (function () {
   "use strict";
 
+  var LIMIT = 200;
   var TYPES = [
     ["heading", "Заголовок"],
     ["text", "Текст"],
@@ -15,11 +16,13 @@
   ];
 
   function parse(raw) {
+    if (!raw || !raw.trim()) return { blocks: [], ok: true };
     try {
-      var value = JSON.parse(raw || "[]");
-      return Array.isArray(value) ? value : [];
+      var value = JSON.parse(raw);
+      if (!Array.isArray(value)) return { blocks: [], ok: false };
+      return { blocks: value, ok: true };
     } catch (error) {
-      return [];
+      return { blocks: [], ok: false };
     }
   }
 
@@ -31,16 +34,43 @@
   }
 
   function init(area) {
+    if (area.dataset.blocksReady === "1") return;
+    area.dataset.blocksReady = "1";
     var collection = area.dataset.collection;
-    var blocks = parse(area.value);
+    var parsed = parse(area.value);
+    var blocks = parsed.blocks;
     var root = el("div", "blocks");
+    var status = el("div", "blocks-status");
     area.after(root);
-    area.classList.add("blocks-source");
+    area.after(status);
+    var rawToggle = el("button", "blocks-btn", "JSON");
+    rawToggle.type = "button";
+    rawToggle.title = "Показать исходный JSON";
+    root.before(rawToggle);
+    if (parsed.ok) area.classList.add("blocks-source");
     var dragFrom = null;
 
     function save() {
       area.value = JSON.stringify(blocks);
     }
+
+    function hideRaw() {
+      area.classList.add("blocks-source");
+      root.hidden = false;
+      rawToggle.textContent = "JSON";
+    }
+
+    function showRaw() {
+      area.classList.remove("blocks-source");
+      root.hidden = true;
+      rawToggle.textContent = "Блоки";
+      area.focus();
+    }
+
+    rawToggle.addEventListener("click", function () {
+      if (area.classList.contains("blocks-source")) showRaw();
+      else hideRaw();
+    });
 
     function render() {
       root.textContent = "";
@@ -48,10 +78,13 @@
         root.appendChild(card(block, index));
       });
       root.appendChild(bar());
+      if (blocks.length >= LIMIT) {
+        status.textContent = "Достигнут предел: не больше " + LIMIT + " блоков.";
+      }
       save();
     }
 
-    function textField(label, value, onChange, multiline) {
+    function field(label, value, onChange, multiline) {
       var wrap = el("label", "blocks-field");
       wrap.appendChild(el("span", "blocks-label", label));
       var input = el(multiline ? "textarea" : "input");
@@ -65,27 +98,9 @@
       return wrap;
     }
 
-    function selectField(label, value, options, onChange) {
-      var wrap = el("label", "blocks-field");
-      wrap.appendChild(el("span", "blocks-label", label));
-      var select = el("select");
-      options.forEach(function (option) {
-        var item = el("option", null, option[1]);
-        item.value = option[0];
-        if (String(option[0]) === String(value)) item.selected = true;
-        select.appendChild(item);
-      });
-      select.addEventListener("change", function () {
-        onChange(select.value);
-        save();
-      });
-      wrap.appendChild(select);
-      return wrap;
-    }
-
-    function uploadField(block) {
+    function upload(onPath) {
       var wrap = el("div", "blocks-field");
-      wrap.appendChild(el("span", "blocks-label", "Картинка"));
+      wrap.appendChild(el("span", "blocks-label", "Загрузить картинку"));
       var file = el("input");
       file.type = "file";
       file.accept = "image/*";
@@ -102,7 +117,7 @@
           })
           .then(function (data) {
             if (data && data.data && data.data.path) {
-              block.image = data.data.path;
+              onPath(data.data.path);
               render();
             } else {
               alert("Не удалось загрузить картинку");
@@ -140,14 +155,12 @@
 
       var head = el("div", "blocks-head");
       head.appendChild(el("span", "blocks-grip", "⋮⋮"));
-      var title = TYPES.filter(function (type) {
+      var known = TYPES.filter(function (type) {
         return type[0] === block.type;
       })[0];
-      head.appendChild(el("strong", null, title ? title[1] : block.type));
-
+      head.appendChild(el("strong", null, known ? known[1] : "Неизвестный блок: " + block.type));
       var up = el("button", "blocks-btn", "↑");
       up.type = "button";
-      up.title = "Выше";
       up.addEventListener("click", function () {
         if (index === 0) return;
         blocks.splice(index - 1, 0, blocks.splice(index, 1)[0]);
@@ -155,7 +168,6 @@
       });
       var down = el("button", "blocks-btn", "↓");
       down.type = "button";
-      down.title = "Ниже";
       down.addEventListener("click", function () {
         if (index === blocks.length - 1) return;
         blocks.splice(index + 1, 0, blocks.splice(index, 1)[0]);
@@ -163,14 +175,12 @@
       });
       var copy = el("button", "blocks-btn", "⧉");
       copy.type = "button";
-      copy.title = "Дублировать";
       copy.addEventListener("click", function () {
         blocks.splice(index + 1, 0, JSON.parse(JSON.stringify(block)));
         render();
       });
       var remove = el("button", "blocks-btn danger", "✕");
       remove.type = "button";
-      remove.title = "Удалить";
       remove.addEventListener("click", function () {
         blocks.splice(index, 1);
         render();
@@ -181,51 +191,55 @@
       node.appendChild(head);
 
       var body = el("div", "blocks-body");
-      if (block.type === "heading") {
+      if (!known) {
         body.appendChild(
-          textField("Заголовок", block.heading, function (value) {
+          el("p", "blocks-note", "Блок неизвестного типа не редактируется — удалите его или исправьте JSON.")
+        );
+      } else if (block.type === "heading") {
+        body.appendChild(
+          field("Заголовок", block.heading, function (value) {
             block.heading = value;
           })
         );
         body.appendChild(
-          selectField(
-            "Уровень",
-            block.level || 2,
-            [["2", "H2"], ["3", "H3"], ["4", "H4"]],
-            function (value) {
-              block.level = Number(value);
-            }
-          )
+          field("Уровень (2, 3 или 4)", block.level || 2, function (value) {
+            block.level = Number(value) || 2;
+          })
         );
       } else if (block.type === "text") {
         body.appendChild(
-          textField("Текст (абзацы — пустой строкой)", block.text, function (value) {
+          field("Текст (абзацы — пустой строкой)", block.text, function (value) {
             block.text = value;
           }, true)
         );
       } else if (block.type === "image") {
-        body.appendChild(uploadField(block));
+        body.appendChild(upload(function (path) {
+          block.image = path;
+        }));
         body.appendChild(
-          textField("Путь", block.image, function (value) {
+          field("Путь", block.image, function (value) {
             block.image = value;
           })
         );
         body.appendChild(
-          textField("Alt", block.alt, function (value) {
+          field("Alt", block.alt, function (value) {
             block.alt = value;
           })
         );
         body.appendChild(
-          textField("Подпись", block.caption, function (value) {
+          field("Подпись", block.caption, function (value) {
             block.caption = value;
           })
         );
         body.appendChild(
-          textField("Ссылка", block.link, function (value) {
+          field("Ссылка", block.link, function (value) {
             block.link = value;
           })
         );
       } else if (block.type === "gallery") {
+        body.appendChild(upload(function (path) {
+          block.images = (block.images || []).concat([{ image: path }]);
+        }));
         var existing = block.images || [];
         var paths = existing
           .map(function (image) {
@@ -233,16 +247,16 @@
           })
           .join("\n");
         body.appendChild(
-          textField("Пути картинок, по одному в строке", paths, function (value) {
+          field("Пути картинок, по одному в строке", paths, function (value) {
             block.images = value
               .split("\n")
               .map(function (line, position) {
-                return line.trim() ? { image: line.trim(), base: existing[position] } : null;
+                return line.trim() ? { src: line.trim(), base: existing[position] } : null;
               })
               .filter(Boolean)
               .map(function (item) {
                 var base = item.base || {};
-                var image = { image: item.image };
+                var image = { image: item.src };
                 if (base.alt) image.alt = base.alt;
                 if (base.caption) image.caption = base.caption;
                 return image;
@@ -251,38 +265,29 @@
         );
       } else if (block.type === "quote") {
         body.appendChild(
-          textField("Цитата", block.quote, function (value) {
+          field("Цитата", block.quote, function (value) {
             block.quote = value;
           }, true)
         );
         body.appendChild(
-          textField("Автор", block.author, function (value) {
+          field("Автор", block.author, function (value) {
             block.author = value;
           })
         );
       } else if (block.type === "table") {
-        var rows = (block.rows || [])
-          .map(function (row) {
-            return row.join(" | ");
-          })
-          .join("\n");
         body.appendChild(
-          textField("Строки, ячейки через |", rows, function (value) {
-            block.rows = value
-              .split("\n")
-              .filter(function (line) {
-                return line.trim() !== "";
-              })
-              .map(function (line) {
-                return line.split("|").map(function (cell) {
-                  return cell.trim();
-                });
-              });
+          field("Строки — JSON: массив массивов", JSON.stringify(block.rows || [], null, 2), function (value) {
+            try {
+              var rows = JSON.parse(value);
+              if (Array.isArray(rows)) block.rows = rows;
+            } catch (error) {
+              /* оставляем прежние строки, пока JSON не станет валидным */
+            }
           }, true)
         );
       } else if (block.type === "html") {
         body.appendChild(
-          textField("HTML (очищается)", block.html, function (value) {
+          field("HTML (очищается при сохранении)", block.html, function (value) {
             block.html = value;
           }, true)
         );
@@ -302,6 +307,7 @@
         option.value = type[0];
         select.appendChild(option);
       });
+      select.disabled = blocks.length >= LIMIT;
       select.addEventListener("change", function () {
         if (!select.value) return;
         var block = { type: select.value };
@@ -316,13 +322,24 @@
     render();
   }
 
-  function start() {
-    document.querySelectorAll("textarea.blocks-input").forEach(init);
+  function start(rootNode) {
+    var scope = rootNode && rootNode.querySelectorAll ? rootNode : document;
+    var areas = [];
+    if (scope.matches && scope.matches("textarea.blocks-input")) areas.push(scope);
+    scope.querySelectorAll("textarea.blocks-input").forEach(function (area) {
+      areas.push(area);
+    });
+    areas.forEach(init);
   }
 
+  document.addEventListener("htmx:load", function (event) {
+    start(event.target);
+  });
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", start);
+    document.addEventListener("DOMContentLoaded", function () {
+      start(document);
+    });
   } else {
-    start();
+    start(document);
   }
 })();
