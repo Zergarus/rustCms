@@ -226,7 +226,8 @@
           })
         );
       } else if (block.type === "gallery") {
-        var paths = (block.images || [])
+        var existing = block.images || [];
+        var paths = existing
           .map(function (image) {
             return image.image || "";
           })
@@ -235,12 +236,16 @@
           textField("Пути картинок, по одному в строке", paths, function (value) {
             block.images = value
               .split("\n")
-              .map(function (line) {
-                return line.trim();
+              .map(function (line, position) {
+                return line.trim() ? { image: line.trim(), base: existing[position] } : null;
               })
               .filter(Boolean)
-              .map(function (src) {
-                return { image: src };
+              .map(function (item) {
+                var base = item.base || {};
+                var image = { image: item.image };
+                if (base.alt) image.alt = base.alt;
+                if (base.caption) image.caption = base.caption;
+                return image;
               });
           }, true)
         );
