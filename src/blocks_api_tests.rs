@@ -15,7 +15,10 @@ async fn post_json(app: &axum::Router, path: &str, body: Value) -> (StatusCode, 
     let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
         .await
         .unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 #[sqlx::test]

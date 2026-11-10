@@ -55,7 +55,9 @@ pub async fn upload(
             return Err(AppError::PayloadTooLarge);
         }
         if files::image_size(&data).is_none() {
-            return Err(AppError::Unprocessable("файл не является изображением".into()));
+            return Err(AppError::Unprocessable(
+                "файл не является изображением".into(),
+            ));
         }
         let record = files::save(
             &state.db,

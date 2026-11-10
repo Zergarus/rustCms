@@ -4,9 +4,16 @@
 Список ведётся здесь; сделанное уходит в [tech-debt.md](tech-debt.md) (закрытие)
 и в README. Порядок — приоритет, а не оценка.
 
+## Сделано
+
+Тип поля `blocks` — редактор блоков (аналог `sprint.editor`): JSON-блоки,
+редактор с drag&drop, загрузка картинок, очистка HTML. Спека —
+`docs/superpowers/specs/2026-11-10-blocks-field-design.md`, план —
+`docs/superpowers/plans/2026-11-10-blocks-field.md`.
+
 ## P1 — важно для продукта
 
-### 1. Тип поля «редактор блоков» (аналог `sprint.editor`)
+### 1. ~~Тип поля «редактор блоков» (аналог `sprint.editor`)~~ — сделано
 
 Сейчас поля коллекции — это `string`, `text`, `number`, `boolean`, `date`,
 `list`, `element`, `file`. Модуль `sprint.editor` в Битриксе — визуальный

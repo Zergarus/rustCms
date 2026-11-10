@@ -55,12 +55,9 @@ async fn item_form_renders_blocks_control(db: PgPool) {
     let app = crate::app(crate::test_support::test_state(db.clone()));
     let cookie = crate::test_support::admin_cookie(&db).await;
 
-    let (status, _, page) = crate::test_support::get_raw(
-        &app,
-        &format!("/admin/items/{}", content.item_id),
-        &cookie,
-    )
-    .await;
+    let (status, _, page) =
+        crate::test_support::get_raw(&app, &format!("/admin/items/{}", content.item_id), &cookie)
+            .await;
     assert_eq!(status, StatusCode::OK);
     let page = String::from_utf8_lossy(&page);
     assert!(page.contains("blocks-input"), "{page}");
@@ -97,14 +94,16 @@ async fn blocks_are_saved_and_empty_dropped(db: PgPool) {
     .await;
     assert!(status.is_redirection(), "{status}");
 
-    let stored: Value = sqlx::query_scalar(
-        "SELECT field_values->'blocks' FROM collection_items WHERE id = $1",
-    )
-    .bind(content.item_id)
-    .fetch_one(&db)
-    .await
-    .unwrap();
-    assert_eq!(stored, json!([{ "type": "heading", "heading": "Привет", "level": 2 }]));
+    let stored: Value =
+        sqlx::query_scalar("SELECT field_values->'blocks' FROM collection_items WHERE id = $1")
+            .bind(content.item_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored,
+        json!([{ "type": "heading", "heading": "Привет", "level": 2 }])
+    );
 }
 
 #[sqlx::test]
@@ -132,12 +131,11 @@ async fn broken_json_is_field_error(db: PgPool) {
     assert_eq!(status, StatusCode::OK);
     assert!(page.contains("JSON-массив"), "{page}");
 
-    let stored: Option<Value> = sqlx::query_scalar(
-        "SELECT field_values->'blocks' FROM collection_items WHERE id = $1",
-    )
-    .bind(content.item_id)
-    .fetch_one(&db)
-    .await
-    .unwrap();
+    let stored: Option<Value> =
+        sqlx::query_scalar("SELECT field_values->'blocks' FROM collection_items WHERE id = $1")
+            .bind(content.item_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
     assert_eq!(stored, None, "значение не сохранилось");
 }

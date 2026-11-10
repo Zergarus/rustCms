@@ -48,9 +48,11 @@ impl IntoResponse for AppError {
         let (status, code, message) = match &self {
             AppError::NotFound => (StatusCode::NOT_FOUND, "not_found", self.to_string()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg.clone()),
-            AppError::Unprocessable(msg) => {
-                (StatusCode::UNPROCESSABLE_ENTITY, "unprocessable", msg.clone())
-            }
+            AppError::Unprocessable(msg) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unprocessable",
+                msg.clone(),
+            ),
             AppError::PayloadTooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "payload_too_large",

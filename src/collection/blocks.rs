@@ -91,13 +91,13 @@ fn normalize_block(item: &Value, number: usize) -> Result<Option<Value>, String>
             for key in ["alt", "caption"] {
                 copy_optional(obj, key, &mut block, number)?;
             }
-            if let Some(link) = optional_string(obj, "link", number)? {
-                if !link.is_empty() {
-                    if !link_url(&link) {
-                        return Err(err("link: только http(s)://, /… или #…"));
-                    }
-                    block["link"] = json!(link);
+            if let Some(link) = optional_string(obj, "link", number)?
+                && !link.is_empty()
+            {
+                if !link_url(&link) {
+                    return Err(err("link: только http(s)://, /… или #…"));
                 }
+                block["link"] = json!(link);
             }
             Ok(Some(block))
         }
@@ -109,7 +109,6 @@ fn normalize_block(item: &Value, number: usize) -> Result<Option<Value>, String>
                 .ok_or_else(|| err("images: ожидается массив"))?;
             let mut out = Vec::new();
             for (index, image) in images.iter().enumerate() {
-                let number = number;
                 let image = image.as_object().ok_or_else(|| {
                     format!("Блок {number}: картинка {} — ожидается объект", index + 1)
                 })?;
@@ -223,10 +222,10 @@ fn copy_optional(
     to: &mut Value,
     number: usize,
 ) -> Result<(), String> {
-    if let Some(value) = optional_string(from, key, number)? {
-        if !value.is_empty() {
-            to[key] = json!(value);
-        }
+    if let Some(value) = optional_string(from, key, number)?
+        && !value.is_empty()
+    {
+        to[key] = json!(value);
     }
     Ok(())
 }
@@ -245,8 +244,32 @@ fn image_url(value: &str) -> bool {
 /// Разрешённая разметка HTML-блока: без скриптов, iframe и обработчиков.
 fn clean_html(input: &str) -> String {
     let tags: HashSet<&str> = [
-        "p", "br", "strong", "b", "em", "i", "u", "s", "a", "ul", "ol", "li", "blockquote", "table",
-        "thead", "tbody", "tr", "td", "th", "h2", "h3", "h4", "img", "div", "span", "figure",
+        "p",
+        "br",
+        "strong",
+        "b",
+        "em",
+        "i",
+        "u",
+        "s",
+        "a",
+        "ul",
+        "ol",
+        "li",
+        "blockquote",
+        "table",
+        "thead",
+        "tbody",
+        "tr",
+        "td",
+        "th",
+        "h2",
+        "h3",
+        "h4",
+        "img",
+        "div",
+        "span",
+        "figure",
         "figcaption",
     ]
     .into_iter()
@@ -278,7 +301,10 @@ mod tests {
     #[test]
     fn heading_gets_default_level() {
         let out = norm(json!([{ "type": "heading", "heading": "Привет" }])).unwrap();
-        assert_eq!(out, vec![json!({ "type": "heading", "heading": "Привет", "level": 2 })]);
+        assert_eq!(
+            out,
+            vec![json!({ "type": "heading", "heading": "Привет", "level": 2 })]
+        );
     }
 
     #[test]

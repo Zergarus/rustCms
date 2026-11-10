@@ -76,8 +76,8 @@ pub fn kind(code: &str) -> Option<&'static FieldKind> {
 pub fn parse_value(prop: &Field, raws: &[&str], enums: &[FieldOption]) -> Result<Value, String> {
     if prop.kind == "blocks" {
         let raw = raws.first().copied().unwrap_or("");
-        let value = super::blocks::from_form(raw)
-            .map_err(|error| format!("«{}»: {error}", prop.name))?;
+        let value =
+            super::blocks::from_form(raw).map_err(|error| format!("«{}»: {error}", prop.name))?;
         if prop.is_required && is_empty(&value) {
             return Err(format!("«{}»: обязательное поле", prop.name));
         }

@@ -6,17 +6,17 @@ mod audit;
 #[cfg(test)]
 mod audit_tests;
 mod auth;
+#[cfg(test)]
+mod blocks_admin_tests;
+#[cfg(test)]
+mod blocks_api_tests;
+#[cfg(test)]
+mod blocks_upload_tests;
 mod bxapi;
 mod cart;
 mod catalog;
 mod collection;
 mod config;
-#[cfg(test)]
-mod blocks_admin_tests;
-#[cfg(test)]
-mod blocks_upload_tests;
-#[cfg(test)]
-mod blocks_api_tests;
 #[cfg(test)]
 mod csrf_tests;
 mod currency;
