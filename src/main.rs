@@ -23,6 +23,9 @@ mod mail_templates;
 #[cfg(test)]
 mod mail_templates_tests;
 mod passwords;
+mod payment;
+#[cfg(test)]
+mod payment_tests;
 #[cfg(test)]
 mod register_tests;
 mod sale;

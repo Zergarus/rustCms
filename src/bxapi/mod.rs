@@ -56,6 +56,8 @@ pub fn router() -> Router<AppState> {
         .route("/order/form", get(order::form))
         .route("/order/summary", post(order::summary))
         .route("/order/submit", post(order::submit))
+        .route("/order/pay", post(order::pay))
+        .route("/order/{id}/payment-channel", get(order::payment_channel))
         .route(
             "/profile",
             get(profile::get_profile)

@@ -4,8 +4,9 @@ use std::collections::{HashMap, HashSet};
 
 use axum::{
     body::Bytes,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
+    response::IntoResponse,
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde_json::{Value, json};
@@ -521,7 +522,26 @@ pub async fn submit(State(state): State<AppState>, jar: CookieJar, body: Bytes) 
     if !messages.is_empty() {
         data["messages"] = json!(messages);
     }
-    Ok(success(data))
+    let checkout = crate::payment::checkout_cookie(&state, &jar, order_id);
+    let jar = jar.add(checkout);
+    Ok((jar, success(data)).into_response())
+}
+
+/// `POST /order/pay` — запуск оплаты заказа провайдером проекта.
+pub async fn pay(State(state): State<AppState>, jar: CookieJar, body: Bytes) -> BxResult {
+    let body = parse_body(&body)?;
+    let id = number(body.get("id"))
+        .ok_or_else(|| BxError::bad_request("order_id_required", "Укажите заказ"))?;
+    Ok(success(crate::payment::start(&state, &jar, id).await?))
+}
+
+/// `GET /order/{id}/payment-channel` — состояние оплаты для опроса.
+pub async fn payment_channel(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+) -> BxResult {
+    Ok(success(crate::payment::channel(&state, &jar, id).await?))
 }
 
 /// Сообщение о том, что стоимость товаров заказа не та, что покупатель видел в корзине с

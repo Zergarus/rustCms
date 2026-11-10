@@ -135,6 +135,12 @@ cms import-bitrix 'mysql://user:pass@host:3306/db' --upload /path/to/site/upload
 - `select` — поля, свойства и пути через точку, `image`/`imageExt` (+ `imageResize`), `detailPageUrl` (по шаблону URL инфоблока), `sectionName`, `sectionCode`, `catalogPrice` (у товара с предложениями — цена «от»), `catalogType`, `catalogQuantity`, `stocks`;
 - где документация модуля и поведение Битрикса расходятся (формат пустых значений, порядок по умолчанию), повторяется Битрикс.
 
+## Оплата
+
+`POST /api/v1/order/pay` (тело `{ "id": заказ }`) запускает оплату, `GET /api/v1/order/{id}/payment-channel` отдаёт состояние для опроса. Платёж создаётся при оформлении заказа, повторный `pay` переиспользует его и не списывает дважды. Гость доказывает доступ cookie `CMS_CHECKOUT` (ставится при `order/submit`, последние 10 заказов), владелец — сессией.
+
+Провайдер (ЮKassa, СБП, счёт) — код проекта: `PaymentExtension { pay_system_id, provider }` в `Project`, трейт `PaymentProvider` с двумя методами — `start` создаёт платёж у провайдера и отдаёт данные (`paymentUrl`, `qrPayload`, …), `status` опрашивает состояние. Без провайдера `pay` отвечает `payment_provider_missing`; `payment-channel` возвращает `pull: null` и фронт переходит на опрос. Оплата фиксируется в `payments`, `orders.paid` и истории статусов.
+
 ## Корзина
 
 Аналог `b_sale_fuser`/`b_sale_basket` с контрактом раздела «Корзина» модуля bxapi: `GET /api/v1/cart`, `POST /api/v1/cart/items` (`{productId, quantity, storeId?}`), `cart/items/{id}/quantity` (`0` удаляет), `cart/items/{id}/store`, `cart/items/{id}/remove`, `cart/clear`; каждый ответ — полный снимок корзины (позиции с ценой, складами и остатками, итоги, `canCheckout`, `snapshot`).

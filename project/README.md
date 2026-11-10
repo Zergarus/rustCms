@@ -57,3 +57,36 @@ project.form_extensions.push(FormExtension {
 в writer/notifier и в ответ `data`), writer — id созданной записи или `None`,
 notifier просто выполняет отправку. Сигнатуры — в
 `src/bxapi/project/mod.rs` (`FormValidator`, `FormWriter`, `FormNotifier`).
+
+## Оплата: провайдер проекта
+
+```rust
+use crate::bxapi::project::{PaymentExtension, PaymentProvider, PaymentRef, PaymentStarted, PaymentState, BoxFuture};
+
+struct YooKassa;
+
+impl PaymentProvider for YooKassa {
+    fn start<'a>(&'a self, _state: &'a AppState, payment: &'a PaymentRef)
+        -> BoxFuture<'a, Result<PaymentStarted, BxError>>
+    {
+        Box::pin(async move {
+            // запрос к API провайдера, создание платежа
+            Ok(PaymentStarted { url: Some("https://…".into()), data: json!({ "qrPayload": "…" }) })
+        })
+    }
+
+    fn status<'a>(&'a self, _state: &'a AppState, payment: &'a PaymentRef)
+        -> BoxFuture<'a, Result<PaymentState, BxError>>
+    {
+        Box::pin(async move { Ok(PaymentState { paid: false, notice: None }) })
+    }
+}
+
+project.payment_extensions.push(PaymentExtension {
+    pay_system_id: 1,
+    provider: Arc::new(YooKassa),
+});
+```
+
+`pay_system_id` — id платёжной системы из админки магазина. Возвращённые
+`data` сохраняются в `payments.data` и переиспользуются при повторном `pay`.

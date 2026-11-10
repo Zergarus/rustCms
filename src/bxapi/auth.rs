@@ -85,7 +85,7 @@ async fn current_user(state: &AppState, jar: &CookieJar) -> Result<Option<SiteUs
 }
 
 /// Id авторизованного посетителя по cookie сессии.
-pub(super) async fn current_user_id(
+pub(crate) async fn current_user_id(
     state: &AppState,
     jar: &CookieJar,
 ) -> Result<Option<i64>, BxError> {

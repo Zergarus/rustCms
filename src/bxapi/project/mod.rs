@@ -304,6 +304,59 @@ pub trait FormNotifier: Send + Sync {
     -> BoxFuture<'a, ()>;
 }
 
+/// Платёж заказа для провайдера. Поля читает код проекта, поэтому в ядре они
+/// не используются — это часть публичного контракта расширения.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct PaymentRef {
+    pub order_id: i64,
+    pub account_number: String,
+    pub payment_id: i64,
+    pub pay_system_id: Option<i64>,
+    pub pay_system_code: String,
+    /// `redirect` | `qr` | `document` | `offline` (поле `api_type` платёжной системы).
+    pub pay_system_type: String,
+    pub sum: f64,
+    pub currency: String,
+    /// Накопленные данные платежа (`payments.data`).
+    pub data: Value,
+}
+
+/// Результат запуска платежа у провайдера.
+#[derive(Clone, Debug)]
+pub struct PaymentStarted {
+    pub url: Option<String>,
+    pub data: Value,
+}
+
+/// Состояние платежа у провайдера.
+#[derive(Clone, Debug)]
+pub struct PaymentState {
+    pub paid: bool,
+    pub notice: Option<Value>,
+}
+
+/// Платёжный провайдер проекта: ЮKassa, СБП, счёт и т.п.
+pub trait PaymentProvider: Send + Sync {
+    fn start<'a>(
+        &'a self,
+        state: &'a AppState,
+        payment: &'a PaymentRef,
+    ) -> BoxFuture<'a, Result<PaymentStarted, BxError>>;
+
+    fn status<'a>(
+        &'a self,
+        state: &'a AppState,
+        payment: &'a PaymentRef,
+    ) -> BoxFuture<'a, Result<PaymentState, BxError>>;
+}
+
+/// Привязка провайдера к платёжной системе.
+pub struct PaymentExtension {
+    pub pay_system_id: i64,
+    pub provider: Arc<dyn PaymentProvider>,
+}
+
 /// Расширение формы кодом проекта — аналог `FormRegistry::register()` в Битриксе.
 pub struct FormExtension {
     pub code: &'static str,
@@ -335,6 +388,8 @@ pub struct Project {
     pub form_guards: Vec<Arc<dyn FormGuard>>,
     /// Формы, у которых шаги заменены кодом проекта.
     pub form_extensions: Vec<FormExtension>,
+    /// Платёжные провайдеры проекта по id платёжной системы.
+    pub payment_extensions: Vec<PaymentExtension>,
     /// Обработчик товаров при обмене с 1С (`None` — ничего не делается).
     pub import_hook: Option<Arc<dyn ImportHook>>,
     /// Реквизиты заказа при выгрузке в 1С (`None` — только реквизиты модуля).
@@ -432,6 +487,7 @@ impl Default for Project {
             forms: default_forms(),
             form_guards: Vec::new(),
             form_extensions: Vec::new(),
+            payment_extensions: Vec::new(),
             import_hook: None,
             order_export_hook: None,
             order_import_hook: None,
