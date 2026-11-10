@@ -24,7 +24,7 @@ cargo run                             # http://127.0.0.1:3000/admin
 - [Установка и эксплуатация](docs/installation.md) — окружение, продакшен, обновление, бэкапы.
 - [Новый проект](docs/new-project.md) — чек-лист от установки до запуска.
 - [Расширения проекта](project/README.md) — декораторы, формы, оплата, скидки.
-- [Паритет с Битриксом](docs/bitrix-parity.md) и [техдолг](docs/tech-debt.md).
+- [Паритет с Битриксом](docs/bitrix-parity.md), [бэклог ядра](docs/core-backlog.md) и [техдолг](docs/tech-debt.md).
 
 ## Коллекции
 
