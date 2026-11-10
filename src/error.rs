@@ -12,6 +12,12 @@ pub enum AppError {
     NotFound,
     #[error("{0}")]
     BadRequest(String),
+    /// Файл не прошёл проверку (не изображение и т.п.).
+    #[error("{0}")]
+    Unprocessable(String),
+    /// Файл больше допустимого.
+    #[error("файл слишком большой")]
+    PayloadTooLarge,
     /// Недостаточно прав (используется в админке, поэтому отдаёт HTML).
     #[error("forbidden")]
     Forbidden,
@@ -42,6 +48,14 @@ impl IntoResponse for AppError {
         let (status, code, message) = match &self {
             AppError::NotFound => (StatusCode::NOT_FOUND, "not_found", self.to_string()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg.clone()),
+            AppError::Unprocessable(msg) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "unprocessable", msg.clone())
+            }
+            AppError::PayloadTooLarge => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                "файл слишком большой".to_string(),
+            ),
             _ => {
                 tracing::error!(error = ?self, "internal error");
                 (
