@@ -263,40 +263,10 @@ async fn deliver(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tls_mode_matrix() {
-        assert_eq!(tls_mode(465, "auto"), TlsMode::Wrapper);
-        assert_eq!(tls_mode(587, "auto"), TlsMode::Starttls);
-        assert_eq!(tls_mode(25, ""), TlsMode::Starttls);
-        assert_eq!(tls_mode(465, "none"), TlsMode::None);
-        assert_eq!(tls_mode(25, "starttls"), TlsMode::Starttls);
-        assert_eq!(tls_mode(25, "tls"), TlsMode::Wrapper);
-    }
-
-    #[test]
-    fn substitution() {
-        let fields = HashMap::from([
-            ("AUTHOR".to_string(), "Иван".to_string()),
-            ("SITE_NAME".to_string(), "site.ru".to_string()),
-        ]);
-        assert_eq!(
-            substitute(
-                "#SITE_NAME#: вопрос от #AUTHOR# (#MISSING#) № 5 &#8381;",
-                &fields
-            ),
-            "site.ru: вопрос от Иван () № 5 &#8381;"
-        );
-        assert_eq!(substitute("#not a key#", &fields), "#not a key#");
-    }
-}
-
 /// Обрабатывает очередь: до 20 писем за проход.
 pub async fn process(state: &AppState) -> anyhow::Result<usize> {
-    let rows: Vec<(i64, String, sqlx::types::Json<HashMap<String, String>>, i32)> = sqlx::query_as(
+    type Queued = (i64, String, sqlx::types::Json<HashMap<String, String>>, i32);
+    let rows: Vec<Queued> = sqlx::query_as(
         "SELECT id, event, fields, attempts FROM mail_queue
              WHERE sent_at IS NULL AND next_at <= now()
              ORDER BY next_at, id LIMIT 20",
@@ -353,4 +323,35 @@ pub fn spawn(state: AppState) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tls_mode_matrix() {
+        assert_eq!(tls_mode(465, "auto"), TlsMode::Wrapper);
+        assert_eq!(tls_mode(587, "auto"), TlsMode::Starttls);
+        assert_eq!(tls_mode(25, ""), TlsMode::Starttls);
+        assert_eq!(tls_mode(465, "none"), TlsMode::None);
+        assert_eq!(tls_mode(25, "starttls"), TlsMode::Starttls);
+        assert_eq!(tls_mode(25, "tls"), TlsMode::Wrapper);
+    }
+
+    #[test]
+    fn substitution() {
+        let fields = HashMap::from([
+            ("AUTHOR".to_string(), "Иван".to_string()),
+            ("SITE_NAME".to_string(), "site.ru".to_string()),
+        ]);
+        assert_eq!(
+            substitute(
+                "#SITE_NAME#: вопрос от #AUTHOR# (#MISSING#) № 5 &#8381;",
+                &fields
+            ),
+            "site.ru: вопрос от Иван () № 5 &#8381;"
+        );
+        assert_eq!(substitute("#not a key#", &fields), "#not a key#");
+    }
 }
