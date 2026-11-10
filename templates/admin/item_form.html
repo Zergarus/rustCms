@@ -164,10 +164,13 @@
       {% endfor %}
     </div>
     <label>Вес, г<input name="weight" inputmode="decimal" value="{{ form.weight }}" placeholder="0"></label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Цены</legend>
     <div class="grid-2">
+      {% for t in catalog.price_types %}
       <div class="field">
-        <span class="field-label">Цены</span>
-        {% for t in catalog.price_types %}
         {% if form['tiered_' ~ t[0]] %}
         <label>{{ t[1] }}<input value="{{ form['tiered_' ~ t[0]] }}" readonly><small>Цены с диапазонами по количеству здесь не меняются</small></label>
         {% else %}
@@ -182,20 +185,34 @@
         <label>{{ t[1] }}<input name="price_{{ t[0] }}" inputmode="decimal" value="{{ form['price_' ~ t[0]] }}" placeholder="нет цены"></label>
         {% endif %}
         {% endif %}
-        {% endfor %}
       </div>
-      <div class="field">
-        <label>Доступное количество<input name="quantity" inputmode="decimal" value="{{ form.quantity }}" placeholder="сумма остатков по складам" {% if store_control %}disabled{% endif %}></label>
-        {% if store_control %}
-        <small class="muted">Остатки меняются складскими документами</small>
-        {% if can_purchase_info %}<label>Закупочная цена<input value="{{ form.purchasing_price }}" placeholder="нет" readonly></label>{% endif %}
-        {% endif %}
-        <span class="field-label">Остатки по складам</span>
-        {% for st in catalog.stores %}
-        <label>{{ st[1] }}{% if not st[2] %} <span class="muted">(неактивен)</span>{% endif %}<input name="amount_{{ st[0] }}" inputmode="decimal" value="{{ form['amount_' ~ st[0]] }}" placeholder="нет записи" {% if store_control %}disabled{% endif %}></label>
-        {% endfor %}
-      </div>
+      {% endfor %}
     </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Остатки</legend>
+    <div class="grid-2">
+      <label>Доступное количество<input name="quantity" inputmode="decimal" value="{{ form.quantity }}" placeholder="сумма остатков по складам" {% if store_control %}disabled{% endif %}>
+        {% if store_control %}<small>Остатки меняются складскими документами</small>{% endif %}
+      </label>
+      {% if can_purchase_info %}<label>Закупочная цена<input value="{{ form.purchasing_price }}" placeholder="нет" readonly></label>{% endif %}
+    </div>
+    {% if catalog.stores %}
+    <div class="stock-table-wrap">
+      <table class="stock-table">
+        <thead><tr><th>Склад</th><th class="num">Остаток</th></tr></thead>
+        <tbody>
+          {% for st in catalog.stores %}
+          <tr{% if not st[2] %} class="muted"{% endif %}>
+            <td>{{ st[1] }}{% if not st[2] %} <span class="muted">(неактивен)</span>{% endif %} <span class="muted">#{{ st[0] }}</span></td>
+            <td class="num"><input name="amount_{{ st[0] }}" inputmode="decimal" value="{{ form['amount_' ~ st[0]] }}" placeholder="нет записи" {% if store_control %}disabled{% endif %}></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
     <input type="hidden" name="barcode_form" value="1">
     <label class="check"><input type="checkbox" name="barcode_multi" {% if form.barcode_multi %}checked{% endif %}> Поштучный учёт (уникальный штрихкод у каждой единицы)</label>
     {% if form.barcode_multi %}
@@ -205,10 +222,10 @@
       {% if can_shop and item_id %}<a href="/admin/shop/barcodes?item={{ item_id }}">Полный список штрихкодов</a>{% endif %}
     </div>
     {% else %}
-    <label>Штрихкоды (по одному в строке)<textarea name="barcodes" rows="3">{{ form.barcodes }}</textarea></label>
+    <label>Штрихкоды (по одной строке)<textarea name="barcodes" rows="3">{{ form.barcodes }}</textarea></label>
     {% endif %}
   </fieldset>
-  {% endif %}
+{% endif %}
   {% endcall %}
   {% endif %}
 

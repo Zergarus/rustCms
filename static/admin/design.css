@@ -259,6 +259,14 @@ td { padding: 8px var(--sp-3); }
 .rec-x { width: 24px; height: 24px; display: grid; place-items: center; border-radius: var(--r-sm); }
 .open-tabs .dot { display: none; }
 
+/* Остатки по складам в карточке товара: компактная таблица вместо длинного столбца */
+.stock-table-wrap { margin-top: var(--sp-2); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; }
+.stock-table { width: 100%; }
+.stock-table th { position: static; background: var(--raised); }
+.stock-table td { padding: 6px var(--sp-3); }
+.stock-table td.num input { width: 140px; text-align: right; }
+.stock-table tr.muted td { color: var(--muted); }
+
 /* Мобильная адаптация */
 @media (max-width: 900px) {
   .list-table { min-width: 720px; }
