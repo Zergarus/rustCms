@@ -1,0 +1,24 @@
+# systemd без Docker: /opt/cms — распакованная сборка (бинарник, templates, static).
+[Unit]
+Description=Rust CMS
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cms
+Group=cms
+WorkingDirectory=/opt/cms
+EnvironmentFile=/etc/cms/cms.env
+ExecStart=/opt/cms/cms
+Restart=on-failure
+RestartSec=3
+# Файлы и БД — данные сервиса, доступ только ему
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
