@@ -663,5 +663,12 @@
   // htmx:load приходит и на первой загрузке, и для каждого подменённого фрагмента; init идемпотентен
   document.addEventListener('htmx:load', init);
   document.addEventListener('htmx:afterSettle', function () { document.body.classList.remove('nav-open'); });
+  // Текущая страница в полосе вкладок всегда видна, даже если вкладок много
+  function revealActiveTab() {
+    const active = document.querySelector('.open-tabs .rec.on');
+    if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+  document.addEventListener('htmx:afterSettle', revealActiveTab);
+  revealActiveTab();
   init();
 })();
