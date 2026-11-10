@@ -89,7 +89,7 @@ pub struct LegacyRule {
 }
 
 /// Правило проверки поля формы.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rule {
     Required,
     Email,
@@ -354,11 +354,6 @@ impl Project {
 
     pub fn list_decorators(&self, iblock: &str) -> &[Arc<dyn Decorator>] {
         Self::find(&self.list_decorators, iblock).map_or(&[], Vec::as_slice)
-    }
-
-    pub fn form(&self, code: &str) -> Option<&FormConfig> {
-        // Последняя с таким кодом: проект может переопределить форму модуля
-        self.forms.iter().rev().find(|f| f.code == code)
     }
 
     pub fn search_props(&self, iblock: &str) -> &[&'static str] {

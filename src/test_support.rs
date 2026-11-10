@@ -158,6 +158,7 @@ pub fn test_state(db: PgPool) -> crate::state::AppState {
         config: Arc::new(config),
         registry: Arc::default(),
         project: Arc::new(crate::bxapi::project::Project::default()),
+        forms: Arc::new(crate::bxapi::forms_config::Forms::default()),
     }
 }
 

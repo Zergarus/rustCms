@@ -14,6 +14,8 @@ mod discount;
 mod error;
 mod exchange;
 mod files;
+#[cfg(test)]
+mod forms_config_tests;
 mod groups;
 mod import;
 mod mail;
@@ -241,12 +243,15 @@ pub(crate) fn app(state: AppState) -> Router {
 async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
     let mut env = Environment::new();
     env.set_loader(path_loader(config.templates_dir.join("admin")));
+    let project = bxapi::project::Project::load();
+    let forms = bxapi::forms_config::Forms::load(&project)?;
     let state = AppState {
         db,
         templates: Arc::new(env),
         config: Arc::new(config),
         registry: Arc::default(),
-        project: bxapi::project::Project::load(),
+        project,
+        forms: Arc::new(forms),
     };
 
     currency::auto::spawn(state.clone());

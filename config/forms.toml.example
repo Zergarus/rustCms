@@ -1,0 +1,49 @@
+# Формы bxapi: POST /api/v1/form/{code}
+#
+# Формы, описанные кодом проекта (project/mod.rs), дополняются и переопределяются
+# по коду формы. Скопируйте файл в config/forms.toml или укажите свой путь
+# переменной FORMS_CONFIG. Правила: "required", "email".
+
+[forms.callback.fields.name]
+rules = ["required"]
+
+[forms.callback.fields.email]
+rules = ["required", "email"]
+
+[forms.callback.writer]
+collection = "callback"
+
+[forms.callback.writer.mapping]
+name = "NAME"
+email = "PREVIEW_TEXT"
+
+# Поле формы -> файловое поле коллекции (multipart/form-data)
+[forms.callback.files]
+attachment = "attachment"
+
+[forms.callback.notifier]
+event = "CALLBACK_FORM"
+
+[forms.callback.notifier.mapping]
+name = "AUTHOR"
+email = "EMAIL"
+
+[forms.brief.fields.name]
+rules = ["required"]
+
+[forms.brief.fields.contacts]
+rules = ["required"]
+
+[forms.brief.writer]
+collection = "brief"
+
+[forms.brief.writer.mapping]
+name = "NAME"
+contacts = "PREVIEW_TEXT"
+
+[forms.brief.notifier]
+event = "BRIEF_FORM"
+
+[forms.brief.notifier.mapping]
+name = "AUTHOR"
+contacts = "TEXT"

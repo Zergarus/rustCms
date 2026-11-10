@@ -6,3 +6,6 @@
 # Модуль конкретного проекта (см. project/README.md)
 /project/*
 !/project/README.md
+
+# Формы конкретной установки (образец — config/forms.toml.example)
+/config/forms.toml

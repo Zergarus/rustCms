@@ -1,21 +1,35 @@
-//! `POST /form/{code}` — формы bxapi: проверка полей, запись в инфоблок, письмо
-//! по почтовому событию. Состав форм — в настройках проекта ([`super::project::FormConfig`]).
+//! `POST /form/{code}` — формы bxapi: проверка полей, запись в коллекцию, письмо
+//! по почтовому событию. Состав форм — реестр [`super::forms_config`]: формы проекта
+//! плюс `config/forms.toml`.
 
 use std::collections::HashMap;
 
 use axum::{
-    body::Bytes,
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    body::{Body, to_bytes},
+    extract::{FromRequest, Multipart, Path, Request, State},
+    http::{StatusCode, header},
 };
 use serde_json::{Map, Value, json};
 
 use super::{
-    BxError, BxResult, parse_body,
-    project::{FormConfig, IblockWriter, Rule},
+    BxError, BxResult,
+    forms_config::{FormSpec, NotifierSpec, WriterSpec},
+    parse_body,
+    project::Rule,
     success, to_snake,
 };
-use crate::{collection::Field, state::AppState, users::is_valid_email};
+use crate::{collection::Field, files, state::AppState, users::is_valid_email};
+
+/// Предел тела формы: файлы вложений не должны съедать память.
+const MAX_BODY_BYTES: usize = 20 * 1024 * 1024;
+
+/// Загруженный файл формы до сохранения.
+struct Upload {
+    field: String,
+    name: String,
+    content_type: String,
+    data: Vec<u8>,
+}
 
 /// Строковое значение поля: строки обрезаются, `true`/`false` → `Y`/`N`.
 fn text(value: &Value) -> String {
@@ -38,11 +52,11 @@ fn is_empty(value: Option<&Value>) -> bool {
 }
 
 /// Проверка по правилам формы; возвращает прошедшие проверку поля.
-fn validate(form: &FormConfig, body: &Map<String, Value>) -> Result<Map<String, Value>, BxError> {
+fn validate(form: &FormSpec, body: &Map<String, Value>) -> Result<Map<String, Value>, BxError> {
     let mut errors = Vec::new();
     let mut data = Map::new();
     for (field, rules) in &form.rules {
-        let value = body.get(*field);
+        let value = body.get(field);
         for rule in rules.iter() {
             match rule {
                 Rule::Required if is_empty(value) => errors.push(format!("{field} is required")),
@@ -110,25 +124,26 @@ fn property_value(state_enums: &[(i64, String, String)], prop: &Field, value: &V
 /// `DETAIL_TEXT` или код свойства.
 async fn write_element(
     state: &AppState,
-    writer: &IblockWriter,
+    writer: &WriterSpec,
+    file_fields: &[(String, i64)],
     data: &Map<String, Value>,
 ) -> Result<i64, BxError> {
     let snap = state.registry.snapshot(&state.db).await?;
-    let schema = snap.by_code(&to_snake(writer.api_code)).ok_or_else(|| {
+    let schema = snap.by_code(&to_snake(&writer.collection)).ok_or_else(|| {
         BxError::new(
             "form_writer_failed",
-            format!("Инфоблок {} не найден", writer.api_code),
+            format!("Коллекция {} не найдена", writer.collection),
         )
     })?;
     let mut name = String::new();
     let mut preview = String::new();
     let mut detail = String::new();
     let mut props = Map::new();
-    for (field, target) in &writer.field_mapping {
-        let Some(value) = data.get(*field) else {
+    for (field, target) in &writer.mapping {
+        let Some(value) = data.get(field) else {
             continue;
         };
-        match *target {
+        match target.as_str() {
             "NAME" => name = text(value),
             "PREVIEW_TEXT" => preview = text(value),
             "DETAIL_TEXT" => detail = text(value),
@@ -150,6 +165,9 @@ async fn write_element(
             }
         }
     }
+    for (code, file_id) in file_fields {
+        props.insert(to_snake(code), json!(file_id));
+    }
     if name.is_empty() {
         name = format!("Заявка от {}", chrono::Utc::now().format("%d.%m.%Y %H:%M"));
     }
@@ -170,68 +188,170 @@ async fn write_element(
 pub async fn submit(
     State(state): State<AppState>,
     Path(code): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
+    request: Request,
 ) -> BxResult {
-    let body = parse_body(&body)?;
-    let form = state.project.form(&code).ok_or_else(|| {
+    let (parts, body) = request.into_parts();
+    let ip = parts
+        .headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim().to_string());
+    let is_multipart = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("multipart/form-data"));
+    let (body, uploads) = if is_multipart {
+        read_multipart(parts, body).await?
+    } else {
+        let bytes = to_bytes(body, MAX_BODY_BYTES)
+            .await
+            .map_err(|e| BxError::bad_request("body_too_large", e.to_string()))?;
+        (parse_body(&bytes)?, Vec::new())
+    };
+
+    let form = state.forms.get(&code).ok_or_else(|| {
         BxError::with_status(
             StatusCode::NOT_FOUND,
             "form_not_found",
             format!("Форма {code} не найдена"),
         )
     })?;
-    let ip = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|v| v.trim().to_string());
     for guard in &state.project.form_guards {
         guard.check(&state, &code, &body, ip.as_deref()).await?;
     }
 
     let data = validate(form, &body)?;
+    let file_fields = save_files(&state, form, uploads).await?;
     let id = match &form.writer {
-        Some(writer) => Some(write_element(&state, writer, &data).await?),
+        Some(writer) => Some(write_element(&state, writer, &file_fields, &data).await?),
         None => None,
     };
     if let Some(notifier) = &form.notifier {
-        let mut fields: HashMap<String, String> = HashMap::new();
-        for (field, key) in &notifier.field_mapping {
-            if let Some(v) = data.get(*field) {
-                // Несколько полей формы в одно поле письма — через перевод строки
-                let entry = fields.entry(key.to_string()).or_default();
-                if !entry.is_empty() {
-                    entry.push('\n');
-                }
-                entry.push_str(&text(v));
-            }
-        }
-        // Письмо — в фоне: медленный SMTP не задерживает ответ формы
-        let (db, config, event) = (state.db.clone(), state.config.clone(), notifier.event);
-        tokio::spawn(async move {
-            if let Err(e) = crate::mail::send_event(&db, &config, event, &fields).await {
-                tracing::error!(error = ?e, event, "не удалось отправить письмо формы");
-            }
-        });
+        send_notification(&state, notifier, &data);
     }
     Ok(success(json!({ "id": id, "data": data })))
+}
+
+/// Разбор `multipart/form-data`: текстовые поля в карту, файлы — отдельно.
+async fn read_multipart(
+    parts: axum::http::request::Parts,
+    body: Body,
+) -> Result<(Map<String, Value>, Vec<Upload>), BxError> {
+    let request = Request::from_parts(parts, body);
+    let mut multipart = Multipart::from_request(request, &())
+        .await
+        .map_err(|e| BxError::bad_request("invalid_multipart", e.to_string()))?;
+    let mut fields = Map::new();
+    let mut uploads = Vec::new();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| BxError::bad_request("invalid_multipart", e.to_string()))?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        match field.file_name().map(str::to_string) {
+            Some(file_name) => {
+                let content_type = field
+                    .content_type()
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|e| BxError::bad_request("invalid_multipart", e.to_string()))?
+                    .to_vec();
+                uploads.push(Upload {
+                    field: name,
+                    name: file_name,
+                    content_type,
+                    data,
+                });
+            }
+            None => {
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|e| BxError::bad_request("invalid_multipart", e.to_string()))?;
+                fields.insert(name, Value::String(value));
+            }
+        }
+    }
+    Ok((fields, uploads))
+}
+
+/// Сохраняет заявленные в конфиге файлы и возвращает пары «поле коллекции, id файла».
+async fn save_files(
+    state: &AppState,
+    form: &FormSpec,
+    uploads: Vec<Upload>,
+) -> Result<Vec<(String, i64)>, BxError> {
+    let mut saved = Vec::new();
+    for upload in uploads {
+        let Some((_, target)) = form.files.iter().find(|(field, _)| *field == upload.field) else {
+            tracing::warn!(
+                form = %form.code,
+                field = %upload.field,
+                "файл для незаявленного поля проигнорирован"
+            );
+            continue;
+        };
+        let record = files::save(
+            &state.db,
+            &state.config.upload_dir,
+            "form",
+            &upload.name,
+            &upload.content_type,
+            &upload.data,
+        )
+        .await
+        .map_err(|e| BxError::bad_request("file_rejected", e.to_string()))?;
+        saved.push((target.clone(), record.id));
+    }
+    Ok(saved)
+}
+
+/// Письмо по событию — в фоне: медленный SMTP не задерживает ответ формы.
+fn send_notification(state: &AppState, notifier: &NotifierSpec, data: &Map<String, Value>) {
+    let mut fields: HashMap<String, String> = HashMap::new();
+    for (field, key) in &notifier.mapping {
+        if let Some(v) = data.get(field) {
+            // Несколько полей формы в одно поле письма — через перевод строки
+            let entry = fields.entry(key.clone()).or_default();
+            if !entry.is_empty() {
+                entry.push('\n');
+            }
+            entry.push_str(&text(v));
+        }
+    }
+    let (db, config, event) = (
+        state.db.clone(),
+        state.config.clone(),
+        notifier.event.clone(),
+    );
+    tokio::spawn(async move {
+        if let Err(e) = crate::mail::send_event(&db, &config, &event, &fields).await {
+            tracing::error!(error = ?e, event, "не удалось отправить письмо формы");
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn form() -> FormConfig {
-        FormConfig {
-            code: "f",
+    fn form() -> FormSpec {
+        FormSpec {
+            code: "f".into(),
             rules: vec![
-                ("name", &[Rule::Required]),
-                ("email", &[Rule::Required, Rule::Email]),
-                ("note", &[]),
+                ("name".into(), vec![Rule::Required]),
+                ("email".into(), vec![Rule::Required, Rule::Email]),
+                ("note".into(), vec![]),
             ],
             writer: None,
             notifier: None,
+            files: Vec::new(),
         }
     }
 

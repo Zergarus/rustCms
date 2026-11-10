@@ -10,6 +10,7 @@ mod cart;
 mod elements;
 mod filter;
 mod forms;
+pub mod forms_config;
 mod gifts;
 mod images;
 mod location;

@@ -17,4 +17,6 @@ pub struct AppState {
     pub registry: Arc<Registry>,
     /// Проектные настройки bxapi (модуль `project/`).
     pub project: Arc<Project>,
+    /// Реестр форм: код проекта плюс `config/forms.toml`.
+    pub forms: Arc<crate::bxapi::forms_config::Forms>,
 }
