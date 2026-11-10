@@ -73,7 +73,7 @@
 - Consumes: значение поля из `field_values` (JSONB).
 - Produces: в ответе `properties.<code>` — JSON-массив блоков как есть.
 
-- [ ] **Step 1: Тест**: создать коллекцию с полем `blocks`, запись с двумя блоками; `POST /api/v1/iblock/{code}/element/list` (или `element/{id}`) → `data.item.properties.<code>` — массив с `type: "heading"` и `type: "text"`.
+- [ ] **Step 1: Тест**: создать коллекцию с полем `blocks`, запись с двумя блоками; `POST /api/v1/iblock/{code}/element/{id}` → `data.item.properties.<code>` — массив с `type: "heading"` и `type: "text"`.
 - [ ] **Step 2: `cargo test blocks_api` — падает** (поле неизвестно/сериализация строкой).
 - [ ] **Step 3: Поправить сериализацию** в `src/bxapi/serialize.rs`/`registry.rs`, если массив не проходит как есть.
 - [ ] **Step 4: Тест проходит.**
@@ -103,7 +103,7 @@
 - Test: `src/blocks_upload_tests.rs`
 
 **Interfaces:**
-- Produces: `pub async fn upload(State, Extension<Access>, Query<UploadQuery>, Multipart) -> AppResult<Response>`; ответ `{ "status": "success", "data": { "path": "/upload/blocks/…", "id": N } }`.
+- Produces: `pub async fn upload(State, Extension<Access>, Query<UploadQuery>, Multipart) -> AppResult<Response>`, где `struct UploadQuery { collection: i64 }`; ответ `{ "status": "success", "data": { "path": "/upload/blocks/…", "id": N } }`.
 
 - [ ] **Step 1: Тесты**: PNG → 200 и `path` начинается с `/upload/`; текстовый файл → 422; без `collection` → 400; `collection` без права записи → 403 и файла нет.
 - [ ] **Step 2: `cargo test blocks_upload` — падает.**
@@ -116,7 +116,7 @@
 **Files:**
 - Create: `static/admin/blocks.js`
 - Modify: `templates/admin/base.html` (подключить скрипт)
-- Modify: `templates/admin/blocks.js`-контракт: textarea `.blocks-input`
+- Modify: `templates/admin/admin.css` (классы редактора)
 
 **Interfaces:**
 - Consumes: `/admin/blocks/upload?collection=ID`.
