@@ -97,9 +97,16 @@
   <div class="card empty"><p>Ничего не найдено. Измените фильтры или сбросьте их</p></div>
   {% endif %}
   <div class="list-foot">
-    {% if pages > 1 or capped %}
-    <nav class="pager">{% for p in pager %}{% if p.url and not p.current %}<a href="{{ p.url }}" hx-get="{{ p.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">{{ p.label }}</a>{% elif p.current %}<span class="current">{{ p.label }}</span>{% else %}<span class="gap">{{ p.label }}</span>{% endif %}{% endfor %}</nav>
-    {% endif %}
-    <span class="per">по {% for p in per_links %}{% if p.current %}<b>{{ p.value }}</b>{% else %}<a href="{{ p.url }}" hx-get="{{ p.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">{{ p.value }}</a>{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}</span>
+    <span class="list-range">{% if range_start %}с {{ range_start }} по {{ range_end }}{% else %}0{% endif %} из {{ total }}{% if capped %}+{% endif %}</span>
+    <div class="list-foot-right">
+      {% if pages > 1 %}
+      <nav class="pager">{% for p in pager %}{% if p.url and not p.current %}<a href="{{ p.url }}" hx-get="{{ p.url }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="true">{{ p.label }}</a>{% elif p.current %}<span class="current">{{ p.label }}</span>{% else %}<span class="gap">{{ p.label }}</span>{% endif %}{% endfor %}</nav>
+      {% endif %}
+      <label class="per-label">На странице
+        <select onchange="if (this.value) window.location.href = this.value">
+          {% for p in per_links %}<option value="{{ p.url }}"{% if p.current %} selected{% endif %}>{{ p.value }}</option>{% endfor %}
+        </select>
+      </label>
+    </div>
   </div>
 </div>

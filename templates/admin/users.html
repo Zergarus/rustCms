@@ -23,7 +23,7 @@
         <td>{{ u.name or "—" }}</td>
         <td>{{ u.email or "—" }}</td>
         <td>{% if u.is_admin %}<span class="badge accent">суперадмин</span>{% else %}<span class="badge">пользователь</span>{% endif %}</td>
-        <td>{% for g in u.groups %}<span class="badge">{{ g }}</span> {% else %}<span class="muted">—</span>{% endfor %}</td>
+        <td class="groups">{% if u.groups %}<span class="badge">{{ u.groups[0] }}</span>{% if u.groups|length > 1 %} <span class="muted" title="{{ u.groups|join(', ') }}">+{{ u.groups|length - 1 }}</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
         <td>{% if u.active %}<span class="badge ok">активен</span>{% else %}<span class="badge">заблокирован</span>{% endif %}</td>
         <td class="muted">{% if u.last_login_at %}{{ u.last_login_at[:16]|replace("T", " ") }}{% else %}—{% endif %}</td>
         <td class="actions">

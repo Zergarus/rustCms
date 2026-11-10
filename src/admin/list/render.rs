@@ -605,6 +605,13 @@ pub async fn run_list(
         .map(|x| x.1.to_string())
         .unwrap_or_default();
     let tree_collapsed = stored.get("tree_collapsed").and_then(Value::as_bool) == Some(true);
+    let per = st.per.max(1);
+    let range_start = if row_views.is_empty() {
+        0
+    } else {
+        (st.page.saturating_sub(1)) * per + 1
+    };
+    let range_end = range_start + row_views.len() as i64 - 1;
     let ctx = context! {
         tree_collapsed,
         user,
@@ -618,6 +625,9 @@ pub async fn run_list(
         total,
         capped,
         pages,
+        per,
+        range_start,
+        range_end,
         cur_page => st.page,
         pager => pager(spec, path, &st, pages, capped, rows.len()),
         current_url => url_of(spec, path, &st),

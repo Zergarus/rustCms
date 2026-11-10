@@ -148,6 +148,18 @@ td code, td .mono, .mono { font-family: var(--mono); font-size: 12px; }
   background: none; box-shadow: none;
   color: var(--text); border-bottom-color: var(--accent); font-weight: 600;
 }
+/* Перебиваем «капсулы» из admin.css у обеих полос вкладок */
+.tabs .tab {
+  height: auto; min-height: 34px; padding: 7px 1px;
+  border: 0; border-radius: 0; border-bottom: 2px solid transparent;
+  margin-bottom: -1px; background: none; box-shadow: none;
+}
+.tabs .tab.active { background: none; box-shadow: none; border-bottom-color: var(--accent); }
+.tabs-row { display: flex; align-items: flex-end; gap: var(--sp-2);
+  border-bottom: 1px solid var(--border); margin-bottom: var(--sp-3); }
+.tabs-row .tabs { border-bottom: 0; margin-bottom: 0; flex: 0 1 auto; }
+.tab-link { padding: 7px 1px; }
+.td.groups, .groups { white-space: nowrap; }
 
 /* Свойства в карточках: значение справа, ровные числа */
 .prop { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: var(--sp-3);
@@ -162,6 +174,13 @@ td code, td .mono, .mono { font-family: var(--mono); font-size: 12px; }
 .order-aside .card > .prop:last-child { border-bottom: 0; }
 
 /* Боковое меню */
+.list-foot { display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-3); flex-wrap: wrap; margin-top: var(--sp-2); min-height: 44px; }
+.list-range { font-size: var(--fs-sm); color: var(--muted); }
+.list-foot-right { display: flex; align-items: center; gap: var(--sp-4); }
+.per-label { display: inline-flex; align-items: center; gap: var(--sp-2);
+  font-size: var(--fs-sm); color: var(--muted); }
+.per-label select { min-height: 30px; padding: 4px 26px 4px 8px; font-size: var(--fs-sm); }
 .list-toolbar { display: flex; align-items: flex-end; justify-content: space-between;
   gap: var(--sp-3); flex-wrap: wrap; border-bottom: 1px solid var(--border); margin-bottom: var(--sp-3); }
 .list-toolbar .list-views { border-bottom: 0; margin: 0; }

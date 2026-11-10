@@ -17,7 +17,6 @@
 {% import "_ui.html" as ui %}
 {% call ui.page_head([("Коллекции", "/admin/collections"), (collection.name, "/admin/collections/" ~ collection.id ~ "/items"), (form.name if item_id else "Новая запись", none)]) %}
   {%- if item_id and can_write %}
-  <a class="btn" href="/admin/seo/items/{{ item_id }}">SEO</a>
   <a class="btn" href="/admin/items/{{ item_id }}/history">История</a>
   <form method="post" action="/admin/items/{{ item_id }}/delete" hx-confirm="Удалить «{{ form.name }}»?">
     <button class="btn danger" type="submit">Удалить</button>
@@ -28,7 +27,10 @@
 {{ ui.card_errors(tabctx) }}
 
 <div data-card>
-{{ ui.card_tabs(card_tabs, tabctx) }}
+<div class="tabs-row">
+  {{ ui.card_tabs(card_tabs, tabctx) }}
+  {% if item_id and can_write %}<a class="tab tab-link" href="/admin/seo/items/{{ item_id }}">SEO</a>{% endif %}
+</div>
 <form class="card form" method="post" enctype="multipart/form-data" data-dirty-guard
       action="{% if item_id %}/admin/items/{{ item_id }}{% else %}/admin/collections/{{ collection.id }}/items{% endif %}">
   <input type="hidden" name="tab" value="{{ tabctx.active }}">
@@ -57,10 +59,7 @@
       <input name="xml_id" value="{{ form.xml_id }}">
     </label>
   </div>
-  <div class="grid-3">
-    <label class="check">
-      <input type="checkbox" name="active" {% if form.active %}checked{% endif %}> Активен
-    </label>
+  <div class="grid-2">
     <label>Сортировка
       <input name="sort" type="number" value="{{ form.sort }}">
     </label>
@@ -69,6 +68,7 @@
       <small>Пусто — опубликован сразу. В будущем — появится в API в это время.</small>
     </label>
   </div>
+  <label class="check"><input type="checkbox" name="active" {% if form.active %}checked{% endif %}> Активна — показывать на сайте</label>
   {% endcall %}
   {% call ui.tab_pane("text", tabctx) %}
   <label>Анонс
