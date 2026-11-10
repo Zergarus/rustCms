@@ -108,7 +108,13 @@ project.payment_extensions.push(PaymentExtension {
 Ошибку из `start`/`status` ядро логирует и наружу отдаёт безопасный код
 `payment_provider_failed`; сбой `status` не ломает опрос.
 
-`webhook` вызывается публичным `POST /payment/webhook/{код системы}`. Тело —
-только чтобы найти платёж; факт оплаты ядро перепроверяет через `status`, а
-сумму сверяет с `payments.sum`. Поэтому в `start` кладите в `data` идентификатор
-платежа провайдера: он придёт в `PaymentRef.data` при `status` и `webhook`.
+`webhook` вызывается публичным `POST /payment/webhook/{код системы}` и получает
+только тело и заголовки — `PaymentRef` там нет. Задача метода: проверить
+подпись/секрет и вернуть **наш** `payments.id`. Соответствие «платёж провайдера →
+наш платёж» проект ищет сам по `payments.external_id` (туда ядро пишет
+`PaymentStarted.external_id`) — доверять идентификатору из непроверенного тела
+нельзя.
+
+Факт оплаты ядро всё равно перепроверяет через `status` и сверяет сумму с
+`payments.sum`; данные, которые `start` вернул в `data`, приходят в
+`PaymentRef.data` в `status`.

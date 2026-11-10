@@ -477,8 +477,10 @@ async fn webhook_confirms_payment_once(db: PgPool) {
         .unwrap();
     assert!(paid);
 
-    // Повтор уведомления идемпотентен: ни ошибки, ни второй записи истории.
-    webhook(&app, "qr", json!({"event": "paid"})).await;
+    // Повтор уведомления идемпотентен: успех и без второй записи истории.
+    let (again, body) = webhook(&app, "qr", json!({"event": "paid"})).await;
+    assert_eq!(again, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["success"], true);
     let history: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM order_status_history
          WHERE order_id = $1 AND comment LIKE 'Оплата получена%'",
@@ -539,11 +541,27 @@ async fn webhook_rejects_unknown_and_bad_signature(db: PgPool) {
 
 #[sqlx::test]
 async fn reconcile_confirms_forgotten_payment(db: PgPool) {
-    let (_, order_id, _) = setup(&db, true, Some(100.0)).await;
+    pay_system(&db).await;
+    let order_id = order(&db).await;
+    let (payment_id, _) = payment_of(&db, order_id).await;
     let mut stub = Stub::new(true);
-    Arc::get_mut(&mut stub).unwrap().amount = Some(100.0);
+    {
+        let inner = Arc::get_mut(&mut stub).unwrap();
+        inner.amount = Some(100.0);
+        inner.webhook_payment = payment_id;
+    }
     let mut state = crate::test_support::test_state(db.clone());
+    let token = token(&state, order_id).await;
     state.project = Arc::new(project_with(stub));
+    // Платёж запущен (как в жизни), но статус не опрашивали — «закрыли вкладку».
+    let app = crate::app(state.clone());
+    post(
+        &app,
+        "/api/v1/order/pay",
+        json!({"id": order_id}),
+        &cookie(&token),
+    )
+    .await;
 
     let confirmed = payment::reconcile(&state).await.unwrap();
     assert_eq!(confirmed, 1);
@@ -553,4 +571,137 @@ async fn reconcile_confirms_forgotten_payment(db: PgPool) {
         .await
         .unwrap();
     assert!(paid);
+}
+
+#[sqlx::test]
+async fn webhook_provider_failure_is_retryable(db: PgPool) {
+    pay_system(&db).await;
+    let order_id = order(&db).await;
+    let (payment_id, _) = payment_of(&db, order_id).await;
+    let mut stub = Stub::new(true);
+    {
+        let inner = Arc::get_mut(&mut stub).unwrap();
+        inner.fail_status = true;
+        inner.webhook_payment = payment_id;
+    }
+    let mut state = crate::test_support::test_state(db.clone());
+    state.project = Arc::new(project_with(stub));
+    let app = crate::app(state);
+
+    let (status, json) = webhook(&app, "qr", json!({})).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "провайдер должен повторить уведомление: {json}"
+    );
+    assert_eq!(json["errors"][0]["code"], "payment_provider_failed");
+}
+
+#[sqlx::test]
+async fn webhook_from_foreign_pay_system_is_ignored(db: PgPool) {
+    pay_system(&db).await;
+    // Вторая система со своим провайдером.
+    sqlx::query(
+        "INSERT INTO pay_systems (id, code, name, api_type, active)
+         VALUES (2, 'other', 'Other', 'redirect', TRUE) ON CONFLICT (id) DO NOTHING",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let order_id = order(&db).await;
+    let (payment_id, _) = payment_of(&db, order_id).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT pay_system_id FROM payments WHERE id = $1")
+            .bind(payment_id)
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+        1
+    );
+
+    let mut own = Stub::new(true);
+    {
+        let inner = Arc::get_mut(&mut own).unwrap();
+        inner.amount = Some(100.0);
+        inner.webhook_payment = payment_id;
+    }
+    let mut other = Stub::new(true);
+    {
+        let inner = Arc::get_mut(&mut other).unwrap();
+        inner.amount = Some(100.0);
+        inner.webhook_payment = payment_id; // тот же платёж, но чужой провайдер
+    }
+    let mut project = project_with(own);
+    project.payment_extensions.push(PaymentExtension {
+        pay_system_id: 2,
+        provider: other,
+    });
+    let mut state = crate::test_support::test_state(db.clone());
+    state.project = Arc::new(project);
+    let app = crate::app(state);
+
+    let (status, json) = webhook(&app, "other", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let paid: bool = sqlx::query_scalar("SELECT paid FROM orders WHERE id = $1")
+        .bind(order_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(!paid, "чужая платёжная система не подтверждает платёж");
+}
+
+#[sqlx::test]
+async fn channel_does_not_trust_mismatched_amount(db: PgPool) {
+    pay_system(&db).await;
+    let order_id = order(&db).await;
+    let (payment_id, _) = payment_of(&db, order_id).await;
+    let mut stub = Stub::new(true);
+    {
+        let inner = Arc::get_mut(&mut stub).unwrap();
+        inner.amount = Some(1.0);
+        inner.webhook_payment = payment_id;
+    }
+    let mut state = crate::test_support::test_state(db.clone());
+    let token = token(&state, order_id).await;
+    state.project = Arc::new(project_with(stub));
+    let app = crate::app(state);
+
+    let (_, json) = get(
+        &app,
+        &format!("/api/v1/order/{order_id}/payment-channel"),
+        &cookie(&token),
+    )
+    .await;
+    assert_eq!(json["data"]["state"]["paid"], false);
+}
+
+#[sqlx::test]
+async fn reconcile_skips_payments_never_started(db: PgPool) {
+    pay_system(&db).await;
+    let _order = order(&db).await; // платёж создан, но pay не вызывали
+    let mut stub = Stub::new(true);
+    Arc::get_mut(&mut stub).unwrap().amount = Some(100.0);
+    let mut state = crate::test_support::test_state(db.clone());
+    state.project = Arc::new(project_with(stub));
+
+    assert_eq!(payment::reconcile(&state).await.unwrap(), 0);
+}
+
+#[sqlx::test]
+async fn webhook_for_canceled_order_is_logged_and_not_paid(db: PgPool) {
+    let (app, order_id, _) = setup(&db, true, Some(100.0)).await;
+    sqlx::query("UPDATE orders SET canceled = TRUE WHERE id = $1")
+        .bind(order_id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let (status, json) = webhook(&app, "qr", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let paid: bool = sqlx::query_scalar("SELECT paid FROM orders WHERE id = $1")
+        .bind(order_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(!paid);
 }

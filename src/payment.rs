@@ -313,9 +313,10 @@ pub async fn channel(state: &AppState, jar: &CookieJar, order_id: i64) -> Result
         if !paid && let Some(provider) = provider(state, payment.pay_system_id) {
             match provider.status(state, &reference).await {
                 Ok(status) => {
-                    notice = status.notice.unwrap_or(Value::Null);
-                    if status.paid {
-                        paid = mark_paid(state, &order, payment).await?;
+                    notice = status.notice.clone().unwrap_or(Value::Null);
+                    // Тот же путь, что у вебхука: сумма тоже сверяется.
+                    if apply_status(state, &order, payment, status).await? {
+                        paid = true;
                     }
                 }
                 // Сбой провайдера не должен ломать опрос: отдаём последнее
@@ -421,11 +422,28 @@ async fn webhook(
     headers: &HeaderMap,
     payload: &Value,
 ) -> Result<Value, BxError> {
-    let pay_system_id: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM pay_systems WHERE code = $1 AND active")
-            .bind(code)
-            .fetch_optional(&state.db)
-            .await?;
+    // Анти-перебор: подписанные уведомления дёргают провайдера, поток с одного
+    // адреса не должен занимать пул и время провайдера.
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .unwrap_or("unknown");
+    if !crate::throttle::check(&format!("webhook|{ip}|{code}"), 60) {
+        return Err(BxError::with_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_requests",
+            "Слишком много уведомлений",
+        ));
+    }
+
+    let pay_system_id: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM pay_systems WHERE code = $1 AND active ORDER BY id LIMIT 1",
+    )
+    .bind(code)
+    .fetch_optional(&state.db)
+    .await?;
     let Some(pay_system_id) = pay_system_id else {
         return Err(BxError::with_status(
             StatusCode::NOT_FOUND,
@@ -444,62 +462,72 @@ async fn webhook(
         .webhook(state, payload, headers)
         .await
         .map_err(|error| {
-            tracing::warn!(code, ?error, "уведомление провайдера отклонено");
-            BxError::with_status(
-                StatusCode::FORBIDDEN,
-                "payment_webhook_rejected",
-                "Уведомление отклонено",
-            )
+            // Отказ подписи/формата — 403 (повтор бессмыслен); временный сбой
+            // в коде проекта — 503, чтобы провайдер повторил уведомление.
+            let (status, out) = if error.status() == StatusCode::FORBIDDEN {
+                (StatusCode::FORBIDDEN, "payment_webhook_rejected")
+            } else {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "payment_webhook_unavailable",
+                )
+            };
+            tracing::warn!(code, %status, ?error, "уведомление провайдера не принято");
+            BxError::with_status(status, out, "Уведомление не принято")
         })?;
 
-    let payment: Option<Payment> = sqlx::query_as(
-        "SELECT id, pay_system_id, sum::float8 AS sum, currency, paid, data
-         FROM payments WHERE id = $1",
+    let row: Option<ReconcileRow> = sqlx::query_as(
+        "SELECT p.id AS payment_id, p.pay_system_id, p.sum::float8 AS sum, p.currency, p.data,
+                o.id AS order_id, o.status AS order_status, o.account_number,
+                o.price::float8 AS order_price, o.canceled, o.paid AS order_paid
+         FROM payments p
+         JOIN orders o ON o.id = p.order_id
+         WHERE p.id = $1",
     )
     .bind(hook.payment_id)
     .fetch_optional(&state.db)
     .await?;
     // Неизвестный платёж и повтор уведомления — успех: провайдеру нечего чинить.
-    let Some(payment) = payment.filter(|payment| !payment.paid) else {
+    let Some(row) = row else {
         return Ok(json!({ "success": true }));
     };
-    let order = order_by_id(&state.db, payment_order_id(&state.db, payment.id).await?)
-        .await?
-        .ok_or_else(not_found)?;
-    if order.canceled {
+    if row.pay_system_id != Some(pay_system_id) {
+        tracing::warn!(
+            payment_id = row.payment_id,
+            code,
+            "уведомление пришло от чужой платёжной системы"
+        );
         return Ok(json!({ "success": true }));
     }
+    if row.order_paid {
+        return Ok(json!({ "success": true }));
+    }
+    if row.canceled {
+        tracing::warn!(
+            order_id = row.order_id,
+            payment_id = row.payment_id,
+            "оплата по отменённому заказу — нужен возврат"
+        );
+        return Ok(json!({ "success": true }));
+    }
+
+    let order = row.order();
+    let payment = row.payment();
     let reference = reference(state, &order, &payment).await?;
     let status = provider.status(state, &reference).await.map_err(|error| {
         tracing::error!(
             payment_id = payment.id,
             ?error,
-            "провайдер не подтвердил статус"
+            "провайдер не подтвердил статус — провайдер повторит уведомление"
         );
-        BxError::new(
+        BxError::with_status(
+            StatusCode::SERVICE_UNAVAILABLE,
             "payment_provider_failed",
             "Платёжный провайдер временно недоступен",
         )
     })?;
     apply_status(state, &order, &payment, status).await?;
     Ok(json!({ "success": true }))
-}
-
-async fn payment_order_id(db: &PgPool, payment_id: i64) -> sqlx::Result<i64> {
-    sqlx::query_scalar("SELECT order_id FROM payments WHERE id = $1")
-        .bind(payment_id)
-        .fetch_one(db)
-        .await
-}
-
-async fn order_by_id(db: &PgPool, order_id: i64) -> sqlx::Result<Option<Order>> {
-    sqlx::query_as(
-        "SELECT id, user_id, status, account_number, price::float8 AS price, canceled, paid
-         FROM orders WHERE id = $1",
-    )
-    .bind(order_id)
-    .fetch_optional(db)
-    .await
 }
 
 /// Фиксирует оплату, только если провайдер подтвердил её и сумма совпала.
@@ -512,16 +540,29 @@ async fn apply_status(
     if !status.paid {
         return Ok(false);
     }
-    if let Some(amount) = status.amount
-        && (amount - payment.sum).abs() > 0.01
-    {
-        tracing::warn!(
-            payment_id = payment.id,
-            amount,
-            sum = payment.sum,
-            "провайдер подтвердил другую сумму"
-        );
-        return Ok(false);
+    if let Some(amount) = status.amount {
+        // Деньги сравниваем в целых копейках: f64 не различает 100.00 и 99.99.
+        let paid_kopecks = (amount * 100.0).round() as i64;
+        let sum_kopecks = (payment.sum * 100.0).round() as i64;
+        if paid_kopecks != sum_kopecks {
+            tracing::error!(
+                order_id = order.id,
+                account_number = %order.account_number,
+                payment_id = payment.id,
+                amount,
+                sum = payment.sum,
+                "сумма оплаты не совпала — заказ не закрываем"
+            );
+            sqlx::query(
+                "UPDATE payments SET data = jsonb_set(data, '{amount_mismatch}', to_jsonb($2::float8), true)
+                 WHERE id = $1",
+            )
+            .bind(payment.id)
+            .bind(amount)
+            .execute(&state.db)
+            .await?;
+            return Ok(false);
+        }
     }
     mark_paid(state, order, payment).await
 }
@@ -542,18 +583,59 @@ struct ReconcileRow {
     order_paid: bool,
 }
 
+impl ReconcileRow {
+    fn order(&self) -> Order {
+        Order {
+            id: self.order_id,
+            user_id: None,
+            status: self.order_status.clone(),
+            account_number: self.account_number.clone(),
+            price: self.order_price,
+            canceled: self.canceled,
+            paid: self.order_paid,
+        }
+    }
+
+    fn payment(&self) -> Payment {
+        Payment {
+            id: self.payment_id,
+            pay_system_id: self.pay_system_id,
+            sum: self.sum,
+            currency: self.currency.clone(),
+            paid: false,
+            data: self.data.clone(),
+        }
+    }
+}
+
 /// Фоновая сверка: подтверждает «забытые» оплаты у провайдера.
 pub async fn reconcile(state: &AppState) -> Result<usize, BxError> {
+    let systems: Vec<i64> = state
+        .project
+        .payment_extensions
+        .iter()
+        .map(|extension| extension.pay_system_id)
+        .collect();
+    if systems.is_empty() {
+        return Ok(0);
+    }
+    // Проверяем только запущенные платежи своего провайдера, ротация — по
+    // `reconcile_at`, чтобы брошенные строки не занимали голову очереди.
     let rows: Vec<ReconcileRow> = sqlx::query_as(
         "SELECT p.id AS payment_id, p.pay_system_id, p.sum::float8 AS sum, p.currency, p.data,
                 o.id AS order_id, o.status AS order_status, o.account_number,
                 o.price::float8 AS order_price, o.canceled, o.paid AS order_paid
          FROM payments p
          JOIN orders o ON o.id = p.order_id
-         WHERE NOT p.paid AND NOT o.canceled AND o.created_at > now() - interval '30 days'
-         ORDER BY p.id
+         WHERE NOT p.paid
+           AND NOT o.canceled
+           AND o.created_at > now() - interval '30 days'
+           AND p.pay_system_id = ANY($1)
+           AND (p.data ? 'started' OR p.external_id <> '')
+         ORDER BY p.reconcile_at NULLS FIRST, p.id
          LIMIT 50",
     )
+    .bind(&systems)
     .fetch_all(&state.db)
     .await?;
 
@@ -562,23 +644,12 @@ pub async fn reconcile(state: &AppState) -> Result<usize, BxError> {
         let Some(provider) = provider(state, row.pay_system_id) else {
             continue;
         };
-        let order = Order {
-            id: row.order_id,
-            user_id: None,
-            status: row.order_status,
-            account_number: row.account_number,
-            price: row.order_price,
-            canceled: row.canceled,
-            paid: row.order_paid,
-        };
-        let payment = Payment {
-            id: row.payment_id,
-            pay_system_id: row.pay_system_id,
-            sum: row.sum,
-            currency: row.currency,
-            paid: false,
-            data: row.data,
-        };
+        let order = row.order();
+        let payment = row.payment();
+        sqlx::query("UPDATE payments SET reconcile_at = now() WHERE id = $1")
+            .bind(payment.id)
+            .execute(&state.db)
+            .await?;
         let reference = reference(state, &order, &payment).await?;
         match provider.status(state, &reference).await {
             Ok(status) => {
@@ -601,7 +672,11 @@ pub async fn reconcile(state: &AppState) -> Result<usize, BxError> {
 /// Раз в 10 минут сверяет неоплаченные платежи.
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
+        // Джиттер: инстансы не бьют провайдера одновременно.
+        let jitter = 60 + rand::random::<u64>() % 120;
+        tokio::time::sleep(std::time::Duration::from_secs(jitter)).await;
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(600));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             timer.tick().await;
             if let Err(error) = reconcile(&state).await {

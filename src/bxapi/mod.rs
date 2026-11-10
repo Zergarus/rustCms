@@ -115,6 +115,11 @@ impl BxError {
         }
     }
 
+    /// HTTP-статус ошибки (по умолчанию 200, как у прикладных ошибок bxapi).
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
     pub fn with_custom(mut self, custom: Value) -> Self {
         self.custom = (!custom.is_null()).then(|| Box::new(custom));
         self
