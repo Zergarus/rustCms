@@ -38,6 +38,9 @@ mod mail_queue_tests;
 mod mail_templates;
 #[cfg(test)]
 mod mail_templates_tests;
+mod metrics;
+#[cfg(test)]
+mod metrics_tests;
 mod passwords;
 mod payment;
 #[cfg(test)]
@@ -261,6 +264,7 @@ fn cors_layer(config: &Config) -> CorsLayer {
 pub(crate) fn app(state: AppState) -> Router {
     let mut app = Router::new()
         .route("/", get(|| async { Redirect::to("/admin") }))
+        .route("/metrics", get(metrics::render))
         .route(
             "/payment/webhook/{code}",
             axum::routing::post(payment::webhook_handler),
@@ -299,7 +303,9 @@ pub(crate) fn app(state: AppState) -> Router {
     if let Some(routes) = state.project.routes.clone() {
         app = app.merge(routes);
     }
-    app.layer(TraceLayer::new_for_http()).with_state(state)
+    app.layer(axum::middleware::from_fn(metrics::track))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
 }
 
 async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
