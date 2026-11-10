@@ -3,12 +3,12 @@
 <div id="order-aside" class="order-aside"{% if fragment %} hx-swap-oob="true"{% endif %}>
 {% call ui.aside() %}
 <section class="card">
-  {% call ui.prop("Итого") %}<b>{{ order.price }} {{ order.currency }}</b>{% endcall %}
-  {% call ui.prop("Товары") %}{{ order.goods_price }} {{ order.currency }}{% endcall %}
-  {% call ui.prop("Скидка") %}{% if discount_total %}{{ discount_total }} {{ order.currency }}{% else %}—{% endif %}{% endcall %}
-  {% call ui.prop("Доставка") %}{{ order.delivery_price }} {{ order.currency }}{% endcall %}
-  {% call ui.prop("НДС") %}{{ order.tax_amount }} {{ order.currency }}{% endcall %}
-  {% if order.refunded_amount %}{% call ui.prop("Возвращено") %}{{ order.refunded_amount }} {{ order.currency }}{% endcall %}{% endif %}
+  {% call ui.prop("Итого") %}<b>{{ order.price|money }} {{ order.currency }}</b>{% endcall %}
+  {% call ui.prop("Товары") %}{{ order.goods_price|money }} {{ order.currency }}{% endcall %}
+  {% call ui.prop("Скидка") %}{% if discount_total %}{{ discount_total|money }} {{ order.currency }}{% else %}—{% endif %}{% endcall %}
+  {% call ui.prop("Доставка") %}{{ order.delivery_price|money }} {{ order.currency }}{% endcall %}
+  {% call ui.prop("НДС") %}{{ order.tax_amount|money }} {{ order.currency }}{% endcall %}
+  {% if order.refunded_amount %}{% call ui.prop("Возвращено") %}{{ order.refunded_amount|money }} {{ order.currency }}{% endcall %}{% endif %}
   {% if show_cost and order_margin %}<div class="prop"><div class="prop-val">Маржа заказа: {{ order_margin }}</div></div>{% endif %}
 </section>
 <section class="card">
@@ -24,7 +24,7 @@
     <label>Причина<input name="reason" placeholder="например, отказ покупателя"></label>
     <button class="btn" type="submit">Вернуть</button>
   </form>
-  <p class="muted">К возврату: {{ order.price - order.refunded_amount }} {{ order.currency }}</p>
+  <p class="muted">К возврату: {{ (order.price - order.refunded_amount)|money }} {{ order.currency }}</p>
 </section>
 {% endif %}
 {% endcall %}

@@ -8,14 +8,14 @@
   </form>
   <form method="post" action="/admin/shop/orders/{{ order.id }}/paid">
     <input type="hidden" name="value" value="{% if order.paid %}N{% else %}Y{% endif %}">
-    {% call ui.prop("Оплата") %}{% if order.paid %}оплачен {{ (order.paid_at or "")[:16]|replace("T", " ") }}{% else %}не оплачен{% endif %}
-      <button class="btn" type="submit">{% if order.paid %}Снять оплату{% else %}Отметить оплату{% endif %}</button>{% endcall %}
+    {% call ui.prop("Оплата") %}{% if order.paid %}оплачен {{ (order.paid_at or "")[:16]|replace("T", " ") }}{% else %}не оплачен{% endif %}{% endcall %}
+    <div class="form-actions"><button class="btn" type="submit">{% if order.paid %}Снять оплату{% else %}Отметить оплату{% endif %}</button></div>
   </form>
   <form method="post" action="/admin/shop/orders/{{ order.id }}/cancel">
     {% if order.canceled %}
     <input type="hidden" name="value" value="N">
-    {% call ui.prop("Отмена") %}Отменён {{ (order.canceled_at or "")[:16]|replace("T", " ") }}{% if order.cancel_reason %}: {{ order.cancel_reason }}{% endif %}
-      <button class="btn" type="submit">Снять отмену</button>{% endcall %}
+    {% call ui.prop("Отмена") %}Отменён {{ (order.canceled_at or "")[:16]|replace("T", " ") }}{% if order.cancel_reason %}: {{ order.cancel_reason }}{% endif %}{% endcall %}
+    <div class="form-actions"><button class="btn" type="submit">Снять отмену</button></div>
     {% else %}
     <input type="hidden" name="value" value="Y">
     {% call ui.prop("Причина отмены") %}<input name="reason">{% endcall %}
@@ -33,14 +33,14 @@
 <section class="card table-wrap">
   <h2>Состав заказа</h2>
   <table>
-    <thead><tr><th>Товар</th><th>Кол-во</th><th>Цена</th><th>Сумма</th></tr></thead>
+    <thead><tr><th>Товар</th><th class="num">Кол-во</th><th class="num">Цена</th><th class="num">Сумма</th></tr></thead>
     <tbody>
       {% for i in order.items %}
       <tr>
         <td><a href="/admin/items/{{ i.product_id }}">{{ i.name }}</a>{% if i.custom_price %} <span class="muted">(своя цена)</span>{% endif %}{% for p in i.props %}{% if p.code != "PRODUCT.XML_ID" and p.code != "CATALOG.XML_ID" %}<br><span class="muted">{{ p.name }}: {{ p.value }}</span>{% endif %}{% endfor %}</td>
-        <td>{{ i.quantity }}</td>
-        <td>{{ i.price }}</td>
-        <td>{{ (i.price * i.quantity)|round(2) }}</td>
+        <td class="num">{{ i.quantity|num }}</td>
+        <td class="num">{{ i.price|money }}</td>
+        <td class="num">{{ (i.price * i.quantity)|money }}</td>
       </tr>
       {% endfor %}
     </tbody>

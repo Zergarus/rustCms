@@ -2262,7 +2262,7 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("</aside>").next())
             .unwrap_or_default();
-        assert!(aside.contains("1234.5 RUB"), "{aside}");
+        assert!(aside.contains("1 234,50 RUB"), "{aside}");
         assert!(aside.contains("Итого"), "{aside}");
     }
 

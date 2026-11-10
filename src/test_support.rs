@@ -154,8 +154,7 @@ pub fn test_state(db: PgPool) -> crate::state::AppState {
         csrf_enforce: false,
         rate_limit_per_min: 0,
     };
-    let mut env = minijinja::Environment::new();
-    env.set_loader(minijinja::path_loader(config.templates_dir.join("admin")));
+    let env = crate::presentation::templates_env(&config.templates_dir.join("admin"));
     crate::state::AppState {
         db,
         templates: Arc::new(env),

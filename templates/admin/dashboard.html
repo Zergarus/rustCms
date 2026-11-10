@@ -5,18 +5,39 @@
 <h1>Рабочий стол</h1>
 <div class="stats">
   <a class="card stat" href="/admin/collections">
-    <span class="stat-value">{{ stats.collections }}</span>
+    <span class="stat-value">{{ stats.collections|num }}</span>
     <span class="stat-label">коллекций</span>
   </a>
   <div class="card stat">
-    <span class="stat-value">{{ stats.elements }}</span>
+    <span class="stat-value">{{ stats.elements|num }}</span>
     <span class="stat-label">записей</span>
   </div>
   <a class="card stat" href="/admin/users">
-    <span class="stat-value">{{ stats.users }}</span>
+    <span class="stat-value">{{ stats.users|num }}</span>
     <span class="stat-label">пользователей</span>
   </a>
 </div>
+
+{% if orders %}
+<section class="card">
+  <div class="card-head">
+    <h2>Последние заказы</h2>
+    <a class="btn" href="/admin/shop/orders">Все заказы</a>
+  </div>
+  <table>
+    <thead><tr><th>Номер</th><th>Статус</th><th class="num">Сумма</th></tr></thead>
+    <tbody>
+      {% for id, number, status, price, currency in orders %}
+      <tr>
+        <td><a href="/admin/shop/orders/{{ id }}">№ {{ number }}</a></td>
+        <td class="muted">{{ status }}</td>
+        <td class="num">{{ price|money }} {{ currency }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
 
 <section class="card">
   <h2>Публичный API</h2>

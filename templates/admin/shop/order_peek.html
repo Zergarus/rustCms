@@ -6,7 +6,7 @@
   {% call ui.prop("Покупатель") %}{{ buyer or "—" }}{% endcall %}
   {% call ui.prop("Телефон") %}{{ phone or "—" }}{% endcall %}
   {% call ui.prop("E-mail") %}{{ email or "—" }}{% endcall %}
-  {% call ui.prop("Сумма") %}<b>{{ order.price }} {{ order.currency }}</b>{% if order.tax_amount %} <span class="muted">в т.ч. НДС {{ order.tax_amount }}</span>{% endif %}{% if order.refunded_amount %} <span class="muted">возвращено {{ order.refunded_amount }}</span>{% endif %}{% endcall %}
+  {% call ui.prop("Сумма") %}<b>{{ order.price|money }} {{ order.currency }}</b>{% if order.tax_amount %} <span class="muted">в т.ч. НДС {{ order.tax_amount|money }}</span>{% endif %}{% if order.refunded_amount %} <span class="muted">возвращено {{ order.refunded_amount|money }}</span>{% endif %}{% endcall %}
 
   <h3>Состав</h3>
   <ul class="peek-lines">

@@ -50,6 +50,7 @@ mod passwords;
 mod payment;
 #[cfg(test)]
 mod payment_tests;
+mod presentation;
 #[cfg(test)]
 mod project_extension_tests;
 mod rate_limit;
@@ -335,8 +336,7 @@ pub(crate) fn app(state: AppState) -> Router {
 }
 
 async fn serve(config: Config, db: PgPool) -> anyhow::Result<()> {
-    let mut env = Environment::new();
-    env.set_loader(path_loader(config.templates_dir.join("admin")));
+    let env = presentation::templates_env(&config.templates_dir.join("admin"));
     let project = bxapi::project::Project::load();
     let forms = bxapi::forms_config::Forms::load(&project)?;
     let state = AppState {

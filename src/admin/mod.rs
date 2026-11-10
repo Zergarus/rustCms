@@ -679,10 +679,25 @@ async fn dashboard(
     )
     .fetch_one(&state.db)
     .await?;
+    // Последние заказы — только если магазин включён и есть право их видеть.
+    let orders: Vec<(i64, String, String, f64, String)> = if user.can(crate::access::ORDERS_MANAGE)
+        && crate::admin::nav::shop_enabled(&state.db).await?
+    {
+        sqlx::query_as(
+            "SELECT o.id, COALESCE(o.account_number, o.id::text),
+                        COALESCE(s.name, o.status), o.price::float8, o.currency
+                 FROM orders o LEFT JOIN order_statuses s ON s.code = o.status
+                 ORDER BY o.id DESC LIMIT 5",
+        )
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        Vec::new()
+    };
     render(
         &state,
         "dashboard.html",
-        context! { user, stats => context! { collections, elements, users } },
+        context! { user, orders, stats => context! { collections, elements, users } },
     )
 }
 
