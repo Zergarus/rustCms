@@ -12,6 +12,8 @@ mod catalog;
 mod collection;
 mod config;
 #[cfg(test)]
+mod blocks_api_tests;
+#[cfg(test)]
 mod csrf_tests;
 mod currency;
 #[allow(dead_code)] // движок, корзина и админка подключают модель в следующих задачах

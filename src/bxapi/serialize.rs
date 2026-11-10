@@ -676,6 +676,13 @@ impl Loaded {
 
     /// Значение свойства без пути — как `CODE` в select Битрикса.
     fn raw_value(&self, env: &Env, prop: &Field, row: &Row) -> Value {
+        // Блоки — всегда массив: элементы массива это блоки, а не значения поля.
+        if prop.kind == "blocks" {
+            return match row.properties.get(&prop.code) {
+                Some(Value::Array(items)) => Value::Array(items.clone()),
+                _ => Value::Null,
+            };
+        }
         let values = row.values(&prop.code);
         let directory = prop.user_type == "directory";
         let items: Vec<Value> = values
