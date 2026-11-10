@@ -12,6 +12,7 @@
   <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
   <script src="/admin/static/admin.js" defer></script>
   <script src="/admin/static/list.js" defer></script>
+  <script src="/admin/static/blocks.js" defer></script>
 </head>
 <body hx-boost="true"{% if shell %} class="with-shell" data-tabs="{{ 'on' if shell.prefs.tabs else 'off' }}"{% endif %}{% if no_tab %} data-no-tab{% endif %}>
   {% if shell %}

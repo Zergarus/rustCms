@@ -616,3 +616,19 @@ body.has-bulk-bar .list-layout { padding-bottom: 96px; }
   /* редактор остаётся в ячейке и не расширяет таблицу за пределы обёртки */
   .cell-edit input, .cell-edit select { padding: 0 6px; }
 }
+
+/* Поле «Блоки»: textarea видна без JS, редактор её скрывает. */
+.blocks-source { display: none; }
+.blocks { display: flex; flex-direction: column; gap: 10px; }
+.blocks-card { border: 1px solid var(--border, #d9dde3); border-radius: 8px; background: #fff; padding: 10px; }
+.blocks-card.dragging { opacity: .5; }
+.blocks-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.blocks-grip { cursor: grab; color: #8a94a3; }
+.blocks-head strong { flex: 1; }
+.blocks-btn { border: 1px solid #d9dde3; background: #f7f9fc; border-radius: 6px; cursor: pointer; padding: 2px 8px; }
+.blocks-btn.danger { color: #c0392b; }
+.blocks-body { display: grid; gap: 8px; }
+.blocks-field { display: grid; gap: 4px; }
+.blocks-label { font-size: 12px; color: #6b7480; }
+.blocks-field input, .blocks-field select, .blocks-field textarea { width: 100%; }
+.blocks-add select { margin-top: 4px; }

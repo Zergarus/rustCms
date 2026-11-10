@@ -65,6 +65,7 @@ async fn item_form_renders_blocks_control(db: PgPool) {
     let page = String::from_utf8_lossy(&page);
     assert!(page.contains("blocks-input"), "{page}");
     assert!(page.contains("data-collection="), "{page}");
+    assert!(page.contains("/admin/static/blocks.js"), "{page}");
 }
 
 #[sqlx::test]
