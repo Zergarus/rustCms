@@ -18,7 +18,7 @@
 
 <div data-card>
 {{ ui.card_tabs(card_tabs, tabctx) }}
-<form class="card form" method="post" data-dirty-guard
+<form class="card form form-narrow" method="post" data-dirty-guard
       action="{% if rule_id %}/admin/discounts/{{ rule_id }}{% else %}/admin/discounts{% endif %}">
   <input type="hidden" name="tab" value="{{ tabctx.active }}">
 

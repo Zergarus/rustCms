@@ -12,9 +12,10 @@
   {% if show_cost and order_margin %}<div class="prop"><div class="prop-val">Маржа заказа: {{ order_margin }}</div></div>{% endif %}
 </section>
 <section class="card">
-  {% call ui.prop("Статус") %}{{ order.status_name or order.status }}{% if order.canceled %} <span class="badge">отменён</span>{% endif %}{% endcall %}
-  {% call ui.prop("Оплата") %}{% if order.paid %}<span class="badge ok">оплачен</span>{% else %}не оплачен{% endif %}{% endcall %}
-  {% call ui.prop("Отгрузка") %}{% if shipped %}<span class="badge ok">отгружен</span>{% else %}не отгружен{% endif %}{% if order.shipment and order.shipment.allow_delivery %}, доставка разрешена{% endif %}{% endcall %}
+  {% call ui.prop("Статус") %}<span class="badge{% if order.canceled %} danger{% endif %}">{{ order.status_name or order.status }}</span>{% if order.canceled %} <span class="badge danger">отменён</span>{% endif %}{% endcall %}
+  {% call ui.prop("Оплата") %}{% if order.paid %}<span class="badge ok">оплачен</span>{% else %}<span class="badge warn">не оплачен</span>{% endif %}{% endcall %}
+  {% call ui.prop("Отгрузка") %}{% if shipped %}<span class="badge ok">отгружен</span>{% else %}<span class="badge">не отгружен</span>{% endif %}{% endcall %}
+  {% if order.shipment and order.shipment.allow_delivery %}<div class="prop"><div class="prop-label">Доставка</div><div class="prop-val"><span class="badge accent">разрешена</span></div></div>{% endif %}
 </section>
 {% if order.paid and not order.canceled %}
 <section class="card">

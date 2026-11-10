@@ -1,6 +1,6 @@
 {% import "_ui.html" as ui %}
 <section class="card form">
-  <h2>Статус</h2>
+  <h2>Управление заказом</h2>
   <form method="post" action="/admin/shop/orders/{{ order.id }}/status">
     <div class="prop">
       <div class="prop-label">Статус</div>
@@ -29,10 +29,16 @@
       <div class="prop-val inline"><span class="muted">Отменён {{ (order.canceled_at or "")[:16]|replace("T", " ") }}{% if order.cancel_reason %}: {{ order.cancel_reason }}{% endif %}</span><button class="btn" type="submit">Снять отмену</button></div>
     </div>
     {% else %}
-    <input type="hidden" name="value" value="Y">
-    <div class="prop">
-      <div class="prop-label">Причина отмены</div>
-      <div class="prop-val inline"><input name="reason"><button class="btn danger" type="submit">Отменить заказ</button></div>
+    <div class="danger-zone">
+      <details>
+        <summary class="btn danger">Отменить заказ</summary>
+        <div class="danger-body">
+          <p class="muted">Отмена фиксируется в истории и возвращает резерв. Поле причины необязательно.</p>
+          <input type="hidden" name="value" value="Y">
+          <label>Причина<input name="reason" placeholder="например, отказ покупателя"></label>
+          <div class="form-actions"><button class="btn danger" type="submit">Подтвердить отмену</button></div>
+        </div>
+      </details>
     </div>
     {% endif %}
   </form>
