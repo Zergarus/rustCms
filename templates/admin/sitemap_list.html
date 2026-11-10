@@ -16,17 +16,17 @@
     <tbody>
       {% for entry in entries %}
       <tr>
-        <td><a href="/admin/seo/sitemap/{{ entry.sitemap.id }}"><code>{{ entry.sitemap.name }}</code></a></td>
+        <td><a href="/admin/seo/sitemap/{{ entry.id }}"><code>{{ entry.name }}</code></a></td>
         <td>
           {% for source in entry.sources %}<code>{{ source.code }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
           {% if not entry.sources %}<span class="muted">—</span>{% endif %}
         </td>
-        <td>{% if entry.sitemap.include == "sections" %}разделы{% else %}записи{% endif %}</td>
-        <td>{% if entry.sitemap.path_template %}<code>{{ entry.sitemap.path_template }}</code>{% else %}<span class="muted">из коллекции</span>{% endif %}</td>
-        <td>{{ entry.sitemap.sort }}</td>
-        <td>{% if entry.sitemap.active %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}</td>
+        <td>{% if entry.include == "sections" %}разделы{% else %}записи{% endif %}</td>
+        <td>{% if entry.path_template %}<code>{{ entry.path_template }}</code>{% else %}<span class="muted">из коллекции</span>{% endif %}</td>
+        <td>{{ entry.sort }}</td>
+        <td>{% if entry.active %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}</td>
         <td class="actions">
-          <form method="post" action="/admin/seo/sitemap/{{ entry.sitemap.id }}/delete">
+          <form method="post" action="/admin/seo/sitemap/{{ entry.id }}/delete">
             <button class="btn" type="submit">Удалить</button>
           </form>
         </td>

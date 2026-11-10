@@ -480,3 +480,21 @@ async fn sitemap_items_use_section_path(db: PgPool) {
     assert_eq!(paths.len(), 1, "{paths:?}");
     assert!(paths[0].starts_with("/c/root/child/"), "{paths:?}");
 }
+
+/// Страница настроек sitemap в админке рендерится (регрессия: шаблон ждал вложенный `sitemap`).
+#[sqlx::test]
+async fn admin_sitemap_page_renders(db: sqlx::PgPool) {
+    sqlx::query(
+        "INSERT INTO seo_sitemap (name, path_template, include, sort, active)
+         VALUES ('products', '/product/#ELEMENT_ID#/', 'items', 100, TRUE)",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let app = crate::app(crate::test_support::test_state(db.clone()));
+    let cookie = crate::test_support::admin_cookie(&db).await;
+    let (status, _, page) = crate::test_support::get_raw(&app, "/admin/seo/sitemap", &cookie).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let page = String::from_utf8_lossy(&page);
+    assert!(page.contains("products"), "{page}");
+}
