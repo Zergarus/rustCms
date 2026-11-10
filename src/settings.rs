@@ -61,11 +61,15 @@ impl SettingsForm {
                 _ => return Err("Порт SMTP — число от 1 до 65535".into()),
             }
         }
-        if !["", "auto", "none", "starttls", "tls"].contains(&self.smtp_secure.as_str()) {
+        if !["", "auto", "none", "starttls", "tls"].contains(&self.smtp_secure.trim()) {
             return Err("Шифрование SMTP: auto, none, starttls или tls".into());
         }
         if !self.smtp_host.trim().is_empty() && self.smtp_port.trim().is_empty() {
             return Err("Укажите порт SMTP".into());
+        }
+        let from = self.email_from.trim();
+        if !from.is_empty() && !crate::users::is_valid_email(from) {
+            return Err("Отправитель по умолчанию — корректный email или пусто".into());
         }
         Ok(())
     }

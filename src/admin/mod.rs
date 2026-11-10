@@ -9,6 +9,7 @@ mod flash;
 mod groups;
 mod items;
 mod list;
+mod mail;
 mod modules;
 mod nav;
 mod palette;
@@ -62,6 +63,10 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/seo/sitemap/{id}/delete", post(seo_sitemap::delete))
         .route("/seo/{kind}/{id}", get(seo::form).post(seo::save))
         .route("/settings", get(settings::form).post(settings::save))
+        .route("/mail", get(mail::list).post(mail::create))
+        .route("/mail/new", get(mail::new_form))
+        .route("/mail/{id}", get(mail::edit_form).post(mail::update))
+        .route("/mail/{id}/delete", post(mail::delete))
         .route("/logout", post(auth_pages::logout))
         .route(
             "/collections",

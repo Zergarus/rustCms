@@ -279,6 +279,7 @@ pub(crate) fn sections(user: &Access, ctx: &NavCtx) -> Vec<Section> {
             "system",
             Mode::Cms,
         );
+        add("mail", "Письма", "/admin/mail", "system", Mode::Cms);
     }
 
     if ctx.shop_enabled {

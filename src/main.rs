@@ -19,6 +19,9 @@ mod forms_config_tests;
 mod groups;
 mod import;
 mod mail;
+mod mail_templates;
+#[cfg(test)]
+mod mail_templates_tests;
 mod passwords;
 #[cfg(test)]
 mod register_tests;

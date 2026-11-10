@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% set section = "system" %}
+{% block title %}Письмо — {{ form.event_name or "новый шаблон" }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>{{ form.event_name or "Новый шаблон" }}</h1>
+  <a class="btn" href="/admin/mail">К списку</a>
+</div>
+<form class="card form" method="post" action="{% if id %}/admin/mail/{{ id }}{% else %}/admin/mail{% endif %}">
+{% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
+<label>Код события<input name="event_name" value="{{ form.event_name }}" maxlength="64" required></label>
+<p class="muted">Заглавные латинские буквы, цифры и «_», например <code>SALE_NEW_ORDER</code>.</p>
+<label>От кого<input name="email_from" value="{{ form.email_from }}" maxlength="255" placeholder="#DEFAULT_EMAIL_FROM#"></label>
+<label>Кому<input name="email_to" value="{{ form.email_to }}" maxlength="255" placeholder="#EMAIL#"></label>
+<label>Скрытая копия<input name="bcc" value="{{ form.bcc }}" maxlength="255"></label>
+<label>Тема<input name="subject" value="{{ form.subject }}" maxlength="255" required></label>
+<label>Тело<textarea name="body" rows="12" required>{{ form.body }}</textarea></label>
+<label>Тип письма<select name="body_type">
+{% for value, label in [("text", "Текст"), ("html", "HTML")] %}
+{% set current = form.body_type or "text" %}
+<option value="{{ value }}" {% if current == value %}selected{% endif %}>{{ label }}</option>
+{% endfor %}</select></label>
+<p class="muted">Подстановки: <code>#ПОЛЕ#</code> из события, плюс <code>#SITE_NAME#</code>, <code>#SERVER_NAME#</code>, <code>#DEFAULT_EMAIL_FROM#</code>. В HTML-письмах значения полей экранируются.</p>
+<label class="checkbox"><input type="checkbox" name="active" value="on" {% if form.active %}checked{% endif %}> Активен</label>
+<button class="btn primary" type="submit">Сохранить</button>
+</form>
+{% endblock %}

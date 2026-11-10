@@ -156,6 +156,24 @@ pub async fn send_event(
     Ok(sent)
 }
 
+/// Режим шифрования SMTP: `auto` — 465 это неявный TLS, остальное STARTTLS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TlsMode {
+    None,
+    Starttls,
+    Wrapper,
+}
+
+pub(crate) fn tls_mode(port: u16, secure: &str) -> TlsMode {
+    match secure {
+        "none" => TlsMode::None,
+        "tls" => TlsMode::Wrapper,
+        "starttls" => TlsMode::Starttls,
+        _ if port == 465 => TlsMode::Wrapper,
+        _ => TlsMode::Starttls,
+    }
+}
+
 /// SMTP из окружения (деплой) или из настроек в БД; `None` — письма пишутся в `.eml`.
 async fn transport(
     db: &PgPool,
@@ -176,12 +194,10 @@ async fn transport(
     if !smtp.user.is_empty() {
         builder = builder.credentials(Credentials::new(smtp.user.clone(), smtp.password.clone()));
     }
-    let tls = match smtp.secure.as_str() {
-        "none" => Tls::None,
-        "tls" => Tls::Wrapper(TlsParameters::new(smtp.host.clone())?),
-        "starttls" => Tls::Required(TlsParameters::new(smtp.host.clone())?),
-        _ if smtp.port == 465 => Tls::Wrapper(TlsParameters::new(smtp.host.clone())?),
-        _ => Tls::Required(TlsParameters::new(smtp.host.clone())?),
+    let tls = match tls_mode(smtp.port, &smtp.secure) {
+        TlsMode::None => Tls::None,
+        TlsMode::Wrapper => Tls::Wrapper(TlsParameters::new(smtp.host.clone())?),
+        TlsMode::Starttls => Tls::Required(TlsParameters::new(smtp.host.clone())?),
     };
     Ok(Some(builder.tls(tls).build()))
 }
@@ -211,6 +227,16 @@ async fn deliver(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tls_mode_matrix() {
+        assert_eq!(tls_mode(465, "auto"), TlsMode::Wrapper);
+        assert_eq!(tls_mode(587, "auto"), TlsMode::Starttls);
+        assert_eq!(tls_mode(25, ""), TlsMode::Starttls);
+        assert_eq!(tls_mode(465, "none"), TlsMode::None);
+        assert_eq!(tls_mode(25, "starttls"), TlsMode::Starttls);
+        assert_eq!(tls_mode(25, "tls"), TlsMode::Wrapper);
+    }
 
     #[test]
     fn substitution() {

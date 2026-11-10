@@ -108,3 +108,12 @@ async fn settings_require_super(db: PgPool) {
 async fn smtp_none_without_host(db: PgPool) {
     assert!(settings::smtp(&db).await.unwrap().is_none());
 }
+
+#[sqlx::test]
+async fn invalid_sender_is_not_saved(db: PgPool) {
+    let app = crate::app(crate::test_support::test_state(db.clone()));
+    let cookie = crate::test_support::admin_cookie(&db).await;
+    let status = save(&app, &cookie, &[("email_from", "no-reply@")]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(settings::load(&db).await.unwrap().email_from.is_empty());
+}

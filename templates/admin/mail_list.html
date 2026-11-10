@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% set section = "system" %}
+{% block title %}Письма{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Письма</h1>
+  <a class="btn primary" href="/admin/mail/new">Добавить шаблон</a>
+</div>
+
+{% if templates %}
+<div class="card table-wrap">
+  <table>
+    <thead>
+      <tr><th>Событие</th><th>Тема</th><th>Тип</th><th>Активен</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for template in templates %}
+      <tr>
+        <td><a href="/admin/mail/{{ template.id }}"><code>{{ template.event_name }}</code></a></td>
+        <td>{{ template.subject }}</td>
+        <td>{{ template.body_type }}</td>
+        <td>{% if template.active %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}</td>
+        <td class="actions">
+          <form method="post" action="/admin/mail/{{ template.id }}/delete">
+            <button class="btn" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card"><p>Шаблонов пока нет. Импорт переносит их из Битрикса, дальше их можно править здесь.</p></div>
+{% endif %}
+{% endblock %}
