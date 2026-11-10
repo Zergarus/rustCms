@@ -18,6 +18,8 @@ mod catalog;
 mod collection;
 mod config;
 #[cfg(test)]
+mod cors_tests;
+#[cfg(test)]
 mod csrf_tests;
 mod currency;
 #[allow(dead_code)] // движок, корзина и админка подключают модель в следующих задачах
@@ -89,7 +91,7 @@ use std::{io::Write, sync::Arc, time::Duration};
 use anyhow::{Context, bail};
 use axum::{
     Router,
-    http::{HeaderValue, header},
+    http::{HeaderValue, Method, header},
     response::Redirect,
     routing::get,
 };
@@ -250,19 +252,37 @@ async fn currency_rates(db: &PgPool, config: &Config, args: &[String]) -> anyhow
 }
 
 fn cors_layer(config: &Config) -> CorsLayer {
-    let layer = CorsLayer::new().allow_methods(Any).allow_headers(Any);
     if config.cors_origins.iter().any(|o| o == "*") {
         // С `*` браузер не разрешает credentials — это режим разработки.
-        layer.allow_origin(Any)
-    } else {
-        let origins: Vec<HeaderValue> = config
-            .cors_origins
-            .iter()
-            .filter_map(|o| o.parse().ok())
-            .collect();
-        // Cookie CSRF уходят только при разрешённых credentials.
-        layer.allow_origin(origins).allow_credentials(true)
+        return CorsLayer::new()
+            .allow_methods(Any)
+            .allow_headers(Any)
+            .allow_origin(Any);
     }
+    let origins: Vec<HeaderValue> = config
+        .cors_origins
+        .iter()
+        .filter_map(|o| o.parse().ok())
+        .collect();
+    // С credentials `*` в методах и заголовках недопустим — перечисляем явно.
+    CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            header::ACCEPT,
+            header::HeaderName::from_static("x-bitrix-csrf-token"),
+            header::HeaderName::from_static("x-requested-with"),
+        ])
+        .allow_origin(origins)
+        .allow_credentials(true)
 }
 
 /// Роутер приложения: админка, наш API, bxapi и файлы.
