@@ -6,7 +6,7 @@ use axum::{
     http::HeaderMap,
     response::{Html, IntoResponse, Redirect, Response},
 };
-use chrono::NaiveDateTime;
+use chrono::{NaiveDate, NaiveDateTime};
 use minijinja::context;
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
@@ -161,10 +161,10 @@ fn build_input(
     );
     let published_at = match get("published_at") {
         "" => None,
-        raw => match NaiveDateTime::parse_from_str(raw, DATETIME_FORMAT) {
-            Ok(dt) => Some(dt.and_utc()),
-            Err(_) => {
-                errors.push("main", "Неверная дата публикации");
+        raw => match parse_datetime(raw) {
+            Some(dt) => Some(dt.and_utc()),
+            None => {
+                errors.push("main", "Дата публикации: ожидается ДД.ММ.ГГГГ ЧЧ:ММ");
                 None
             }
         },
@@ -273,7 +273,7 @@ fn element_to_form(element: &Item, properties: &[Field]) -> FormValues {
         }
     }
     if let Some(dt) = element.published_at {
-        form.set("published_at", dt.format(DATETIME_FORMAT).to_string());
+        form.set("published_at", dt.format("%d.%m.%Y %H:%M").to_string());
     }
     for prop in properties {
         if let Some(value) = element.field_values.get(&prop.code) {
@@ -846,6 +846,19 @@ async fn save_seo(db: &sqlx::PgPool, item_id: i64, form: &FormValues) {
         // Карточка уже сохранена: SEO-ошибка не должна откатывать основную запись
         tracing::warn!(item_id, ?error, "SEO записи не сохранено");
     }
+}
+
+/// Дата из поля: `ДД.ММ.ГГГГ ЧЧ:ММ`, `ДД.ММ.ГГГГ` или старый ISO `ГГГГ-ММ-ДДTЧЧ:ММ`.
+fn parse_datetime(raw: &str) -> Option<NaiveDateTime> {
+    let raw = raw.trim();
+    NaiveDateTime::parse_from_str(raw, "%d.%m.%Y %H:%M")
+        .or_else(|_| NaiveDateTime::parse_from_str(raw, DATETIME_FORMAT))
+        .ok()
+        .or_else(|| {
+            NaiveDate::parse_from_str(raw, "%d.%m.%Y")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+        })
 }
 
 /// Работа с предложениями требует записи и в коллекции товаров.
@@ -1999,6 +2012,27 @@ mod tests {
     }
 
     #[test]
+    fn published_date_accepts_ru_and_iso() {
+        assert_eq!(
+            super::parse_datetime("27.09.2026 10:30")
+                .unwrap()
+                .to_string(),
+            "2026-09-27 10:30:00"
+        );
+        assert_eq!(
+            super::parse_datetime("27.09.2026").unwrap().to_string(),
+            "2026-09-27 00:00:00"
+        );
+        assert_eq!(
+            super::parse_datetime("2026-09-27T10:30")
+                .unwrap()
+                .to_string(),
+            "2026-09-27 10:30:00"
+        );
+        assert!(super::parse_datetime("вчера").is_none());
+    }
+
+    #[test]
     fn autogenerates_code_and_parses_props() {
         let form = form(&[
             ("name", "Первая новость"),
@@ -2049,7 +2083,7 @@ mod tests {
             ),
             (
                 &[("name", "А"), ("published_at", "вчера")],
-                "Неверная дата",
+                "Дата публикации: ожидается",
                 "main",
             ),
             (

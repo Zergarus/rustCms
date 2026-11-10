@@ -63,8 +63,8 @@
       <input name="sort" type="number" value="{{ form.sort }}">
     </label>
     <label>Дата публикации (UTC)
-      <input name="published_at" type="datetime-local" value="{{ form.published_at }}">
-      <small>Пусто — опубликован сразу. В будущем — появится в API в это время.</small>
+      <input name="published_at" value="{{ form.published_at }}" placeholder="ДД.ММ.ГГГГ ЧЧ:ММ" inputmode="numeric">
+      <small>Формат ДД.ММ.ГГГГ ЧЧ:ММ (UTC). Пусто — опубликован сразу; в будущем — появится в API в это время.</small>
     </label>
   </div>
   <label class="check"><input type="checkbox" name="active" {% if form.active %}checked{% endif %}> Активна — показывать на сайте</label>

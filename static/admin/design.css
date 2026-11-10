@@ -285,7 +285,8 @@ td { padding: 8px var(--sp-3); }
 .tabs-all-menu a:hover { background: var(--hover); text-decoration: none; }
 .tabs-all-menu a.on { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
 
-.users-table { min-width: 0; width: 100%; table-layout: fixed; }
+.users-table, .table-fixed { min-width: 0; width: 100%; table-layout: fixed; }
+.table-fixed th, .table-fixed td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .users-table th, .users-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .users-table .groups { max-width: none; }
 
