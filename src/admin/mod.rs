@@ -113,6 +113,11 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/collections/{id}/items/new", get(items::new_form))
         .route("/items/{id}", get(items::edit_form).post(items::update))
         .route("/items/{id}/delete", post(items::delete))
+        .route("/items/{id}/history", get(items::history))
+        .route(
+            "/items/{id}/revisions/{revision}/restore",
+            post(items::restore_version),
+        )
         .route("/items/{id}/peek", get(items::peek))
         .route("/items/{id}/active", post(items::set_active))
         .route(

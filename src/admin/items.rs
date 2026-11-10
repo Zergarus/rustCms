@@ -1281,6 +1281,18 @@ async fn save(
             };
             match saved {
                 Ok(saved_id) => {
+                    crate::versions::snapshot(
+                        state,
+                        saved_id,
+                        if item_id.is_some() {
+                            "update"
+                        } else {
+                            "create"
+                        },
+                        user.user.id,
+                        &user.user.login,
+                    )
+                    .await;
                     if let Some(Ok(p)) = &purchase
                         && let Err(e) = save_catalog_tab(
                             &state.db,
@@ -1768,6 +1780,34 @@ pub(crate) async fn bulk_run(
         },
         _ => Err("неизвестное действие".into()),
     }
+}
+
+/// История версий записи.
+pub async fn history(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+) -> AppResult<axum::response::Html<String>> {
+    let element = repo::get_item(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    user.require_collection(element.collection_id, Level::Read)?;
+    let revisions = crate::versions::history(&state.db, id).await?;
+    super::render(
+        &state,
+        "item_history.html",
+        context! { user, id, name => element.name, revisions },
+    )
+}
+
+/// Восстановление версии записи.
+pub async fn restore_version(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path((id, revision)): Path<(i64, i64)>,
+) -> AppResult<Redirect> {
+    crate::versions::restore(&state, &user, revision).await?;
+    Ok(Redirect::to(&format!("/admin/items/{id}")))
 }
 
 #[cfg(test)]

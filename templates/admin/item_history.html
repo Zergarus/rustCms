@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% set section = "collections" %}
+{% block title %}История — {{ name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>История: {{ name }}</h1>
+  <a class="btn" href="/admin/items/{{ id }}">К записи</a>
+</div>
+{% if revisions %}
+<div class="card table-wrap">
+  <table>
+    <thead><tr><th>Когда</th><th>Кто</th><th>Действие</th><th>Название</th><th>Код</th><th></th></tr></thead>
+    <tbody>
+      {% for revision in revisions %}
+      <tr>
+        <td>{{ revision.created_at }}</td>
+        <td>{{ revision.user_login }}</td>
+        <td><code>{{ revision.action }}</code></td>
+        <td>{{ revision.name }}</td>
+        <td><code>{{ revision.code }}</code></td>
+        <td class="actions">
+          <form method="post" action="/admin/items/{{ id }}/revisions/{{ revision.id }}/restore">
+            <button class="btn" type="submit">Восстановить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card"><p>Версий пока нет — они появляются при сохранении записи.</p></div>
+{% endif %}
+{% endblock %}

@@ -56,6 +56,9 @@ mod test_support;
 mod throttle;
 mod uploads;
 mod users;
+mod versions;
+#[cfg(test)]
+mod versions_tests;
 
 use std::{io::Write, sync::Arc, time::Duration};
 
