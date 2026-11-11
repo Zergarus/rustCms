@@ -192,7 +192,8 @@ body[data-tabs="off"] .topbar:not(:has(.nav-toggle:not([hidden]))) { min-height:
 .container { width: 100%; max-width: 1400px; margin: 0 auto; padding: 28px 24px 64px; }
 /* На широких экранах оставляем ощутимые поля от сайдбара и справа (≈90px) */
 @media (min-width: 1680px) {
-  .container { width: calc(100% - 180px); }
+  /* Не упираемся в max-width: иначе на 1920+ поля снова растут больше 90px */
+  .container { width: calc(100% - 180px); max-width: none; }
 }
 .page-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
 .page-head h1 { margin: 0; }
