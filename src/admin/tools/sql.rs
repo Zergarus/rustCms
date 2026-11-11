@@ -3,8 +3,12 @@
 //! Запрос идёт в транзакции: без подтверждения — `READ ONLY`, с подтверждением —
 //! обычной, с `COMMIT` (read-only откатывается). На транзакцию ставится
 //! `statement_timeout = 15s`, вывод ограничен 200 строками и 256 КБ.
-//! Форматирование значений — по текстовому представлению Postgres (simple query
-//! protocol), поэтому отдельный модуль форматирования не нужен.
+//!
+//! Выполнение — через extended protocol (`sqlx::query`/`prepare`), поэтому сервер
+//! сам отклоняет несколько команд в одном prepared statement. Отдельно запрещены
+//! одиночные `SET/RESET/CALL/BEGIN/COMMIT/ROLLBACK/…`, иначе можно выйти из
+//! READ ONLY или сбросить таймаут. Значения приходят в binary-формате и
+//! форматируются по типу колонки.
 
 use std::time::Instant;
 
@@ -12,7 +16,10 @@ use axum::{Extension, Form, extract::State, response::Html};
 use futures_util::TryStreamExt;
 use minijinja::context;
 use serde::{Deserialize, Serialize};
-use sqlx::{AssertSqlSafe, Column, PgConnection, Row, TypeInfo, ValueRef, postgres::PgRow};
+use sqlx::{
+    AssertSqlSafe, Column, Executor, PgConnection, Row, SqlSafeStr, Statement, TypeInfo, ValueRef,
+    postgres::PgRow,
+};
 
 use super::{guard, render};
 use crate::{access::Access, audit, error::AppResult, state::AppState};
@@ -103,24 +110,20 @@ fn rejected(message: impl Into<String>) -> SqlResult {
 
 /// Выполняет SQL в транзакции с таймаутом и собирает [`SqlResult`].
 ///
-/// Разрешён ровно один statement: `raw_sql` шлёт весь текст одним simple Query,
-/// поэтому второй оператор мог бы выйти из READ ONLY или сбросить таймаут.
+/// Разрешён ровно один statement: extended protocol сам отклоняет несколько
+/// команд в prepared statement, а одиночные опасные команды отсекает блоклист.
 async fn run(state: &AppState, sql: &str, confirmed: bool) -> SqlResult {
-    let statements = split_statements(sql);
-    if statements.is_empty() {
+    let statement = sql.trim();
+    // Один хвостовой `;` — обычная привычка; больше не трогаем, иначе можно
+    // склеить команды (`;;`).
+    let statement = statement.strip_suffix(';').unwrap_or(statement).trim_end();
+    if statement.is_empty() {
         return rejected("Пустой запрос");
     }
-    if statements.len() > 1 {
-        return rejected(format!(
-            "Выполняйте по одному запросу (получено {}).",
-            statements.len()
-        ));
-    }
-    let statement = &statements[0];
     if is_transaction_control(&first_keyword(statement)) {
         return rejected(
             "Управление транзакцией и настройками сессии запрещено: \
-             SET/RESET/BEGIN/START/COMMIT/ROLLBACK/END.",
+             SET/RESET/CALL/BEGIN/START/COMMIT/ROLLBACK/END.",
         );
     }
     let mut tx = match state.db.begin().await {
@@ -174,18 +177,24 @@ async fn setup(conn: &mut PgConnection, confirmed: bool) -> Result<(), sqlx::Err
 }
 
 /// Запрос возвращает строки: `SELECT`, CTE, `SHOW`, `EXPLAIN`, `VALUES`, `TABLE`.
+///
+/// Подготовка (prepared statement) даёт колонки даже для пустого результата и
+/// гарантирует, что сервер принял ровно одну команду.
 async fn fetch(conn: &mut PgConnection, sql: &str) -> Result<SqlResult, sqlx::Error> {
-    let mut result = SqlResult::default();
+    let prepared = (&mut *conn)
+        .prepare(AssertSqlSafe(sql).into_sql_str())
+        .await?;
+    let mut result = SqlResult {
+        columns: prepared
+            .columns()
+            .iter()
+            .map(|column| column.name().to_string())
+            .collect(),
+        ..SqlResult::default()
+    };
     let mut used = 0usize;
-    let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch(&mut *conn);
+    let mut stream = prepared.query().fetch(&mut *conn);
     while let Some(row) = stream.try_next().await? {
-        if result.columns.is_empty() {
-            result.columns = row
-                .columns()
-                .iter()
-                .map(|column| column.name().to_string())
-                .collect();
-        }
         let values: Vec<String> = (0..row.len())
             .map(|index| format_value(&row, index))
             .collect();
@@ -202,13 +211,12 @@ async fn fetch(conn: &mut PgConnection, sql: &str) -> Result<SqlResult, sqlx::Er
 
 /// Запрос не возвращает строк: `INSERT`/`UPDATE`/`DELETE`/DDL и прочее.
 async fn execute_statement(conn: &mut PgConnection, sql: &str) -> Result<u64, sqlx::Error> {
-    let result = sqlx::raw_sql(AssertSqlSafe(sql))
-        .execute(&mut *conn)
-        .await?;
+    let result = sqlx::query(AssertSqlSafe(sql)).execute(&mut *conn).await?;
     Ok(result.rows_affected())
 }
 
-/// Текстовое представление значения ячейки (Postgres отдаёт его в text-формате).
+/// Представление значения ячейки: значения приходят в binary-формате, поэтому
+/// тип колонки важен.
 pub(crate) fn format_value(row: &PgRow, index: usize) -> String {
     let Ok(raw) = row.try_get_raw(index) else {
         return "…".into();
@@ -217,31 +225,156 @@ pub(crate) fn format_value(row: &PgRow, index: usize) -> String {
         return "NULL".into();
     }
     let type_name = row.column(index).type_info().name();
-    match raw.as_str() {
-        Ok(text) => truncate(&format_text(type_name, text), MAX_CELL_CHARS),
-        Err(_) => "…".into(),
-    }
+    let formatted: Option<String> = match type_name {
+        "BOOL" => row
+            .try_get::<bool, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "INT2" => row
+            .try_get::<i16, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "INT4" => row
+            .try_get::<i32, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "INT8" => row
+            .try_get::<i64, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "FLOAT4" => row
+            .try_get::<f32, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "FLOAT8" => row
+            .try_get::<f64, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "NUMERIC" => row
+            .try_get_raw(index)
+            .ok()
+            .and_then(|raw| raw.as_bytes().ok())
+            .and_then(format_numeric),
+        "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "UNKNOWN" | "CITEXT" => {
+            row.try_get::<String, _>(index).ok()
+        }
+        "JSON" | "JSONB" => row
+            .try_get::<serde_json::Value, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "DATE" => row
+            .try_get::<chrono::NaiveDate, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "TIME" => row
+            .try_get::<chrono::NaiveTime, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "TIMESTAMP" => row
+            .try_get::<chrono::NaiveDateTime, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "TIMESTAMPTZ" => row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "UUID" => row
+            .try_get_raw(index)
+            .ok()
+            .and_then(|raw| raw.as_bytes().ok())
+            .and_then(|bytes| uuid::Uuid::from_slice(bytes).ok())
+            .map(|id| id.to_string()),
+        "BYTEA" => row
+            .try_get::<Vec<u8>, _>(index)
+            .ok()
+            .map(|bytes| format_bytea(&bytes)),
+        _ => None,
+    };
+    truncate(&formatted.unwrap_or_else(|| "…".into()), MAX_CELL_CHARS)
 }
 
-/// Приведение текста Postgres к человекочитаемому виду для известных типов.
-fn format_text(type_name: &str, text: &str) -> String {
-    match type_name {
-        "BOOL" => match text {
-            "t" => "true".into(),
-            "f" => "false".into(),
-            _ => text.into(),
-        },
-        // Postgres печатает bytea как `\x...`; показываем сам hex.
-        "BYTEA" => {
-            let hex = text.strip_prefix("\\x").unwrap_or(text);
-            if hex.len() > MAX_BYTEA_HEX_CHARS {
-                format!("{}…", &hex[..MAX_BYTEA_HEX_CHARS])
+/// `bytea` — hex, обрезанный по [`MAX_BYTEA_HEX_CHARS`].
+fn format_bytea(bytes: &[u8]) -> String {
+    let mut hex = hex::encode(bytes);
+    if hex.len() > MAX_BYTEA_HEX_CHARS {
+        hex.truncate(MAX_BYTEA_HEX_CHARS);
+        hex.push('…');
+    }
+    hex
+}
+
+/// `NUMERIC` из binary-формата Postgres: знак, база-10000 цифры, вес и scale.
+fn format_numeric(bytes: &[u8]) -> Option<String> {
+    const SIGN_NEG: u16 = 0x4000;
+    const SIGN_NAN: u16 = 0xC000;
+    const SIGN_PINF: u16 = 0xD000;
+    const SIGN_NINF: u16 = 0xF000;
+    if bytes.len() < 8 {
+        return None;
+    }
+    let digits_count = i16::from_be_bytes([bytes[0], bytes[1]]);
+    let weight = i16::from_be_bytes([bytes[2], bytes[3]]);
+    let sign = u16::from_be_bytes([bytes[4], bytes[5]]);
+    let scale = i16::from_be_bytes([bytes[6], bytes[7]]);
+    match sign {
+        SIGN_NAN => return Some("NaN".into()),
+        SIGN_PINF => return Some("Infinity".into()),
+        SIGN_NINF => return Some("-Infinity".into()),
+        _ => {}
+    }
+    if digits_count < 0 || scale < 0 {
+        return None;
+    }
+    let digits_count = digits_count as usize;
+    if bytes.len() < 8 + digits_count * 2 {
+        return None;
+    }
+    let digits: Vec<u16> = bytes[8..8 + digits_count * 2]
+        .chunks_exact(2)
+        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+        .collect();
+    let mut out = String::new();
+    if sign == SIGN_NEG {
+        out.push('-');
+    }
+    let mut started = false;
+    if weight >= 0 {
+        for exponent in (0..=weight).rev() {
+            let group = digits
+                .get((weight - exponent) as usize)
+                .copied()
+                .unwrap_or(0);
+            if !started {
+                if group == 0 {
+                    continue;
+                }
+                out.push_str(&group.to_string());
+                started = true;
             } else {
-                hex.to_string()
+                out.push_str(&format!("{group:04}"));
             }
         }
-        _ => text.to_string(),
     }
+    if !started {
+        out.push('0');
+    }
+    let scale = scale as usize;
+    if scale > 0 {
+        let mut fraction = String::with_capacity(scale.div_ceil(4) * 4);
+        for offset in 1..=scale.div_ceil(4) {
+            let position = weight as i64 + offset as i64;
+            let group = if position >= 0 {
+                digits.get(position as usize).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            fraction.push_str(&format!("{group:04}"));
+        }
+        fraction.truncate(scale);
+        out.push('.');
+        out.push_str(&fraction);
+    }
+    Some(out)
 }
 
 /// Обрезает строку по числу символов, помечая хвост многоточием.
@@ -264,11 +397,12 @@ fn is_query(sql: &str) -> bool {
 }
 
 /// Управление транзакцией и настройками сессии: запрещено, иначе можно выйти из
-/// READ ONLY или сбросить `statement_timeout`.
+/// READ ONLY или сбросить `statement_timeout`. `CALL` умеет коммитить изнутри
+/// процедуры, поэтому тоже запрещён.
 fn is_transaction_control(keyword: &str) -> bool {
     matches!(
         keyword,
-        "set" | "reset" | "begin" | "start" | "commit" | "rollback" | "end"
+        "set" | "reset" | "call" | "begin" | "start" | "commit" | "rollback" | "end"
     )
 }
 
@@ -315,116 +449,18 @@ fn skip_block_comment(after: &str) -> &str {
     ""
 }
 
-/// Делит текст на top-level statements по `;`, не трогая кавычки, dollar-quoting
-/// и комментарии. Postgres понимает вложенные `/* */`, поэтому глубина считается.
-fn split_statements(sql: &str) -> Vec<String> {
-    let chars: Vec<char> = sql.chars().collect();
-    let mut statements = Vec::new();
-    let mut current = String::new();
-    let mut index = 0;
-    while index < chars.len() {
-        match chars[index] {
-            '\'' | '"' => {
-                let quote = chars[index];
-                current.push(quote);
-                index += 1;
-                while index < chars.len() {
-                    let ch = chars[index];
-                    current.push(ch);
-                    index += 1;
-                    if ch == quote {
-                        // Удвоенная кавычка — экранирование внутри литерала.
-                        if index < chars.len() && chars[index] == quote {
-                            current.push(quote);
-                            index += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-            '-' if chars.get(index + 1) == Some(&'-') => {
-                while index < chars.len() {
-                    let ch = chars[index];
-                    current.push(ch);
-                    index += 1;
-                    if ch == '\n' {
-                        break;
-                    }
-                }
-            }
-            '/' if chars.get(index + 1) == Some(&'*') => {
-                current.push('/');
-                current.push('*');
-                index += 2;
-                let mut depth = 1;
-                while index < chars.len() && depth > 0 {
-                    if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
-                        current.push('/');
-                        current.push('*');
-                        index += 2;
-                        depth += 1;
-                    } else if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
-                        current.push('*');
-                        current.push('/');
-                        index += 2;
-                        depth -= 1;
-                    } else {
-                        current.push(chars[index]);
-                        index += 1;
-                    }
-                }
-            }
-            '$' => {
-                // Dollar-quoting: `$$...$$` или `$tag$...$tag$`.
-                let mut end = index + 1;
-                while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
-                    end += 1;
-                }
-                if chars.get(end) == Some(&'$') {
-                    let delimiter: String = chars[index..=end].iter().collect();
-                    let delimiter_chars: Vec<char> = delimiter.chars().collect();
-                    current.push_str(&delimiter);
-                    index = end + 1;
-                    while index < chars.len() {
-                        if chars[index..].starts_with(&delimiter_chars) {
-                            current.push_str(&delimiter);
-                            index += delimiter_chars.len();
-                            break;
-                        }
-                        current.push(chars[index]);
-                        index += 1;
-                    }
-                } else {
-                    current.push('$');
-                    index += 1;
-                }
-            }
-            ';' => {
-                if !skip_leading(&current).is_empty() {
-                    statements.push(current.trim().to_string());
-                }
-                current.clear();
-                index += 1;
-            }
-            ch => {
-                current.push(ch);
-                index += 1;
-            }
-        }
-    }
-    if !skip_leading(&current).is_empty() {
-        statements.push(current.trim().to_string());
-    }
-    statements
-}
-
 /// Текст ошибки Postgres без обвязки sqlx.
 fn db_message(error: &sqlx::Error) -> String {
-    match error {
+    let message = match error {
         sqlx::Error::Database(database) => database.message().to_string(),
         other => other.to_string(),
+    };
+    // Extended protocol отклоняет несколько команд до выполнения: показываем
+    // понятную подсказку вместо текста драйвера.
+    if message.contains("cannot insert multiple commands into a prepared statement") {
+        return "Выполняйте по одному запросу.".into();
     }
+    message
 }
 
 /// Сводка для журнала: первые 500 символов SQL и статус.
@@ -444,7 +480,7 @@ fn audit_summary(sql: &str, result: &SqlResult) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_keyword, is_query, is_transaction_control, split_statements, truncate};
+    use super::{first_keyword, is_query, is_transaction_control, truncate};
 
     use sqlx::PgPool;
 
@@ -553,28 +589,34 @@ mod tests {
     async fn values_are_formatted(db: PgPool) {
         let app = crate::app(test_state(db.clone()));
         let cookie = admin_cookie(&db).await;
+        let sql = "SELECT NULL::int AS n, TRUE AS b, 1.5::numeric AS num, \
+                   -0.25::numeric AS neg, 12345.6789::numeric AS big, 'abc'::bytea AS bytes, \
+                   '0f8fad5b-d9cb-469f-a165-70867728950e'::uuid AS id, \
+                   '{\"a\": 1}'::jsonb AS doc, '2026-01-02'::date AS day, \
+                   '2026-01-02 03:04:05+00'::timestamptz AS ts";
 
-        let (status, body) = post_form(
-            &app,
-            PATH,
-            &cookie,
-            "sql=SELECT+NULL::int+AS+n,+TRUE+AS+b,+1.5::numeric+AS+num,\
-             +'abc'::bytea+AS+bytes,+'0f8fad5b-d9cb-469f-a165-70867728950e'::uuid+AS+id,\
-             +'{\"a\": 1}'::jsonb+AS+doc,+'2026-01-02'::date+AS+day",
-        )
-        .await;
+        let (status, body) = post_form(&app, PATH, &cookie, &sql_body(sql)).await;
 
         assert_eq!(status, 200, "{body}");
         assert!(body.contains(">NULL<"), "NULL: {body}");
         assert!(body.contains(">true<"), "bool: {body}");
         assert!(body.contains(">1.5<"), "numeric: {body}");
+        assert!(body.contains(">-0.25<"), "отрицательный numeric: {body}");
+        assert!(body.contains(">12345.6789<"), "дробный numeric: {body}");
         assert!(body.contains(">616263<"), "bytea: {body}");
         assert!(
             body.contains(">0f8fad5b-d9cb-469f-a165-70867728950e<"),
             "uuid: {body}"
         );
-        assert!(body.contains("&quot;a&quot;: 1"), "jsonb: {body}");
+        assert!(
+            body.contains("<td class=\"mono\">{&quot;a&quot;:1}</td>"),
+            "jsonb: {body}"
+        );
         assert!(body.contains(">2026-01-02<"), "date: {body}");
+        assert!(
+            body.contains(">2026-01-02 03:04:05 UTC<"),
+            "timestamptz: {body}"
+        );
     }
 
     #[sqlx::test]
@@ -726,6 +768,101 @@ mod tests {
         assert_eq!(summary, "new");
     }
 
+    /// Тело формы POST для произвольного SQL.
+    fn sql_body(sql: &str) -> String {
+        let encoded = sql
+            .replace('%', "%25")
+            .replace('&', "%26")
+            .replace('+', "%2B")
+            .replace(' ', "+");
+        format!("sql={encoded}")
+    }
+
+    #[sqlx::test]
+    async fn e_string_quote_cannot_smuggle_commands(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let sql = "SELECT E'\\''; COMMIT; INSERT INTO audit_log (action, entity) VALUES ('esmuggle','probe')";
+
+        let (status, body) = post_form(&app, PATH, &cookie, &sql_body(sql)).await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("по одному"), "нет отказа: {body}");
+        let probes: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = 'esmuggle'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(probes, 0, "E-string обошёл проверку");
+    }
+
+    #[sqlx::test]
+    async fn dollar_like_identifier_cannot_smuggle_commands(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let sql = "SELECT 1 AS foo$bar$; COMMIT; INSERT INTO audit_log (action, entity) VALUES ('dsmuggle','probe')";
+
+        let (status, body) = post_form(&app, PATH, &cookie, &sql_body(sql)).await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("по одному"), "нет отказа: {body}");
+        let probes: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = 'dsmuggle'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(probes, 0, "dollar-подобный идентификатор обошёл проверку");
+    }
+
+    #[sqlx::test]
+    async fn valid_e_string_works(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) =
+            post_form(&app, PATH, &cookie, &sql_body("SELECT E'a\\';b' AS v")).await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            !body.contains("Ошибка"),
+            "валидный E-string отклонён: {body}"
+        );
+        assert!(body.contains("a&#x27;;b"), "нет значения E-string: {body}");
+    }
+
+    #[sqlx::test]
+    async fn trailing_semicolon_works(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = post_form(&app, PATH, &cookie, &sql_body("SELECT 5 AS five;")).await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            !body.contains("Ошибка"),
+            "точка с запятой сломала запрос: {body}"
+        );
+        assert!(body.contains(">5<"), "нет результата: {body}");
+    }
+
+    #[sqlx::test]
+    async fn empty_result_keeps_columns(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = post_form(
+            &app,
+            PATH,
+            &cookie,
+            &sql_body("SELECT 1 AS one WHERE false"),
+        )
+        .await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("<th>one</th>"), "нет колонки: {body}");
+        assert!(body.contains("Строк: 0"), "нет счётчика строк: {body}");
+    }
+
     #[sqlx::test]
     async fn non_super_cannot_execute(db: PgPool) {
         let app = crate::app(test_state(db.clone()));
@@ -770,34 +907,9 @@ mod tests {
     }
 
     #[test]
-    fn splitting_respects_quoting_and_comments() {
-        let cases = [
-            ("SELECT ';'", vec!["SELECT ';'"]),
-            ("SELECT 'it''s; fine'", vec!["SELECT 'it''s; fine'"]),
-            ("SELECT \"a;b\"", vec!["SELECT \"a;b\""]),
-            ("SELECT \"a\"\"b;c\"", vec!["SELECT \"a\"\"b;c\""]),
-            ("SELECT $$a;b$$", vec!["SELECT $$a;b$$"]),
-            ("SELECT $tag$ a;b $tag$", vec!["SELECT $tag$ a;b $tag$"]),
-            (
-                "SELECT /* ; /* nested ; */ */ 1",
-                vec!["SELECT /* ; /* nested ; */ */ 1"],
-            ),
-            (
-                "SELECT 1 -- ;\n; UPDATE t SET x = 1",
-                vec!["SELECT 1 -- ;", "UPDATE t SET x = 1"],
-            ),
-            ("SELECT 1; ; -- tail", vec!["SELECT 1"]),
-            ("  ", vec![]),
-        ];
-        for (sql, expected) in cases {
-            assert_eq!(split_statements(sql), expected, "{sql}");
-        }
-    }
-
-    #[test]
     fn transaction_control_is_blocked() {
         for keyword in [
-            "set", "reset", "begin", "start", "commit", "rollback", "end",
+            "set", "reset", "call", "begin", "start", "commit", "rollback", "end",
         ] {
             assert!(is_transaction_control(keyword), "{keyword}");
         }
