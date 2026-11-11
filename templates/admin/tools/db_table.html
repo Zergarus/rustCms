@@ -15,6 +15,9 @@
   <input name="{{ field.name }}" type="{{ field.input_type }}" value="{{ field.value }}"{% if field.step %} step="{{ field.step }}"{% endif %}>
   {%- endif %}
   <small class="field-hint">{{ field.hint }}</small>
+  {%- if field.nullable %}
+  <span class="check"><input type="checkbox" name="null_{{ field.name }}" value="1"{% if field.is_null %} checked{% endif %}> NULL</span>
+  {%- endif %}
 {% endmacro %}
 
 {% block content %}

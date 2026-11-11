@@ -370,6 +370,7 @@ dependencies = [
  "hex",
  "image",
  "lettre",
+ "libc",
  "md-5",
  "minijinja",
  "password-auth",

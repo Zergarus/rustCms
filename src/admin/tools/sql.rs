@@ -1,14 +1,19 @@
 //! SQL-консоль: выполнить произвольный запрос и увидеть результат.
 //!
-//! Запрос идёт в транзакции: без подтверждения — `READ ONLY`, с подтверждением —
-//! обычной, с `COMMIT` (read-only откатывается). На транзакцию ставится
-//! `statement_timeout = 15s`, вывод ограничен 200 строками и 256 КБ.
+//! Каждый запрос идёт на отдельном [`PgConnection`], который создаётся под запрос
+//! и закрывается после него: `DEALLOCATE ALL`, `set_config(..., false)` и прочее
+//! сессионное состояние не остаются в общем пуле.
 //!
-//! Выполнение — через extended protocol (`sqlx::query`/`prepare`), поэтому сервер
-//! сам отклоняет несколько команд в одном prepared statement. Отдельно запрещены
-//! одиночные `SET/RESET/CALL/BEGIN/COMMIT/ROLLBACK/…`, иначе можно выйти из
-//! READ ONLY или сбросить таймаут. Значения приходят в binary-формате и
-//! форматируются по типу колонки.
+//! Запрос выполняется в транзакции: без подтверждения — `READ ONLY`, с
+//! подтверждением — обычной, с `COMMIT` (read-only откатывается). На транзакцию
+//! ставится `statement_timeout = 15s`, вывод ограничен 200 строками и 256 КБ.
+//!
+//! Запрос-выборка сначала проверяется `prepare`: сервер сам отклоняет несколько
+//! команд в одном prepared statement и отдаёт колонки даже для пустого результата.
+//! Затем тот же текст выполняется `raw_sql` (простой протокол), поэтому значения
+//! приходят в текстовом формате и массивы/enum/домены/interval видны как есть.
+//! Отдельно запрещены одиночные `SET/RESET/CALL/BEGIN/COMMIT/ROLLBACK/…`, иначе
+//! можно выйти из READ ONLY или сбросить таймаут.
 
 use std::time::Instant;
 
@@ -16,7 +21,7 @@ use axum::{Extension, Form, extract::State, response::Html};
 use futures_util::TryStreamExt;
 use minijinja::context;
 use serde::{Deserialize, Serialize};
-use sqlx::{AssertSqlSafe, Column, Executor, PgConnection, Row, SqlSafeStr, Statement};
+use sqlx::{AssertSqlSafe, Column, Connection, Executor, PgConnection, Row, SqlSafeStr, Statement};
 
 use super::{guard, pg, render};
 use crate::{access::Access, audit, error::AppResult, state::AppState};
@@ -105,6 +110,8 @@ fn rejected(message: impl Into<String>) -> SqlResult {
 ///
 /// Разрешён ровно один statement: extended protocol сам отклоняет несколько
 /// команд в prepared statement, а одиночные опасные команды отсекает блоклист.
+/// Под запрос открывается отдельное соединение и закрывается в конце, поэтому
+/// сессионное состояние не попадает в пул.
 async fn run(state: &AppState, sql: &str, confirmed: bool) -> SqlResult {
     let statement = sql.trim();
     // Один хвостовой `;` — обычная привычка; больше не трогаем, иначе можно
@@ -119,7 +126,32 @@ async fn run(state: &AppState, sql: &str, confirmed: bool) -> SqlResult {
              SET/RESET/CALL/BEGIN/START/COMMIT/ROLLBACK/END.",
         );
     }
-    let mut tx = match state.db.begin().await {
+    let mut conn = match open(state).await {
+        Ok(conn) => conn,
+        Err(error) => return rejected(pg::db_message(&error)),
+    };
+    let result = run_on(&mut conn, statement, confirmed).await;
+    // Соединение живёт один запрос: закрываем и на успехе, и на ошибке.
+    let _ = conn.close().await;
+    result
+}
+
+/// Соединение под один запрос SQL-консоли.
+///
+/// В тестах пул указывает на временную БД, а URL в конфиге пуст, поэтому берём
+/// параметры подключения у пула.
+async fn open(state: &AppState) -> Result<PgConnection, sqlx::Error> {
+    if state.config.database_url.is_empty() {
+        let options = state.db.connect_options();
+        PgConnection::connect_with(&options).await
+    } else {
+        PgConnection::connect(&state.config.database_url).await
+    }
+}
+
+/// Транзакция поверх отдельного соединения: режим, таймаут, выполнение и итог.
+async fn run_on(conn: &mut PgConnection, statement: &str, confirmed: bool) -> SqlResult {
+    let mut tx = match conn.begin().await {
         Ok(tx) => tx,
         Err(error) => return rejected(pg::db_message(&error)),
     };
@@ -155,15 +187,19 @@ async fn run(state: &AppState, sql: &str, confirmed: bool) -> SqlResult {
     result
 }
 
-/// Настраивает транзакцию: режим чтения и таймаут запроса.
+/// Настраивает транзакцию: режим чтения, таймаут запроса и часовой пояс.
 async fn setup(conn: &mut PgConnection, confirmed: bool) -> Result<(), sqlx::Error> {
     if !confirmed {
         sqlx::query("SET TRANSACTION READ ONLY")
             .execute(&mut *conn)
             .await?;
     }
-    // 15 секунд на запрос: тяжёлый SELECT не должен держать пул.
+    // 15 секунд на запрос: тяжёлый SELECT не должен держать соединение.
     sqlx::query("SET LOCAL statement_timeout = '15s'")
+        .execute(&mut *conn)
+        .await?;
+    // timestamptz печатается в UTC — так же, как раньше показывал binary-декодер.
+    sqlx::query("SET LOCAL TimeZone = 'UTC'")
         .execute(&mut *conn)
         .await?;
     Ok(())
@@ -172,7 +208,8 @@ async fn setup(conn: &mut PgConnection, confirmed: bool) -> Result<(), sqlx::Err
 /// Запрос возвращает строки: `SELECT`, CTE, `SHOW`, `EXPLAIN`, `VALUES`, `TABLE`.
 ///
 /// Подготовка (prepared statement) даёт колонки даже для пустого результата и
-/// гарантирует, что сервер принял ровно одну команду.
+/// гарантирует, что сервер принял ровно одну команду. Выполняется тот же текст
+/// через `raw_sql`: значения приходят в текстовом формате Postgres.
 async fn fetch(conn: &mut PgConnection, sql: &str) -> Result<SqlResult, sqlx::Error> {
     let prepared = (&mut *conn)
         .prepare(AssertSqlSafe(sql).into_sql_str())
@@ -186,10 +223,10 @@ async fn fetch(conn: &mut PgConnection, sql: &str) -> Result<SqlResult, sqlx::Er
         ..SqlResult::default()
     };
     let mut used = 0usize;
-    let mut stream = prepared.query().fetch(&mut *conn);
+    let mut stream = sqlx::raw_sql(AssertSqlSafe(sql.to_string())).fetch(&mut *conn);
     while let Some(row) = stream.try_next().await? {
         let values: Vec<String> = (0..row.len())
-            .map(|index| pg::format_value(&row, index))
+            .map(|index| pg::format_text_value(&row, index))
             .collect();
         let size: usize = values.iter().map(String::len).sum();
         if result.rows.len() >= MAX_ROWS || used + size > MAX_BYTES {
@@ -425,6 +462,85 @@ mod tests {
         assert!(
             body.contains(">2026-01-02 03:04:05 UTC<"),
             "timestamptz: {body}"
+        );
+    }
+
+    #[sqlx::test]
+    async fn arrays_enums_domains_and_intervals_show_text(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        sqlx::query("CREATE TYPE tools_mood AS ENUM ('sad', 'ok')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("CREATE DOMAIN tools_positive AS integer CHECK (VALUE > 0)")
+            .execute(&db)
+            .await
+            .unwrap();
+        let sql = "SELECT ARRAY[1,2]::bigint[] AS a, 'x'::text AS b, \
+                   'ok'::tools_mood AS mood, 7::tools_positive AS dom, \
+                   interval '1 day 2 hours' AS span, true AS flag, 1.50::numeric AS num";
+
+        let (status, body) = post_form(&app, PATH, &cookie, &sql_body(sql)).await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("{1,2}"), "массив не в текстовом виде: {body}");
+        assert!(body.contains(">x<"), "текст не показан: {body}");
+        assert!(body.contains(">ok<"), "enum не показан: {body}");
+        assert!(body.contains(">7<"), "домен не показан: {body}");
+        assert!(
+            body.contains("1 day 02:00:00"),
+            "interval не показан: {body}"
+        );
+        assert!(body.contains(">true<"), "bool не показан: {body}");
+        assert!(body.contains(">1.50<"), "numeric не показан: {body}");
+        assert!(
+            !body.contains(">…<"),
+            "часть значений осталась нерасшифрованной: {body}"
+        );
+    }
+
+    #[sqlx::test]
+    async fn session_state_does_not_poison_later_queries(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        // DEALLOCATE ALL чистит кеш prepared statements: следующая консольная
+        // команда должна работать на свежем соединении.
+        let (status, body) = post_form(&app, PATH, &cookie, "sql=DEALLOCATE+ALL&confirm=1").await;
+        assert_eq!(status, 200, "{body}");
+        assert!(!body.contains("Ошибка"), "DEALLOCATE ALL не прошёл: {body}");
+
+        let (status, body) = post_form(&app, PATH, &cookie, "sql=SELECT+1+AS+one").await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("<th>one</th>"), "кеш сломал SELECT: {body}");
+        assert!(!body.contains("Ошибка"), "ошибка после DEALLOCATE: {body}");
+
+        // Ошибка запроса не должна отравлять соединение.
+        let (status, body) = post_form(&app, PATH, &cookie, "sql=SELEC+1").await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("Ошибка"), "нет ошибки: {body}");
+
+        let (status, body) = post_form(&app, PATH, &cookie, "sql=SELECT+2+AS+two").await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body.contains("<th>two</th>"),
+            "ошибка сломала SELECT: {body}"
+        );
+
+        // set_config(..., false) — сессионная настройка; после запроса она не
+        // должна оставаться в пуле.
+        let poison = sql_body("SELECT set_config('application_name', 'poison', false) AS app");
+        let (status, body) = post_form(&app, PATH, &cookie, &format!("{poison}&confirm=1")).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(!body.contains("Ошибка"), "set_config не выполнился: {body}");
+
+        let sql = sql_body("SELECT current_setting('application_name') AS app");
+        let (status, body) = post_form(&app, PATH, &cookie, &sql).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            !body.contains("poison"),
+            "сессионная настройка пережила запрос: {body}"
         );
     }
 

@@ -246,6 +246,9 @@ impl ProcessOutput {
 }
 
 /// Запускает процесс с таймаутом, убивая его при превышении.
+///
+/// `cargo` порождает `rustc`, поэтому процесс запускается лидером собственной
+/// группы: по таймауту убивается вся группа, а не только прямой потомок.
 async fn run_process(mut command: Command, limit: Duration) -> Result<ProcessOutput, String> {
     let program = command
         .as_std()
@@ -256,9 +259,13 @@ async fn run_process(mut command: Command, limit: Duration) -> Result<ProcessOut
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command
         .spawn()
         .map_err(|error| format!("Не удалось запустить {program}: {error}"))?;
+    #[cfg(unix)]
+    let pid = child.id();
     let mut stdout = child
         .stdout
         .take()
@@ -287,6 +294,12 @@ async fn run_process(mut command: Command, limit: Duration) -> Result<ProcessOut
         Ok(Ok(status)) => Some(status),
         Ok(Err(error)) => return Err(error),
         Err(_) => {
+            // Сначала группа, затем прямой потомок: `kill_on_drop` и `child.kill()`
+            // не добивают `rustc`, запущенный внутри `cargo`.
+            #[cfg(unix)]
+            if let Some(pid) = pid {
+                kill_process_group(pid);
+            }
             let _ = child.kill().await;
             let _ = child.wait().await;
             None
@@ -299,6 +312,22 @@ async fn run_process(mut command: Command, limit: Duration) -> Result<ProcessOut
         stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
         truncated: stdout_truncated || stderr_truncated,
     })
+}
+
+/// Адресат `kill(2)` для всей группы процессов: отрицательный PGID.
+#[cfg(unix)]
+fn process_group_id(pid: u32) -> i32 {
+    -(pid as i32)
+}
+
+/// Убивает всю группу процессов, лидером которой стал дочерний процесс.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    // SAFETY: `kill(2)` не разыменовывает память; отрицательный pid означает
+    // группу, лидером которой является только что запущенный потомок.
+    unsafe {
+        let _ = libc::kill(process_group_id(pid), libc::SIGKILL);
+    }
 }
 
 /// Читает поток до конца, сохраняя не больше [`MAX_OUTPUT_BYTES`].
@@ -443,9 +472,12 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use tokio::process::Command;
+
     use super::{
         MAX_OUTPUT_BYTES, acquire_lock, child_env, missing_tools, parse_seconds, read_capped, run,
-        run_with_limits, target_dir_from, toolchain_error_for, truncate_output, wrapper,
+        run_process, run_with_limits, target_dir_from, toolchain_error_for, truncate_output,
+        wrapper,
     };
 
     #[test]
@@ -582,6 +614,45 @@ mod tests {
 
         assert_eq!(output.len(), MAX_OUTPUT_BYTES);
         assert!(truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_signal_targets_the_whole_group() {
+        assert_eq!(super::process_group_id(4242), -4242);
+        assert_eq!(super::process_group_id(777), -777);
+    }
+
+    /// `sh` порождает `sleep` в той же группе процессов: при таймауте должны
+    /// погибнуть оба, иначе `sleep` переживёт `cargo`/`sh` и допишет маркер.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_grandchild_processes() {
+        let marker =
+            std::env::temp_dir().join(format!("cms-rust-kill-{}.txt", uuid::Uuid::new_v4()));
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(format!(
+            "sleep 1; echo survived > '{}'",
+            marker.to_string_lossy()
+        ));
+
+        let started = Instant::now();
+        let output = run_process(command, Duration::from_millis(200))
+            .await
+            .expect("запуск sh");
+        assert!(output.status.is_none(), "процесс не убит по таймауту");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "таймаут сработал слишком поздно"
+        );
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            !marker.exists(),
+            "потомок пережил убийство группы процессов: {}",
+            marker.display()
+        );
+        let _ = tokio::fs::remove_file(&marker).await;
     }
 
     #[tokio::test]

@@ -16,6 +16,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hex = "0.4"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "rustls", "aws-lc-rs", "hostname", "webpki-roots"] }
+libc = "0.2"
 md-5 = "0.11.0"
 minijinja = { version = "2", features = ["loader", "json"] }
 password-auth = "1.0"

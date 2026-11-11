@@ -1061,16 +1061,19 @@ async fn render_table_page(
                     .enumerate()
                     .filter(|(_, column)| !column.pk && !column.generated)
                     .map(|(index, column)| {
-                        let value = if open {
-                            form.update_values
-                                .as_ref()
-                                .and_then(|values| values.get(&column.name))
-                                .cloned()
-                                .unwrap_or_else(|| row[index].input.clone())
+                        let submitted = if open {
+                            form.update_values.as_ref()
                         } else {
-                            row[index].input.clone()
+                            None
                         };
-                        FieldView::new(column, value, false)
+                        let value = submitted
+                            .and_then(|values| values.get(&column.name))
+                            .cloned()
+                            .unwrap_or_else(|| row[index].input.clone());
+                        let is_null = submitted.map_or(row[index].null, |values| {
+                            values.contains_key(&format!("null_{}", column.name))
+                        });
+                        FieldView::new(column, value, false, is_null)
                     })
                     .collect()
             } else {
@@ -1089,13 +1092,14 @@ async fn render_table_page(
             .iter()
             .filter(|column| !column.generated)
             .map(|column| {
-                let value = form
-                    .insert_values
-                    .as_ref()
+                let submitted = form.insert_values.as_ref();
+                let value = submitted
                     .and_then(|values| values.get(&column.name))
                     .cloned()
                     .unwrap_or_default();
-                FieldView::new(column, value, true)
+                let is_null = submitted
+                    .is_some_and(|values| values.contains_key(&format!("null_{}", column.name)));
+                FieldView::new(column, value, true, is_null)
             })
             .collect()
     } else {
@@ -1209,10 +1213,14 @@ struct FieldView {
     multiline: bool,
     value: String,
     hint: String,
+    /// У колонки есть галочка `null_<имя>`: она отличает NULL от пустой строки.
+    nullable: bool,
+    /// Текущее значение — NULL, галочка отмечена.
+    is_null: bool,
 }
 
 impl FieldView {
-    fn new(column: &ColumnInfo, value: String, insert: bool) -> Self {
+    fn new(column: &ColumnInfo, value: String, insert: bool, is_null: bool) -> Self {
         let (input_type, boolean, multiline) = match pg::input_kind(column) {
             InputKind::Number => ("number", false, false),
             InputKind::Date => ("date", false, false),
@@ -1220,20 +1228,7 @@ impl FieldView {
             InputKind::Multiline => ("text", false, true),
             InputKind::Text => ("text", false, false),
         };
-        let hint = if insert && column.default.is_some() {
-            format!(
-                "пусто = DEFAULT ({})",
-                pg::truncate(column.default.as_deref().unwrap_or_default(), 60)
-            )
-        } else if column.nullable {
-            "пусто = NULL".into()
-        } else if !insert && column.default.is_some() {
-            "пусто = DEFAULT".into()
-        } else if pg::is_textual(column) {
-            "пусто = пустая строка".into()
-        } else {
-            "обязательно".into()
-        };
+        let hint = hint(column, insert);
         Self {
             name: column.name.clone(),
             input_type,
@@ -1242,8 +1237,42 @@ impl FieldView {
             multiline,
             value,
             hint,
+            nullable: column.nullable,
+            is_null,
         }
     }
+}
+
+/// Подсказка под полем: что означает пустой ввод и галочка NULL.
+fn hint(column: &ColumnInfo, insert: bool) -> String {
+    if pg::is_textual(column) {
+        if !column.nullable && column.default.is_some() {
+            return format!(
+                "пусто = DEFAULT ({})",
+                pg::truncate(column.default.as_deref().unwrap_or_default(), 60)
+            );
+        }
+        if column.nullable {
+            return "пусто = пустая строка; галочка NULL — NULL".into();
+        }
+        return "пусто = пустая строка".into();
+    }
+    if insert && column.default.is_some() {
+        return format!(
+            "пусто = DEFAULT ({})",
+            pg::truncate(column.default.as_deref().unwrap_or_default(), 60)
+        );
+    }
+    if insert && column.identity_default {
+        return "пусто = DEFAULT".into();
+    }
+    if column.nullable {
+        return "пусто = NULL".into();
+    }
+    if !insert && (column.default.is_some() || column.identity_default) {
+        return "пусто = DEFAULT".into();
+    }
+    "обязательно".into()
 }
 
 /// Значение колонки в INSERT/UPDATE.
@@ -1278,17 +1307,37 @@ fn normalized(column: &ColumnInfo, raw: &str) -> String {
 }
 
 /// Пустой ввод при вставке: DEFAULT, пустая строка, NULL или ошибка.
-fn insert_bound(column: &ColumnInfo, raw: Option<&str>) -> Result<Bound, String> {
+///
+/// `null_checked` — галочка `null_<колонка>`: пустой ввод с ней пишет NULL.
+/// Identity `BY DEFAULT` ведёт себя как колонка с default: пусто — сервер сам
+/// подставит значение, явное значение разрешено.
+fn insert_bound(
+    column: &ColumnInfo,
+    raw: Option<&str>,
+    null_checked: bool,
+) -> Result<Bound, String> {
+    if null_checked {
+        return if column.nullable {
+            Ok(Bound::Null)
+        } else {
+            Err(format!("Колонка «{}» не допускает NULL", column.name))
+        };
+    }
     let raw = raw.unwrap_or_default();
     if is_blank(column, raw) {
-        if column.default.is_some() {
+        // Пустая строка в текстовой колонке — это значение `''`: DEFAULT для
+        // nullable-колонки не подставляем, иначе нельзя сохранить пустую строку.
+        if pg::is_textual(column) {
+            if !column.nullable && column.default.is_some() {
+                return Ok(Bound::Default);
+            }
+            return Ok(Bound::Value(String::new()));
+        }
+        if column.default.is_some() || column.identity_default {
             return Ok(Bound::Default);
         }
         if column.nullable {
             return Ok(Bound::Null);
-        }
-        if pg::is_textual(column) {
-            return Ok(Bound::Value(String::new()));
         }
         return Err(format!("Колонка «{}» обязательна", column.name));
     }
@@ -1296,17 +1345,35 @@ fn insert_bound(column: &ColumnInfo, raw: Option<&str>) -> Result<Bound, String>
 }
 
 /// Пустой ввод при правке: пустая строка, NULL, DEFAULT или ошибка.
-fn update_bound(column: &ColumnInfo, raw: Option<&str>) -> Result<Bound, String> {
+///
+/// Пустая строка в текстовой колонке — это значение `''`, а не NULL: иначе
+/// сохранение нетронутой строки молча меняло бы данные. NULL ставится только
+/// галочкой `null_<колонка>`.
+fn update_bound(
+    column: &ColumnInfo,
+    raw: Option<&str>,
+    null_checked: bool,
+) -> Result<Bound, String> {
+    if null_checked {
+        return if column.nullable {
+            Ok(Bound::Null)
+        } else {
+            Err(format!("Колонка «{}» не допускает NULL", column.name))
+        };
+    }
     let raw = raw.unwrap_or_default();
     if is_blank(column, raw) {
+        if pg::is_textual(column) {
+            if !column.nullable && column.default.is_some() {
+                return Ok(Bound::Default);
+            }
+            return Ok(Bound::Value(String::new()));
+        }
         if column.nullable {
             return Ok(Bound::Null);
         }
-        if column.default.is_some() {
+        if column.default.is_some() || column.identity_default {
             return Ok(Bound::Default);
-        }
-        if pg::is_textual(column) {
-            return Ok(Bound::Value(String::new()));
         }
         return Err(format!("Колонка «{}» обязательна", column.name));
     }
@@ -1345,7 +1412,11 @@ fn insert_statement(
         if column.generated {
             continue;
         }
-        match insert_bound(column, form.get(&column.name).map(String::as_str))? {
+        match insert_bound(
+            column,
+            form.get(&column.name).map(String::as_str),
+            form.contains_key(&format!("null_{}", column.name)),
+        )? {
             Bound::Default => continue,
             Bound::Null => {
                 names.push(pg::quote_ident(&column.name));
@@ -1390,7 +1461,11 @@ fn update_statement(
         .iter()
         .filter(|column| !column.pk && !column.generated)
     {
-        match update_bound(column, form.get(&column.name).map(String::as_str))? {
+        match update_bound(
+            column,
+            form.get(&column.name).map(String::as_str),
+            form.contains_key(&format!("null_{}", column.name)),
+        )? {
             Bound::Default => {
                 sets.push(format!("{} = DEFAULT", pg::quote_ident(&column.name)));
             }
@@ -2594,7 +2669,10 @@ mod tests {
 
         let (status, body) = get(&app, "/admin/tools/db/public/tools_blank", &cookie).await;
         assert_eq!(status, 200, "{body}");
-        assert!(body.contains("пусто = NULL"), "нет подсказки NULL: {body}");
+        assert!(
+            body.contains("галочка NULL"),
+            "нет подсказки про галочку NULL: {body}"
+        );
         // pg_get_expr отдаёт default с приведением типа: 'fallback'::text.
         assert!(
             body.contains("пусто = DEFAULT (") && body.contains("fallback"),
@@ -2605,7 +2683,7 @@ mod tests {
             "нет подсказки пустой строки: {body}"
         );
 
-        // Правка: nullable text пусто → NULL, not-null text с default пусто → DEFAULT,
+        // Правка: nullable text пусто → '', not-null text с default пусто → DEFAULT,
         // not-null text без default пусто → пустая строка.
         let (status, body) = post(
             &app,
@@ -2620,11 +2698,15 @@ mod tests {
                 .fetch_one(&db)
                 .await
                 .unwrap();
-        assert_eq!(opt, None, "nullable text пусто должен стать NULL");
+        assert_eq!(
+            opt.as_deref(),
+            Some(""),
+            "nullable text пусто должен стать ''"
+        );
         assert_eq!(req, "fallback", "default text пусто должен дать DEFAULT");
         assert_eq!(plain, "");
 
-        // Вставка: nullable text пусто → NULL, default → DEFAULT, без default → ''.
+        // Вставка: nullable text пусто → '', default → DEFAULT, без default → ''.
         let (status, body) = post(
             &app,
             "/admin/tools/db/public/tools_blank/insert",
@@ -2638,9 +2720,186 @@ mod tests {
                 .fetch_one(&db)
                 .await
                 .unwrap();
-        assert_eq!(opt, None);
+        assert_eq!(opt.as_deref(), Some(""));
         assert_eq!(req, "fallback");
         assert_eq!(plain, "");
+    }
+
+    #[sqlx::test]
+    async fn identity_by_default_allows_blank_and_explicit(db: PgPool) {
+        sqlx::query(
+            "CREATE TABLE tools_identity (
+                 id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                 name text NOT NULL
+             )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        // identity BY DEFAULT — обычная колонка формы: значение можно не указывать.
+        let (status, body) = get(&app, "/admin/tools/db/public/tools_identity", &cookie).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body.contains("name=\"id\""),
+            "identity BY DEFAULT не попала в форму вставки: {body}"
+        );
+
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_identity/insert",
+            &cookie,
+            &[("id", ""), ("name", "Первый")],
+        )
+        .await;
+        assert_eq!(
+            status, 303,
+            "пустой identity BY DEFAULT не вставился: {body}"
+        );
+        let (id, name): (i64, String) =
+            sqlx::query_as("SELECT id, name FROM tools_identity ORDER BY id")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!((id, name.as_str()), (1, "Первый"));
+
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_identity/insert",
+            &cookie,
+            &[("id", "50"), ("name", "Второй")],
+        )
+        .await;
+        assert_eq!(
+            status, 303,
+            "явный identity BY DEFAULT не вставился: {body}"
+        );
+        let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM tools_identity ORDER BY id")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(ids, [1, 50]);
+    }
+
+    #[sqlx::test]
+    async fn empty_text_round_trips_and_null_is_explicit(db: PgPool) {
+        sqlx::query(
+            "CREATE TABLE tools_nullable (
+                 id bigint PRIMARY KEY,
+                 note text,
+                 req text NOT NULL DEFAULT 'fallback',
+                 opt_def text DEFAULT 'default-text'
+             )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO tools_nullable (id, note, req) VALUES (1, '', 'kept')")
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        // Пустая строка в БД не должна выглядеть как NULL: галочка снята.
+        let (status, body) = get(&app, "/admin/tools/db/public/tools_nullable", &cookie).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body.contains("галочка NULL"),
+            "нет подсказки про галочку NULL: {body}"
+        );
+        assert!(
+            !body.contains("name=\"null_note\" value=\"1\" checked"),
+            "пустая строка показана как NULL: {body}"
+        );
+
+        // Сохранение без изменений: пустая строка остаётся пустой строкой,
+        // not-null с default по-прежнему получает DEFAULT.
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_nullable/update",
+            &cookie,
+            &[("id", "1"), ("note", ""), ("req", ""), ("opt_def", "")],
+        )
+        .await;
+        assert_eq!(status, 303, "{body}");
+        let (note, req, opt_def): (Option<String>, String, Option<String>) =
+            sqlx::query_as("SELECT note, req, opt_def FROM tools_nullable WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(note.as_deref(), Some(""), "пустая строка стала NULL");
+        assert_eq!(req, "fallback", "not-null с default не получил DEFAULT");
+        assert_eq!(
+            opt_def.as_deref(),
+            Some(""),
+            "nullable text с default не сохранил пустую строку"
+        );
+
+        // Вставка пустого nullable text — пустая строка, а не NULL/DEFAULT.
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_nullable/insert",
+            &cookie,
+            &[("id", "2"), ("note", ""), ("opt_def", "")],
+        )
+        .await;
+        assert_eq!(status, 303, "{body}");
+        let (note, opt_def): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT note, opt_def FROM tools_nullable WHERE id = 2")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(note.as_deref(), Some(""), "вставка записала NULL вместо ''");
+        assert_eq!(
+            opt_def.as_deref(),
+            Some(""),
+            "nullable text с default получил DEFAULT вместо ''"
+        );
+
+        // Галочка NULL — явный NULL.
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_nullable/insert",
+            &cookie,
+            &[("id", "3"), ("note", ""), ("null_note", "1")],
+        )
+        .await;
+        assert_eq!(status, 303, "{body}");
+        let note: Option<String> =
+            sqlx::query_scalar("SELECT note FROM tools_nullable WHERE id = 3")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(note, None, "галочка NULL не записала NULL");
+
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_nullable/update",
+            &cookie,
+            &[
+                ("id", "1"),
+                ("note", ""),
+                ("null_note", "1"),
+                ("req", "kept"),
+            ],
+        )
+        .await;
+        assert_eq!(status, 303, "{body}");
+        let note: Option<String> =
+            sqlx::query_scalar("SELECT note FROM tools_nullable WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(note, None, "галочка NULL при правке не записала NULL");
+
+        let (_, body) = get(&app, "/admin/tools/db/public/tools_nullable", &cookie).await;
+        assert!(
+            body.contains("name=\"null_note\" value=\"1\" checked"),
+            "NULL-значение не отмечено галочкой: {body}"
+        );
     }
 
     #[sqlx::test]

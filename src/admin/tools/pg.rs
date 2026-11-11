@@ -2,8 +2,9 @@
 //!
 //! Схемы, таблицы и колонки берутся из системного каталога, а не из пользовательского
 //! ввода. Наружу идентификаторы попадают только после [`quote_ident`], параметры
-//! страницы — bind-параметрами. Значения приходят в binary-формате, поэтому
-//! форматируются по типу колонки; этим же форматтером пользуется SQL-консоль.
+//! страницы — bind-параметрами. Табличный обозреватель читает значения в binary-формате
+//! и форматирует их по типу колонки; SQL-консоль получает текст Postgres и показывает
+//! его через [`format_text_value`].
 
 use serde::Serialize;
 use sqlx::{AssertSqlSafe, Column, PgPool, Row, TypeInfo, ValueRef, postgres::PgRow};
@@ -45,6 +46,9 @@ pub struct ColumnInfo {
     pub pk: bool,
     /// Значение вычисляет сервер: `GENERATED ALWAYS` (stored) или identity ALWAYS.
     pub generated: bool,
+    /// Identity `BY DEFAULT`: значение можно не указывать (сервер подставит
+    /// последовательность), но и явное значение разрешено.
+    pub identity_default: bool,
 }
 
 /// Первичный ключ: одна или несколько колонок в порядке объявления.
@@ -81,6 +85,8 @@ pub struct RowCell {
     pub display: String,
     /// Значение для формы; NULL — пустая строка, без обрезки.
     pub input: String,
+    /// В БД лежит NULL: форма ставит галочку `null_<колонка>`.
+    pub null: bool,
 }
 
 /// Что за поле рисовать в форме строки.
@@ -171,6 +177,7 @@ pub(crate) async fn columns(db: &PgPool, schema: &str, table: &str) -> AppResult
                 NOT a.attnotnull AS nullable,
                 pg_get_expr(d.adbin, d.adrelid) AS \"default\",
                 (a.attgenerated <> '' OR a.attidentity = 'a') AS generated,
+                (a.attidentity = 'd') AS identity_default,
                 EXISTS (SELECT 1
                           FROM pg_index i
                           CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY
@@ -202,6 +209,7 @@ pub(crate) async fn columns(db: &PgPool, schema: &str, table: &str) -> AppResult
             default: row.default,
             pk: row.pk,
             generated: row.generated,
+            identity_default: row.identity_default,
         })
         .collect())
 }
@@ -215,6 +223,7 @@ struct ColumnRow {
     default: Option<String>,
     pk: bool,
     generated: bool,
+    identity_default: bool,
 }
 
 /// Страница данных: до `per` строк (не больше 200), точный `count(*)` с таймаутом.
@@ -286,6 +295,7 @@ pub(crate) async fn rows(
                 .map(|index| RowCell {
                     display: format_value(row, index),
                     input: input_value(row, index),
+                    null: row.try_get_raw(index).is_ok_and(|raw| raw.is_null()),
                 })
                 .collect()
         })
@@ -407,6 +417,55 @@ pub(crate) fn format_value(row: &PgRow, index: usize) -> String {
         _ => None,
     };
     truncate(&formatted.unwrap_or_else(|| "…".into()), MAX_CELL_CHARS)
+}
+
+/// Значение строки простого запроса: Postgres уже отдал текст, поэтому массивы,
+/// enum, домены и interval показываются как есть, без binary-декодеров.
+pub(crate) fn format_text_value(row: &PgRow, index: usize) -> String {
+    let Ok(raw) = row.try_get_raw(index) else {
+        return "…".into();
+    };
+    if raw.is_null() {
+        return "NULL".into();
+    }
+    let type_name = row.column(index).type_info().name();
+    let Ok(text) = raw.as_str() else {
+        return "…".into();
+    };
+    truncate(&readable_text(type_name, text), MAX_CELL_CHARS)
+}
+
+/// Приводит текст Postgres к тому же виду, в котором раньше показывались binary-значения.
+fn readable_text(type_name: &str, text: &str) -> String {
+    match type_name.to_ascii_uppercase().as_str() {
+        // Simple query protocol печатает bool как `t`/`f`.
+        "BOOL" => match text {
+            "t" => "true".into(),
+            "f" => "false".into(),
+            _ => text.to_string(),
+        },
+        // `bytea` в текстовом формате — `\x…`, как в `input_value`.
+        "BYTEA" => {
+            let hex = text.strip_prefix("\\x").unwrap_or(text);
+            let mut hex = hex.to_string();
+            if hex.len() > MAX_BYTEA_HEX_CHARS {
+                hex.truncate(MAX_BYTEA_HEX_CHARS);
+                hex.push('…');
+            }
+            hex
+        }
+        "TIMESTAMPTZ" => match text
+            .strip_suffix("+00:00")
+            .or_else(|| text.strip_suffix("+00"))
+        {
+            Some(base) => format!("{base} UTC"),
+            None => text.to_string(),
+        },
+        // jsonb печатается с пробелами; показываем компактно, как раньше.
+        "JSON" | "JSONB" => serde_json::from_str::<serde_json::Value>(text)
+            .map_or_else(|_| text.to_string(), |value| value.to_string()),
+        _ => text.to_string(),
+    }
 }
 
 /// Есть ли у типа binary-декодер в [`format_value`]; иначе колонка читается `::text`.
