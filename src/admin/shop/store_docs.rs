@@ -1119,7 +1119,7 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn docs_hidden_without_store_control(db: PgPool) {
+    async fn docs_explain_without_store_control(db: PgPool) {
         order_fixture(&db).await;
         let app = crate::app(test_state(db.clone()));
         let cookie = admin_cookie(&db).await;
@@ -1127,9 +1127,10 @@ mod tests {
         assert!(s.is_success(), "{s}");
         assert!(html.contains("Складской учёт выключен"), "{html}");
         assert!(html.contains("/admin/shop/settings"), "{html}");
-        assert!(!html.contains("href=\"/admin/shop/store-docs\""), "{html}");
+        // Пункт меню остаётся доступным и объясняет, как включить учёт
+        assert!(html.contains("href=\"/admin/shop/store-docs\""), "{html}");
         let (_, html) = get(&app, "/admin/shop/stores", &cookie).await;
-        assert!(!html.contains("/admin/shop/store-docs"), "{html}");
+        assert!(html.contains("href=\"/admin/shop/store-docs\""), "{html}");
         control(&db, true).await;
         let (_, html) = get(&app, "/admin/shop/stores", &cookie).await;
         assert!(html.contains("href=\"/admin/shop/store-docs\""), "{html}");

@@ -267,6 +267,11 @@ td { padding: 8px var(--sp-3); }
 .stock-table td.num input { width: 140px; text-align: right; }
 .stock-table tr.muted td { color: var(--muted); }
 
+/* Группы пользователей в накопительной скидке — в две колонки */
+.groups-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 24px; max-width: 720px; }
+.groups-grid .check { padding: 3px 0; }
+@media (max-width: 700px) { .groups-grid { grid-template-columns: 1fr; } }
+
 /* Изменённый вид: только жёлтая точка, подпись — по наведению */
 .view-dirty .dirty { position: relative; gap: 0; padding: 5px; margin: -5px; border-radius: 50%; }
 .view-dirty .dirty-text {

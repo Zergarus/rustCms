@@ -6,8 +6,9 @@
 {% if disabled %}
 <h1>Складские документы</h1>
 <div class="card empty">
-  <p>Складской учёт выключен.</p>
-  <p class="muted">Включите его в <a href="/admin/shop/settings">настройках каталога</a>, чтобы вести приход, списание и перемещение товаров.</p>
+  <p><strong>Складской учёт выключен.</strong></p>
+  <p class="muted">Приход, списание и перемещение недоступны. Включите учёт в настройках каталога.</p>
+  <p><a class="btn primary" href="/admin/shop/settings">Открыть настройки каталога</a></p>
 </div>
 {% else %}
 <div class="page-head">

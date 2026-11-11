@@ -29,9 +29,11 @@
     <legend>Группы пользователей</legend>
     {% if groups %}
     <p class="muted hint">Ни одной не отмечено — правило для всех.</p>
-    {% for g in groups %}
-    <label class="check"><input type="checkbox" name="group" value="{{ g[0] }}" {% if g[0] in form.groups %}checked{% endif %}> {{ g[1] }}</label>
-    {% endfor %}
+    <div class="groups-grid">
+      {% for g in groups %}
+      <label class="check"><input type="checkbox" name="group" value="{{ g[0] }}" {% if g[0] in form.groups %}checked{% endif %}> <span class="grow">{{ g[1] }} <span class="muted">#{{ g[0] }}</span></span></label>
+      {% endfor %}
+    </div>
     {% else %}
     <p class="muted hint">Групп нет — правило для всех.</p>
     {% endif %}

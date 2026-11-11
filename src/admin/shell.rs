@@ -277,10 +277,12 @@ mod page_tests {
         let cookie = admin_cookie(&db).await;
         let (status, body) = get(&app, "/admin/shop/stores", &cookie).await;
         assert_eq!(status, 200);
-        for s in ["Все разделы", "Типы цен", "Поставщики"] {
+        for s in ["Все разделы", "Типы цен", "Поставщики", "Документы"]
+        {
             assert!(body.contains(s), "нет {s}");
         }
-        assert!(!body.contains("Документы"));
+        // «Остатки» появляются только при включённом складском учёте
+        assert!(!body.contains("Остатки"));
     }
 
     #[sqlx::test]

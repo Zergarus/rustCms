@@ -321,13 +321,14 @@ pub(crate) fn sections(user: &Access, ctx: &NavCtx) -> Vec<Section> {
             s("stores", "Склады", "/admin/shop/stores", "shop_stock");
             if ctx.store_control {
                 s("rests", "Остатки", "/admin/shop/rests", "shop_stock");
-                s(
-                    "store-docs",
-                    "Документы",
-                    "/admin/shop/store-docs",
-                    "shop_stock",
-                );
             }
+            // Пункт виден и при выключенном учёте: страница объясняет, как включить.
+            s(
+                "store-docs",
+                "Документы",
+                "/admin/shop/store-docs",
+                "shop_stock",
+            );
             s(
                 "contractors",
                 "Поставщики",
@@ -1004,8 +1005,9 @@ mod tests {
         let mut ctx = load_ctx(&db, &user).await.unwrap();
         assert!(!ctx.store_control);
         let has = |ctx: &NavCtx, code: &str| sections(&user, ctx).iter().any(|s| s.code == code);
-        assert!(!has(&ctx, "rests") && !has(&ctx, "store-docs"));
-        assert!(has(&ctx, "stores"));
+        assert!(!has(&ctx, "rests"));
+        // «Документы» видны и при выключенном учёте: страница объясняет, как включить
+        assert!(has(&ctx, "store-docs") && has(&ctx, "stores"));
 
         let mut tx = db.begin().await.unwrap();
         crate::stock::set_store_control(&mut tx, true)
