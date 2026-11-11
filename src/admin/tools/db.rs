@@ -1,10 +1,11 @@
-//! Обозреватель таблиц: список таблиц/вью, структура, данные и правка строк.
+//! Обозреватель таблиц: список таблиц/вью, структура, данные, правка строк и DDL.
 //!
 //! Имена схем/таблиц/колонок берутся из каталога PostgreSQL и экранируются;
 //! пользовательский ввод задаёт только страницу и сортировку по существующей
 //! колонке. Строки меняются только у таблиц (`r`/`p`) с первичным ключом:
 //! значения уходят bind-параметрами, имена — из каталога после [`pg::quote_ident`].
-//! DDL — следующая задача.
+//! DDL принимает имена только по `^[a-z_][a-z0-9_]*$`, типы — из allowlist,
+//! default — только безопасный литерал; идентификаторы всё равно экранируются.
 
 use std::collections::HashMap;
 
@@ -38,6 +39,28 @@ const MAX_PER_PAGE: i64 = 200;
 const PAGER_AROUND: i64 = 2;
 /// Таймаут одного INSERT/UPDATE/DELETE.
 const WRITE_TIMEOUT: &str = "15s";
+/// Таймаут одного DDL-запроса.
+const DDL_TIMEOUT: &str = "15s";
+/// Сколько строк колонок отрисовывает форма создания таблицы.
+const CREATE_COLUMNS: usize = 5;
+/// Максимальная длина идентификатора PostgreSQL.
+const MAX_IDENT_CHARS: usize = 63;
+/// Подсказки типов в форме создания/добавления колонки.
+const COLUMN_TYPES: [&str; 13] = [
+    "text",
+    "varchar(n)",
+    "integer",
+    "bigint",
+    "smallint",
+    "numeric(p,s)",
+    "boolean",
+    "date",
+    "timestamp",
+    "timestamptz",
+    "uuid",
+    "jsonb",
+    "bytea",
+];
 
 /// Параметры страницы таблицы.
 #[derive(Debug, Default, Deserialize)]
@@ -61,7 +84,112 @@ pub async fn list(
         .iter()
         .map(TableView::new)
         .collect();
-    render(&state, "tools/db_list.html", context! { user, tables })
+    let schemas = pg::schemas(&state.db).await?;
+    render_list_page(
+        &state,
+        &user,
+        tables,
+        schemas,
+        CreateFormView::empty(),
+        None,
+    )
+}
+
+/// POST `/admin/tools/db/create` — создать таблицу из формы списка.
+pub async fn table_create(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Form(form): Form<HashMap<String, String>>,
+) -> AppResult<Response> {
+    guard(&state, &user)?;
+    let schemas = pg::schemas(&state.db).await?;
+    let submitted = CreateFormView::from_form(&form, true);
+    // Схема выбирается из существующих пользовательских схем; чужое имя — 404.
+    let schema = submitted.schema.clone();
+    if !schemas.iter().any(|known| known == &schema) {
+        return Err(AppError::NotFound);
+    }
+    if let Err(message) = validate_ident(&submitted.table) {
+        return create_error(
+            &state,
+            &user,
+            schemas,
+            submitted,
+            format!("Имя таблицы: {message}"),
+        )
+        .await;
+    }
+    let columns = match parse_create_columns(&form) {
+        Ok(columns) => columns,
+        Err(message) => {
+            return create_error(&state, &user, schemas, submitted, message).await;
+        }
+    };
+    let table = submitted.table.clone();
+    let statement = create_table_sql(&schema, &table, &columns);
+    match execute_ddl(&state, &statement).await {
+        Ok(()) => {
+            let details = columns
+                .iter()
+                .map(|column| format!("{} {}", column.name, column.data_type))
+                .collect::<Vec<_>>()
+                .join(", ");
+            audit_ddl(
+                &state,
+                &user,
+                "db-table-create",
+                &format!("{schema}.{table}"),
+                &format!("колонки: {details}"),
+            )
+            .await;
+            let url = format!(
+                "/admin/tools/db/{}/{}",
+                encode_path(&schema),
+                encode_path(&table)
+            );
+            Ok(flash::redirect(&url, "Таблица создана", FlashKind::Ok))
+        }
+        Err(error) => create_error(&state, &user, schemas, submitted, pg::db_message(&error)).await,
+    }
+}
+
+/// Ошибка создания таблицы: список таблиц с alert и сохранённой формой.
+async fn create_error(
+    state: &AppState,
+    user: &Access,
+    schemas: Vec<String>,
+    form: CreateFormView,
+    message: String,
+) -> AppResult<Response> {
+    let tables: Vec<TableView> = pg::tables(&state.db)
+        .await?
+        .iter()
+        .map(TableView::new)
+        .collect();
+    Ok(render_list_page(state, user, tables, schemas, form, Some(message))?.into_response())
+}
+
+/// Рендер списка таблиц с формой создания и (необязательной) ошибкой.
+fn render_list_page(
+    state: &AppState,
+    user: &Access,
+    tables: Vec<TableView>,
+    schemas: Vec<String>,
+    create: CreateFormView,
+    error: Option<String>,
+) -> AppResult<Html<String>> {
+    render(
+        state,
+        "tools/db_list.html",
+        context! {
+            user,
+            tables,
+            schemas,
+            ddl_types => COLUMN_TYPES,
+            create,
+            error,
+        },
+    )
 }
 
 /// GET `/admin/tools/db/{schema}/{table}` — структура и страница данных.
@@ -193,6 +321,567 @@ pub async fn row_delete(
             page_error(&state, &user, info, columns, page).await
         }
     }
+}
+
+/// POST `/admin/tools/db/{schema}/{table}/drop` — удалить таблицу.
+///
+/// Подтверждение — точное имя таблицы в поле `confirm`; `DROP TABLE` без CASCADE,
+/// поэтому зависимости показываются ошибкой БД.
+pub async fn table_drop(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path((schema, table)): Path<(String, String)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> AppResult<Response> {
+    guard(&state, &user)?;
+    let info = find_table(&state, &schema, &table).await?;
+    if !is_table(&info) {
+        return Err(AppError::NotFound);
+    }
+    let columns = pg::columns(&state.db, &info.schema, &info.name).await?;
+    let confirm = form.get("confirm").map(|value| value.trim()).unwrap_or("");
+    if confirm != info.name {
+        let page = PageForm {
+            error: Some(format!(
+                "Введите имя таблицы «{}», чтобы подтвердить удаление.",
+                info.name
+            )),
+            ..PageForm::default()
+        };
+        return page_error(&state, &user, info, columns, page).await;
+    }
+    match execute_ddl(&state, &format!("DROP TABLE {}", qualified(&info))).await {
+        Ok(()) => {
+            record_ddl(&state, &user, "db-table-drop", &info, "").await;
+            Ok(flash::redirect(
+                "/admin/tools/db",
+                "Таблица удалена",
+                FlashKind::Ok,
+            ))
+        }
+        Err(error) => {
+            let page = PageForm {
+                error: Some(pg::db_message(&error)),
+                ..PageForm::default()
+            };
+            page_error(&state, &user, info, columns, page).await
+        }
+    }
+}
+
+/// POST `/admin/tools/db/{schema}/{table}/column-add` — добавить колонку.
+pub async fn column_add(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path((schema, table)): Path<(String, String)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> AppResult<Response> {
+    guard(&state, &user)?;
+    let info = find_table(&state, &schema, &table).await?;
+    if !is_table(&info) {
+        return Err(AppError::NotFound);
+    }
+    let columns = pg::columns(&state.db, &info.schema, &info.name).await?;
+    let name = form.get("name").map(|value| value.trim()).unwrap_or("");
+    let data_type = form.get("type").map(|value| value.trim()).unwrap_or("");
+    let default = form.get("default").map(String::as_str).unwrap_or("");
+    let nullable = form.contains_key("nullable");
+
+    let parsed = validate_ident(name)
+        .and_then(|()| parse_column_type(data_type))
+        .and_then(|data_type| parse_default(default).map(|default| (data_type, default)));
+    let (data_type, default) = match parsed {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            let page = PageForm {
+                error: Some(message),
+                ..PageForm::default()
+            };
+            return page_error(&state, &user, info, columns, page).await;
+        }
+    };
+    if columns.iter().any(|column| column.name == name) {
+        let page = PageForm {
+            error: Some(format!("Колонка «{name}» уже существует.")),
+            ..PageForm::default()
+        };
+        return page_error(&state, &user, info, columns, page).await;
+    }
+
+    let mut statement = format!(
+        "ALTER TABLE {} ADD COLUMN {} {}",
+        qualified(&info),
+        pg::quote_ident(name),
+        data_type
+    );
+    if !nullable {
+        statement.push_str(" NOT NULL");
+    }
+    if let Some(default) = &default {
+        statement.push_str(&format!(" DEFAULT {default}"));
+    }
+    match execute_ddl(&state, &statement).await {
+        Ok(()) => {
+            record_ddl(
+                &state,
+                &user,
+                "db-column-add",
+                &info,
+                &format!("колонка {name} {data_type}"),
+            )
+            .await;
+            Ok(flash::redirect(
+                &table_url(&info),
+                "Колонка добавлена",
+                FlashKind::Ok,
+            ))
+        }
+        Err(error) => {
+            let page = PageForm {
+                error: Some(pg::db_message(&error)),
+                ..PageForm::default()
+            };
+            page_error(&state, &user, info, columns, page).await
+        }
+    }
+}
+
+/// POST `/admin/tools/db/{schema}/{table}/column-drop` — удалить колонку.
+///
+/// Подтверждение — точное имя колонки в поле `confirm`; имя проверяется по каталогу.
+pub async fn column_drop(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path((schema, table)): Path<(String, String)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> AppResult<Response> {
+    guard(&state, &user)?;
+    let info = find_table(&state, &schema, &table).await?;
+    if !is_table(&info) {
+        return Err(AppError::NotFound);
+    }
+    let columns = pg::columns(&state.db, &info.schema, &info.name).await?;
+    let name = form.get("name").map(|value| value.trim()).unwrap_or("");
+    if let Err(message) = validate_ident(name) {
+        let page = PageForm {
+            error: Some(message),
+            ..PageForm::default()
+        };
+        return page_error(&state, &user, info, columns, page).await;
+    }
+    if !columns.iter().any(|column| column.name == name) {
+        return Err(AppError::NotFound);
+    }
+    let confirm = form.get("confirm").map(|value| value.trim()).unwrap_or("");
+    if confirm != name {
+        let page = PageForm {
+            error: Some(format!(
+                "Введите имя колонки «{name}», чтобы подтвердить удаление."
+            )),
+            ..PageForm::default()
+        };
+        return page_error(&state, &user, info, columns, page).await;
+    }
+    match execute_ddl(
+        &state,
+        &format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            qualified(&info),
+            pg::quote_ident(name)
+        ),
+    )
+    .await
+    {
+        Ok(()) => {
+            record_ddl(
+                &state,
+                &user,
+                "db-column-drop",
+                &info,
+                &format!("колонка {name}"),
+            )
+            .await;
+            Ok(flash::redirect(
+                &table_url(&info),
+                "Колонка удалена",
+                FlashKind::Ok,
+            ))
+        }
+        Err(error) => {
+            let page = PageForm {
+                error: Some(pg::db_message(&error)),
+                ..PageForm::default()
+            };
+            page_error(&state, &user, info, columns, page).await
+        }
+    }
+}
+
+/// Настоящая таблица (`r`/`p`), а не представление: DDL доступен только им.
+fn is_table(info: &TableInfo) -> bool {
+    matches!(info.kind.as_str(), "r" | "p")
+}
+
+/// Значения формы создания таблицы, в том числе после ошибки.
+#[derive(Debug, Serialize)]
+struct CreateFormView {
+    schema: String,
+    table: String,
+    columns: Vec<CreateColumnView>,
+    /// Раскрыть `<details>` после ошибки.
+    open: bool,
+}
+
+/// Одна строка формы создания таблицы.
+#[derive(Debug, Serialize)]
+struct CreateColumnView {
+    name: String,
+    type_name: String,
+    nullable: bool,
+    pk: bool,
+    default_value: String,
+}
+
+impl CreateFormView {
+    /// Пустая форма: схема `public`, [`CREATE_COLUMNS`] пустых строк.
+    fn empty() -> Self {
+        Self::from_form(&HashMap::new(), false)
+    }
+
+    fn from_form(form: &HashMap<String, String>, open: bool) -> Self {
+        let schema = form
+            .get("schema")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("public")
+            .to_string();
+        let table = form
+            .get("table")
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
+        let columns = (0..CREATE_COLUMNS)
+            .map(|index| CreateColumnView {
+                name: form
+                    .get(&format!("col_name_{index}"))
+                    .map(|value| value.trim().to_string())
+                    .unwrap_or_default(),
+                type_name: form
+                    .get(&format!("col_type_{index}"))
+                    .map(|value| value.trim().to_string())
+                    .unwrap_or_default(),
+                nullable: form.contains_key(&format!("col_nullable_{index}")),
+                pk: form.contains_key(&format!("col_pk_{index}")),
+                default_value: form
+                    .get(&format!("col_default_{index}"))
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+            .collect();
+        Self {
+            schema,
+            table,
+            columns,
+            open,
+        }
+    }
+}
+
+/// Проверенная колонка новой таблицы.
+#[derive(Debug)]
+struct ColumnDraft {
+    name: String,
+    data_type: String,
+    nullable: bool,
+    pk: bool,
+    default: Option<String>,
+}
+
+/// Разбирает строки формы создания: имя/тип/default валидируются, пустые строки
+/// пропускаются; хотя бы одна колонка обязательна.
+fn parse_create_columns(form: &HashMap<String, String>) -> Result<Vec<ColumnDraft>, String> {
+    let mut columns = Vec::new();
+    for index in 0..CREATE_COLUMNS {
+        let name = form
+            .get(&format!("col_name_{index}"))
+            .map(|value| value.trim())
+            .unwrap_or("");
+        let type_raw = form
+            .get(&format!("col_type_{index}"))
+            .map(|value| value.trim())
+            .unwrap_or("");
+        let default_raw = form
+            .get(&format!("col_default_{index}"))
+            .map(String::as_str)
+            .unwrap_or("");
+        let nullable = form.contains_key(&format!("col_nullable_{index}"));
+        let pk = form.contains_key(&format!("col_pk_{index}"));
+        let position = index + 1;
+        if name.is_empty() {
+            if !type_raw.is_empty() || !default_raw.trim().is_empty() || pk {
+                return Err(format!("Колонка {position}: укажите имя."));
+            }
+            continue;
+        }
+        validate_ident(name).map_err(|message| format!("Колонка {position}: {message}"))?;
+        if columns
+            .iter()
+            .any(|column: &ColumnDraft| column.name == name)
+        {
+            return Err(format!("Колонка «{name}» указана дважды."));
+        }
+        let data_type = parse_column_type(type_raw)
+            .map_err(|message| format!("Колонка «{name}»: {message}"))?;
+        let default =
+            parse_default(default_raw).map_err(|message| format!("Колонка «{name}»: {message}"))?;
+        columns.push(ColumnDraft {
+            name: name.to_string(),
+            data_type,
+            nullable,
+            pk,
+            default,
+        });
+    }
+    if columns.is_empty() {
+        return Err("Добавьте хотя бы одну колонку.".into());
+    }
+    Ok(columns)
+}
+
+/// Идентификатор: `^[a-z_][a-z0-9_]*$` и не длиннее 63 символов.
+fn validate_ident(raw: &str) -> Result<(), String> {
+    let message = "Имя: только латинские строчные буквы, цифры и _, первый символ — буква или _.";
+    let mut chars = raw.chars();
+    let first = chars
+        .next()
+        .ok_or_else(|| "Имя не может быть пустым.".to_string())?;
+    if !(first.is_ascii_lowercase() || first == '_') {
+        return Err(message.into());
+    }
+    if !chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_') {
+        return Err(message.into());
+    }
+    if raw.chars().count() > MAX_IDENT_CHARS {
+        return Err(format!(
+            "Имя длиннее {MAX_IDENT_CHARS} символов — Postgres его обрежет."
+        ));
+    }
+    Ok(())
+}
+
+/// Тип колонки только из allowlist; возвращает нормализованный SQL-тип.
+fn parse_column_type(raw: &str) -> Result<String, String> {
+    let compact: String = raw
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    match compact.as_str() {
+        "text" | "integer" | "bigint" | "smallint" | "boolean" | "date" | "timestamp"
+        | "timestamptz" | "uuid" | "jsonb" | "bytea" | "numeric" => return Ok(compact),
+        _ => {}
+    }
+    if let Some(args) = compact
+        .strip_prefix("varchar(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let length = parse_unsigned(args).ok_or_else(|| {
+            format!("Недопустимая длина varchar «{args}»: нужно целое от 1 до 10485760.")
+        })?;
+        if !(1..=10_485_760).contains(&length) {
+            return Err("Длина varchar должна быть от 1 до 10485760.".into());
+        }
+        return Ok(format!("varchar({length})"));
+    }
+    if let Some(args) = compact
+        .strip_prefix("numeric(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let mut parts = args.split(',');
+        let precision = parts
+            .next()
+            .and_then(parse_unsigned)
+            .ok_or_else(|| "numeric: точность — целое от 1 до 1000.".to_string())?;
+        let scale = match parts.next() {
+            Some(raw) => Some(
+                parse_unsigned(raw).ok_or_else(|| "numeric: масштаб — целое от 0.".to_string())?,
+            ),
+            None => None,
+        };
+        if parts.next().is_some() {
+            return Err("numeric: ожидается numeric(p,s).".into());
+        }
+        if !(1..=1000).contains(&precision) {
+            return Err("numeric: точность должна быть от 1 до 1000.".into());
+        }
+        let scale = scale.unwrap_or(0);
+        if scale > precision {
+            return Err("numeric: масштаб не может быть больше точности.".into());
+        }
+        return Ok(format!("numeric({precision},{scale})"));
+    }
+    Err(format!(
+        "Недопустимый тип «{raw}». Разрешены: {}.",
+        COLUMN_TYPES.join(", ")
+    ))
+}
+
+/// Неотрицательное целое без знака и пробелов.
+fn parse_unsigned(raw: &str) -> Option<u32> {
+    if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    raw.parse().ok()
+}
+
+/// Default только из безопасного allowlist; возвращает SQL-литерал.
+fn parse_default(raw: &str) -> Result<Option<String>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    if raw.eq_ignore_ascii_case("null") {
+        return Ok(Some("NULL".into()));
+    }
+    if raw.eq_ignore_ascii_case("true") {
+        return Ok(Some("true".into()));
+    }
+    if raw.eq_ignore_ascii_case("false") {
+        return Ok(Some("false".into()));
+    }
+    if raw.eq_ignore_ascii_case("now()") {
+        return Ok(Some("now()".into()));
+    }
+    if raw.eq_ignore_ascii_case("current_timestamp") {
+        return Ok(Some("CURRENT_TIMESTAMP".into()));
+    }
+    if is_numeric_literal(raw) {
+        return Ok(Some(raw.to_string()));
+    }
+    // Строка в одинарных кавычках: кавычки внутри экранируются удвоением.
+    if raw.len() >= 2 && raw.starts_with('\'') && raw.ends_with('\'') {
+        let inner = &raw[1..raw.len() - 1];
+        return Ok(Some(format!("'{}'", inner.replace('\'', "''"))));
+    }
+    Err(format!(
+        "Недопустимое значение по умолчанию «{raw}». Разрешены NULL, true/false, \
+         целые и дробные числа, строки в одинарных кавычках, now() и CURRENT_TIMESTAMP."
+    ))
+}
+
+/// Целое или дробное число без знака `+`, экспоненты и прочих форм.
+fn is_numeric_literal(raw: &str) -> bool {
+    let body = raw.strip_prefix('-').unwrap_or(raw);
+    let mut parts = body.split('.');
+    let integer = parts.next().unwrap_or("");
+    let fraction = parts.next();
+    if parts.next().is_some() {
+        return false;
+    }
+    if integer.is_empty() || !integer.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    match fraction {
+        None => true,
+        Some(fraction) => {
+            !fraction.is_empty() && fraction.bytes().all(|byte| byte.is_ascii_digit())
+        }
+    }
+}
+
+/// `CREATE TABLE "schema"."table" (...)` с экранированными идентификаторами.
+fn create_table_sql(schema: &str, table: &str, columns: &[ColumnDraft]) -> String {
+    let definitions = columns
+        .iter()
+        .map(|column| {
+            let mut definition = format!("{} {}", pg::quote_ident(&column.name), column.data_type);
+            if !column.nullable && !column.pk {
+                definition.push_str(" NOT NULL");
+            }
+            if let Some(default) = &column.default {
+                definition.push_str(&format!(" DEFAULT {default}"));
+            }
+            if column.pk {
+                definition.push_str(" PRIMARY KEY");
+            }
+            definition
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "CREATE TABLE {}.{} ({definitions})",
+        pg::quote_ident(schema),
+        pg::quote_ident(table)
+    )
+}
+
+/// Выполняет DDL в транзакции с таймаутом; ошибка откатывает изменение.
+async fn execute_ddl(state: &AppState, statement: &str) -> Result<(), sqlx::Error> {
+    let mut tx = state.db.begin().await?;
+    let outcome: Result<(), sqlx::Error> = async {
+        sqlx::query(AssertSqlSafe(format!(
+            "SET LOCAL statement_timeout = '{DDL_TIMEOUT}'"
+        )))
+        .execute(&mut *tx)
+        .await?;
+        // Строковые default экранируют кавычки удвоением; режим с обратным слэшем
+        // выключен, чтобы `\` в литерале не мог закрыть строку.
+        sqlx::query("SET LOCAL standard_conforming_strings = on")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(AssertSqlSafe(statement.to_string()))
+            .execute(&mut *tx)
+            .await?;
+        Ok(())
+    }
+    .await;
+    match outcome {
+        Ok(()) => {
+            tx.commit().await?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+/// Пишет в журнал `db-table-*`/`db-column-*` с таблицей и подробностями.
+async fn audit_ddl(state: &AppState, user: &Access, action: &str, table: &str, details: &str) {
+    let summary = if details.is_empty() {
+        table.to_string()
+    } else {
+        format!("{table}; {details}")
+    };
+    audit::record(
+        &state.db,
+        user.user.id,
+        &user.user.login,
+        action,
+        "tools",
+        "",
+        pg::truncate(&summary, 500),
+    )
+    .await;
+}
+
+/// [`audit_ddl`] для записи, известной из каталога.
+async fn record_ddl(
+    state: &AppState,
+    user: &Access,
+    action: &str,
+    info: &TableInfo,
+    details: &str,
+) {
+    audit_ddl(
+        state,
+        user,
+        action,
+        &format!("{}.{}", info.schema, info.name),
+        details,
+    )
+    .await;
 }
 
 /// Таблица из каталога пользовательских отношений или 404.
@@ -434,6 +1123,8 @@ async fn render_table_page(
             error => form.error,
             insert_fields,
             insert_open => form.insert_open,
+            is_table,
+            ddl_types => COLUMN_TYPES,
         },
     )
 }
@@ -1056,6 +1747,40 @@ mod tests {
             .unwrap()
     }
 
+    /// Существует ли отношение в каталоге.
+    async fn table_exists(db: &PgPool, schema: &str, table: &str) -> bool {
+        sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = $1 AND c.relname = $2
+             )",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    /// Колонки таблицы в порядке объявления.
+    async fn column_names(db: &PgPool, schema: &str, table: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT a.attname
+               FROM pg_attribute a
+               JOIN pg_class c ON c.oid = a.attrelid
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = $1 AND c.relname = $2
+                AND a.attnum > 0 AND NOT a.attisdropped
+              ORDER BY a.attnum",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_all(db)
+        .await
+        .unwrap()
+    }
+
     #[sqlx::test]
     async fn list_shows_user_tables_and_views(db: PgPool) {
         tools_fixture(&db).await;
@@ -1073,6 +1798,22 @@ mod tests {
         assert!(body.contains("tools_view"), "нет вью в списке: {body}");
         assert!(body.contains("public"), "нет схемы: {body}");
         assert!(body.contains("PK"), "нет признака первичного ключа: {body}");
+        assert!(
+            body.contains("Создать таблицу"),
+            "нет формы создания таблицы: {body}"
+        );
+        assert!(
+            body.contains("name=\"col_name_4\""),
+            "форма создания должна содержать пять строк колонок: {body}"
+        );
+        assert!(
+            body.contains("value=\"public\""),
+            "схема public не выбрана по умолчанию: {body}"
+        );
+        assert!(
+            body.contains("id=\"ddl-types\""),
+            "нет подсказок типов: {body}"
+        );
         assert!(
             !body.contains("pg_catalog"),
             "системная схема попала в список"
@@ -1900,5 +2641,511 @@ mod tests {
         assert_eq!(opt, None);
         assert_eq!(req, "fallback");
         assert_eq!(plain, "");
+    }
+
+    #[sqlx::test]
+    async fn create_table_with_types_defaults_and_pk(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/create",
+            &cookie,
+            &[
+                ("schema", "public"),
+                ("table", "tools_ddl"),
+                ("col_name_0", "id"),
+                ("col_type_0", "bigint"),
+                ("col_pk_0", "1"),
+                ("col_name_1", "name"),
+                ("col_type_1", "varchar(20)"),
+                ("col_nullable_1", "1"),
+                ("col_default_1", "'без имени'"),
+                ("col_name_2", "amount"),
+                ("col_type_2", "numeric(10,2)"),
+                ("col_nullable_2", "1"),
+                ("col_name_3", "created"),
+                ("col_type_3", "timestamptz"),
+                ("col_nullable_3", "1"),
+                ("col_default_3", "now()"),
+                ("col_name_4", "author"),
+                ("col_type_4", "text"),
+                ("col_nullable_4", "1"),
+                ("col_default_4", "'О'Рейли'"),
+            ],
+        )
+        .await;
+        assert_eq!(status, 303, "таблица не создана: {body}");
+        assert!(table_exists(&db, "public", "tools_ddl").await);
+
+        let columns: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
+            "SELECT a.attname,
+                    format_type(a.atttypid, a.atttypmod),
+                    NOT a.attnotnull,
+                    pg_get_expr(d.adbin, d.adrelid)
+               FROM pg_attribute a
+               LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+              WHERE a.attrelid = 'public.tools_ddl'::regclass
+                AND a.attnum > 0 AND NOT a.attisdropped
+              ORDER BY a.attnum",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        let names: Vec<&str> = columns.iter().map(|row| row.0.as_str()).collect();
+        assert_eq!(names, ["id", "name", "amount", "created", "author"]);
+        assert_eq!(columns[0].1, "bigint");
+        assert!(!columns[0].2, "PK-колонка не должна быть nullable");
+        assert_eq!(columns[1].1, "character varying(20)");
+        assert!(columns[1].2, "колонка без PK должна быть nullable");
+        assert!(
+            columns[1]
+                .3
+                .as_deref()
+                .is_some_and(|d| d.contains("без имени")),
+            "default строки не применился: {:?}",
+            columns[1].3
+        );
+        assert_eq!(columns[2].1, "numeric(10,2)");
+        assert_eq!(columns[3].1, "timestamp with time zone");
+        assert!(
+            columns[3].3.as_deref().is_some_and(|d| d.contains("now()")),
+            "default now() не применился: {:?}",
+            columns[3].3
+        );
+
+        // PK отмечен на колонке, а не отдельным ограничением таблицы.
+        let pk_columns: Vec<String> = sqlx::query_scalar(
+            "SELECT a.attname
+               FROM pg_constraint con
+               CROSS JOIN LATERAL unnest(con.conkey) AS k(attnum)
+               JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+              WHERE con.conrelid = 'public.tools_ddl'::regclass
+                AND con.contype = 'p'",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(pk_columns, ["id"]);
+
+        // Значения по умолчанию, включая экранированную кавычку, работают.
+        sqlx::query("INSERT INTO tools_ddl (id) VALUES (1)")
+            .execute(&db)
+            .await
+            .unwrap();
+        let (name, author, created): (String, String, Option<String>) =
+            sqlx::query_as("SELECT name, author, created::text FROM tools_ddl WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(name, "без имени");
+        assert_eq!(author, "О'Рейли");
+        assert!(created.is_some(), "timestamptz default now() не сработал");
+
+        let (status, body) = get(&app, "/admin/tools/db/public/tools_ddl", &cookie).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body.contains("created"),
+            "нет новой таблицы на странице: {body}"
+        );
+        assert!(body.contains("timestamptz"), "нет типа колонки: {body}");
+        assert!(
+            body.contains("/column-add"),
+            "нет формы добавления колонки: {body}"
+        );
+        assert!(
+            body.contains("/column-drop"),
+            "нет формы удаления колонки: {body}"
+        );
+        assert!(body.contains("/drop"), "нет формы удаления таблицы: {body}");
+
+        let (action, entity, summary) = last_audit(&db).await;
+        assert_eq!(action, "db-table-create");
+        assert_eq!(entity, "tools");
+        assert!(summary.contains("public.tools_ddl"), "{summary}");
+    }
+
+    #[sqlx::test]
+    async fn create_uses_existing_user_schema(db: PgPool) {
+        sqlx::query("CREATE SCHEMA tools_schema")
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/create",
+            &cookie,
+            &[
+                ("schema", "tools_schema"),
+                ("table", "tools_in_schema"),
+                ("col_name_0", "id"),
+                ("col_type_0", "integer"),
+                ("col_pk_0", "1"),
+                ("col_name_1", "note"),
+                ("col_type_1", "text"),
+                ("col_nullable_1", "1"),
+                ("col_default_1", "NULL"),
+            ],
+        )
+        .await;
+        assert_eq!(status, 303, "таблица в своей схеме не создана: {body}");
+        assert!(table_exists(&db, "tools_schema", "tools_in_schema").await);
+
+        // Несуществующая схема — 404, таблицы нет.
+        let (status, _) = post(
+            &app,
+            "/admin/tools/db/create",
+            &cookie,
+            &[
+                ("schema", "no_such_schema"),
+                ("table", "tools_ghost"),
+                ("col_name_0", "id"),
+                ("col_type_0", "integer"),
+            ],
+        )
+        .await;
+        assert_eq!(status, 404, "несуществующая схема должна быть 404");
+        assert!(!table_exists(&db, "no_such_schema", "tools_ghost").await);
+    }
+
+    #[sqlx::test]
+    async fn invalid_create_input_shows_alert_and_creates_nothing(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let valid = [
+            ("schema", "public"),
+            ("table", "tools_bad"),
+            ("col_name_0", "id"),
+            ("col_type_0", "integer"),
+        ];
+        let cases: [(&str, Vec<(&str, &str)>); 7] = [
+            (
+                "неверное имя таблицы",
+                vec![
+                    ("schema", "public"),
+                    ("table", "bad-name"),
+                    ("col_name_0", "id"),
+                    ("col_type_0", "integer"),
+                ],
+            ),
+            (
+                "неверное имя колонки",
+                vec![
+                    ("schema", "public"),
+                    ("table", "tools_bad"),
+                    ("col_name_0", "1bad"),
+                    ("col_type_0", "integer"),
+                ],
+            ),
+            (
+                "тип вне allowlist",
+                vec![
+                    ("schema", "public"),
+                    ("table", "tools_bad"),
+                    ("col_name_0", "id"),
+                    ("col_type_0", "serial"),
+                ],
+            ),
+            (
+                "инъекция в тип",
+                vec![
+                    ("schema", "public"),
+                    ("table", "tools_bad"),
+                    ("col_name_0", "id"),
+                    ("col_type_0", "text); DROP TABLE tools_test; --"),
+                ],
+            ),
+            (
+                "default вне allowlist",
+                vec![
+                    ("schema", "public"),
+                    ("table", "tools_bad"),
+                    ("col_name_0", "id"),
+                    ("col_type_0", "integer"),
+                    ("col_default_0", "nextval('seq')"),
+                ],
+            ),
+            (
+                "незакрытая строка default",
+                vec![
+                    ("schema", "public"),
+                    ("table", "tools_bad"),
+                    ("col_name_0", "id"),
+                    ("col_type_0", "text"),
+                    ("col_default_0", "'x"),
+                ],
+            ),
+            (
+                "нет колонок",
+                vec![("schema", "public"), ("table", "tools_bad")],
+            ),
+        ];
+
+        for (label, pairs) in cases {
+            let (status, body) = post(&app, "/admin/tools/db/create", &cookie, &pairs).await;
+            assert_eq!(status, 200, "{label}: ожидался alert: {body}");
+            assert!(body.contains("Ошибка"), "{label}: нет alert: {body}");
+            assert!(
+                !table_exists(&db, "public", "tools_bad").await,
+                "{label}: таблица создана вопреки ошибке"
+            );
+        }
+
+        // Дубликат таблицы — ошибка БД на странице без изменения старой таблицы.
+        sqlx::query("CREATE TABLE tools_bad (id integer PRIMARY KEY)")
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut pairs = valid.to_vec();
+        pairs[1] = ("table", "tools_bad");
+        let (status, body) = post(&app, "/admin/tools/db/create", &cookie, &pairs).await;
+        assert_eq!(status, 200, "дубликат должен дать alert: {body}");
+        assert!(body.contains("Ошибка"), "нет alert дубликата: {body}");
+        assert_eq!(column_names(&db, "public", "tools_bad").await, ["id"]);
+    }
+
+    #[sqlx::test]
+    async fn add_and_drop_column_with_confirmation(db: PgPool) {
+        sqlx::query("CREATE TABLE tools_ddl (id bigint PRIMARY KEY)")
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_ddl/column-add",
+            &cookie,
+            &[
+                ("name", "note"),
+                ("type", "varchar(30)"),
+                ("nullable", "1"),
+                ("default", "'x'"),
+            ],
+        )
+        .await;
+        assert_eq!(status, 303, "колонка не добавлена: {body}");
+        assert_eq!(
+            column_names(&db, "public", "tools_ddl").await,
+            ["id", "note"]
+        );
+
+        let (action, entity, summary) = last_audit(&db).await;
+        assert_eq!(action, "db-column-add");
+        assert_eq!(entity, "tools");
+        assert!(summary.contains("public.tools_ddl"), "{summary}");
+        assert!(summary.contains("note"), "{summary}");
+
+        let (status, body) = get(&app, "/admin/tools/db/public/tools_ddl", &cookie).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("note"), "новая колонка не видна: {body}");
+
+        // Неверное подтверждение — alert 200, колонка жива.
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_ddl/column-drop",
+            &cookie,
+            &[("name", "note"), ("confirm", "nope")],
+        )
+        .await;
+        assert_eq!(status, 200, "неверный confirm: {body}");
+        assert!(body.contains("Ошибка"), "нет alert: {body}");
+        assert_eq!(
+            column_names(&db, "public", "tools_ddl").await,
+            ["id", "note"],
+            "колонка удалена при неверном подтверждении"
+        );
+
+        // Неверное имя колонки — alert 200.
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_ddl/column-add",
+            &cookie,
+            &[("name", "bad-name"), ("type", "text"), ("nullable", "1")],
+        )
+        .await;
+        assert_eq!(status, 200, "неверное имя колонки: {body}");
+        assert!(body.contains("Ошибка"), "нет alert: {body}");
+
+        // Неизвестная колонка — 404.
+        let (status, _) = post(
+            &app,
+            "/admin/tools/db/public/tools_ddl/column-drop",
+            &cookie,
+            &[("name", "ghost"), ("confirm", "ghost")],
+        )
+        .await;
+        assert_eq!(status, 404, "несуществующая колонка должна быть 404");
+
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_ddl/column-drop",
+            &cookie,
+            &[("name", "note"), ("confirm", "note")],
+        )
+        .await;
+        assert_eq!(status, 303, "колонка не удалена: {body}");
+        assert_eq!(column_names(&db, "public", "tools_ddl").await, ["id"]);
+
+        let (action, entity, summary) = last_audit(&db).await;
+        assert_eq!(action, "db-column-drop");
+        assert_eq!(entity, "tools");
+        assert!(summary.contains("public.tools_ddl"), "{summary}");
+        assert!(summary.contains("note"), "{summary}");
+
+        // Нет таблицы — 404.
+        let (status, _) = post(
+            &app,
+            "/admin/tools/db/public/tools_missing/column-add",
+            &cookie,
+            &[("name", "note"), ("type", "text")],
+        )
+        .await;
+        assert_eq!(status, 404);
+    }
+
+    #[sqlx::test]
+    async fn drop_table_requires_exact_name(db: PgPool) {
+        sqlx::query("CREATE TABLE tools_ddl (id bigint PRIMARY KEY)")
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_ddl/drop",
+            &cookie,
+            &[("confirm", "tools_dd")],
+        )
+        .await;
+        assert_eq!(status, 200, "неверный confirm: {body}");
+        assert!(body.contains("Ошибка"), "нет alert: {body}");
+        assert!(
+            table_exists(&db, "public", "tools_ddl").await,
+            "таблица удалена при неверном подтверждении"
+        );
+
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_ddl/drop",
+            &cookie,
+            &[("confirm", "tools_ddl")],
+        )
+        .await;
+        assert_eq!(status, 303, "таблица не удалена: {body}");
+        assert!(!table_exists(&db, "public", "tools_ddl").await);
+
+        let (status, _) = get(&app, "/admin/tools/db/public/tools_ddl", &cookie).await;
+        assert_eq!(status, 404, "страница удалённой таблицы должна быть 404");
+
+        let (action, entity, summary) = last_audit(&db).await;
+        assert_eq!(action, "db-table-drop");
+        assert_eq!(entity, "tools");
+        assert!(summary.contains("public.tools_ddl"), "{summary}");
+
+        // Системные схемы и вью удалять нельзя.
+        let (status, _) = post(
+            &app,
+            "/admin/tools/db/pg_catalog/pg_class/drop",
+            &cookie,
+            &[("confirm", "pg_class")],
+        )
+        .await;
+        assert_eq!(status, 404);
+        let (status, _) = post(
+            &app,
+            "/admin/tools/db/public/tools_ddl/drop",
+            &cookie,
+            &[("confirm", "tools_ddl")],
+        )
+        .await;
+        assert_eq!(status, 404, "повторное удаление — 404");
+    }
+
+    #[sqlx::test]
+    async fn drop_table_with_dependencies_reports_error(db: PgPool) {
+        sqlx::query("CREATE TABLE tools_parent (id bigint PRIMARY KEY)")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE tools_child (
+                 id bigint PRIMARY KEY,
+                 parent_id bigint REFERENCES tools_parent(id)
+             )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_parent/drop",
+            &cookie,
+            &[("confirm", "tools_parent")],
+        )
+        .await;
+        assert_eq!(status, 200, "DROP без CASCADE должен дать alert: {body}");
+        assert!(body.contains("Ошибка"), "нет alert: {body}");
+        assert!(
+            table_exists(&db, "public", "tools_parent").await,
+            "таблица с зависимостями удалена"
+        );
+    }
+
+    #[sqlx::test]
+    async fn non_super_cannot_run_ddl(db: PgPool) {
+        sqlx::query("CREATE TABLE tools_ddl (id bigint PRIMARY KEY, note text)")
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = permitted_cookie(&db, "op", &[]).await;
+
+        for (path, pairs) in [
+            (
+                "/admin/tools/db/create",
+                vec![
+                    ("schema", "public"),
+                    ("table", "tools_forbidden"),
+                    ("col_name_0", "id"),
+                    ("col_type_0", "integer"),
+                ],
+            ),
+            (
+                "/admin/tools/db/public/tools_ddl/drop",
+                vec![("confirm", "tools_ddl")],
+            ),
+            (
+                "/admin/tools/db/public/tools_ddl/column-add",
+                vec![("name", "x"), ("type", "text")],
+            ),
+            (
+                "/admin/tools/db/public/tools_ddl/column-drop",
+                vec![("name", "note"), ("confirm", "note")],
+            ),
+        ] {
+            let (status, body) = post(&app, path, &cookie, &pairs).await;
+            assert_eq!(status, 403, "{path}: {body}");
+        }
+
+        assert!(
+            table_exists(&db, "public", "tools_ddl").await,
+            "таблица удалена не-супером"
+        );
+        assert_eq!(
+            column_names(&db, "public", "tools_ddl").await,
+            ["id", "note"]
+        );
     }
 }

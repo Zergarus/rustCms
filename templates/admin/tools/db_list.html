@@ -4,12 +4,64 @@
 {% block content %}
 <div class="page-head"><h1>Таблицы БД</h1></div>
 
+{% if error %}
+<div class="alert" role="alert">
+  <strong>Ошибка</strong>
+  <pre class="mono">{{ error }}</pre>
+</div>
+{% endif %}
+
 <div class="card">
   <p class="muted">
     Пользовательские схемы, таблицы и представления. Число строк — оценка Postgres
     (<code>pg_class.reltuples</code>), точный <code>count(*)</code> считается на странице таблицы.
   </p>
 </div>
+
+<div class="card">
+  <details{% if create.open %} open{% endif %}>
+    <summary><strong>Создать таблицу</strong></summary>
+    <form method="post" action="/admin/tools/db/create">
+      <div class="grid-2">
+        <label>Схема
+          <select name="schema">
+            {% for s in schemas %}
+            <option value="{{ s }}"{% if s == create.schema %} selected{% endif %}>{{ s }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Имя таблицы
+          <input name="table" value="{{ create.table }}" pattern="[a-z_][a-z0-9_]*" autocomplete="off" spellcheck="false" placeholder="tools_example">
+          <small class="field-hint">Только строчные латинские буквы, цифры и _.</small>
+        </label>
+      </div>
+      <p class="muted">Колонки: заполните хотя бы одну строку. Тип — из списка, default — только безопасный литерал.</p>
+      {% for column in create.columns %}
+      <fieldset>
+        <legend>Колонка {{ loop.index }}</legend>
+        <div class="grid-2">
+          <label>Имя
+            <input name="col_name_{{ loop.index0 }}" value="{{ column.name }}" pattern="[a-z_][a-z0-9_]*" autocomplete="off" spellcheck="false">
+          </label>
+          <label>Тип
+            <input name="col_type_{{ loop.index0 }}" value="{{ column.type_name }}" list="ddl-types" autocomplete="off" spellcheck="false" placeholder="text">
+          </label>
+          <label class="check"><input type="checkbox" name="col_nullable_{{ loop.index0 }}" value="1"{% if column.nullable %} checked{% endif %}> Разрешить NULL</label>
+          <label class="check"><input type="checkbox" name="col_pk_{{ loop.index0 }}" value="1"{% if column.pk %} checked{% endif %}> PRIMARY KEY</label>
+          <label>По умолчанию
+            <input name="col_default_{{ loop.index0 }}" value="{{ column.default_value }}" autocomplete="off" spellcheck="false" placeholder="NULL, 0, 'текст', now()">
+          </label>
+        </div>
+      </fieldset>
+      {% endfor %}
+      <div class="settings-actions"><button class="btn primary" type="submit">Создать таблицу</button></div>
+    </form>
+  </details>
+</div>
+
+<datalist id="ddl-types">
+  {% for type_name in ddl_types %}<option value="{{ type_name }}">{% endfor %}
+</datalist>
 
 {% if tables %}
 <div class="card table-wrap">

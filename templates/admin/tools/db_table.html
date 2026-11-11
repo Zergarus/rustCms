@@ -63,6 +63,66 @@
   </div>
 </div>
 
+{% if is_table %}
+<div class="card">
+  <details>
+    <summary><strong>Добавить колонку</strong></summary>
+    <form method="post" action="{{ base_url }}/column-add">
+      <div class="grid-2">
+        <label>Имя
+          <input name="name" pattern="[a-z_][a-z0-9_]*" autocomplete="off" spellcheck="false" placeholder="new_column">
+        </label>
+        <label>Тип
+          <input name="type" list="ddl-types" autocomplete="off" spellcheck="false" placeholder="text">
+        </label>
+        <label class="check"><input type="checkbox" name="nullable" value="1" checked> Разрешить NULL</label>
+        <label>По умолчанию
+          <input name="default" autocomplete="off" spellcheck="false" placeholder="NULL, 0, 'текст', now()">
+        </label>
+      </div>
+      <div class="settings-actions"><button class="btn primary" type="submit">Добавить колонку</button></div>
+    </form>
+  </details>
+</div>
+
+<div class="card">
+  <details>
+    <summary><strong>Удалить колонку</strong></summary>
+    <form method="post" action="{{ base_url }}/column-drop">
+      <div class="grid-2">
+        <label>Колонка
+          <select name="name">
+            {% for column in columns %}<option value="{{ column.name }}">{{ column.name }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Подтверждение
+          <input name="confirm" autocomplete="off" spellcheck="false" placeholder="имя колонки">
+        </label>
+      </div>
+      <p class="muted">Введите имя колонки ещё раз — удаление необратимо.</p>
+      <div class="settings-actions"><button class="btn danger" type="submit">Удалить колонку</button></div>
+    </form>
+  </details>
+</div>
+
+<div class="card">
+  <details>
+    <summary><strong>Удалить таблицу</strong></summary>
+    <form method="post" action="{{ base_url }}/drop">
+      <label>Подтверждение
+        <input name="confirm" autocomplete="off" spellcheck="false" placeholder="{{ table }}">
+      </label>
+      <p class="muted">Введите имя таблицы «{{ table }}» ещё раз. Зависимости не удаляются: <code>DROP TABLE</code> без CASCADE покажет ошибку.</p>
+      <div class="settings-actions"><button class="btn danger" type="submit">Удалить таблицу</button></div>
+    </form>
+  </details>
+</div>
+
+<datalist id="ddl-types">
+  {% for type_name in ddl_types %}<option value="{{ type_name }}">{% endfor %}
+</datalist>
+{% endif %}
+
 {% if editable %}
 <div class="card">
   <details{% if insert_open %} open{% endif %}>

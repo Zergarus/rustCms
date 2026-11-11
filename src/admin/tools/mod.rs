@@ -41,10 +41,20 @@ pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/tools/sql", get(sql::page).post(sql::execute))
         .route("/tools/db", get(db::list))
+        .route("/tools/db/create", post(db::table_create))
         .route("/tools/db/{schema}/{table}", get(db::table))
+        .route("/tools/db/{schema}/{table}/drop", post(db::table_drop))
         .route("/tools/db/{schema}/{table}/insert", post(db::row_insert))
         .route("/tools/db/{schema}/{table}/update", post(db::row_update))
         .route("/tools/db/{schema}/{table}/delete", post(db::row_delete))
+        .route(
+            "/tools/db/{schema}/{table}/column-add",
+            post(db::column_add),
+        )
+        .route(
+            "/tools/db/{schema}/{table}/column-drop",
+            post(db::column_drop),
+        )
         .route("/tools/rust", get(rust_page))
 }
 

@@ -100,6 +100,20 @@ pub(crate) fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
+/// Пользовательские схемы: те же, что в списке таблиц, плюс пустые.
+pub(crate) async fn schemas(db: &PgPool) -> AppResult<Vec<String>> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT nspname
+           FROM pg_namespace
+          WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+            AND nspname !~ '^pg_(toast|temp)'
+          ORDER BY nspname",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
+}
+
 /// Пользовательские таблицы и представления с оценкой строк, размером и PK.
 pub(crate) async fn tables(db: &PgPool) -> AppResult<Vec<TableInfo>> {
     let rows: Vec<TableRow> = sqlx::query_as(
