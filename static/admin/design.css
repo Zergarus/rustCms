@@ -359,9 +359,21 @@ td { padding: 8px var(--sp-3); }
 .users-table th, .users-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .users-table .groups { max-width: none; }
 
-/* Мобильная адаптация: сенсорные цели */
+/* Мобильная адаптация: сенсорные цели и карточка заказа */
 @media (max-width: 700px) {
   .btn, .add-filter { min-height: 40px; }
+  .card.form .prop { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .card.form .prop + .prop { margin-top: var(--sp-2); }
+  .order-layout, .order-main, .order-aside { min-width: 0; }
+  .order-main .prop-val.inline { flex-wrap: wrap; }
+  .tabs { width: 100%; }
+  /* Первая колонка таблицы остаётся видимой при горизонтальном скролле */
+  .list-table th:first-child, .list-table td:first-child {
+    position: sticky; left: 0; z-index: 2; background: var(--panel);
+  }
+  .list-table thead th:first-child { background: var(--raised); }
+  .table-wrap { scrollbar-width: thin; }
+  .rec-x { min-width: 32px; min-height: 32px; display: inline-flex; align-items: center; justify-content: center; }
   .topbar .ico, .nav-toggle { min-width: 40px; min-height: 40px; justify-content: center; }
   .chip-x { padding: 8px; }
 }

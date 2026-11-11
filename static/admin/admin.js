@@ -600,6 +600,9 @@
 
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && peekOpen() && !$('dialog[open]')) peekClose();
+    if (e.key === 'Escape' && document.body.classList.contains('nav-open') && !$('dialog[open]')) {
+      document.body.classList.remove('nav-open');
+    }
   });
 
   // Панель сообщила, что запись изменилась: список перезапрашивается (фильтры и сортировка те же)
