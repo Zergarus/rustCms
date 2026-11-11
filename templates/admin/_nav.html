@@ -6,13 +6,14 @@
 {% if n.children %}
 <details class="nav-branch"{% if n.open or all_open %} open{% endif %}>
   <summary class="nav sub{% if n.active %} on{% endif %}" style="padding-left:{{ 8 + n.depth * 12 }}px">
+    <span class="nav-tw" aria-hidden="true">▸</span>
     <a class="grow" href="{{ base }}?section={{ n.id }}">{{ n.name }}</a>
     <span class="nav-count">{{ n.count }}</span>
   </summary>
   <div class="nav-tree-children">{{ tree_nodes(n.children, base, all_open) }}</div>
 </details>
 {% else %}
-<a class="nav sub{% if n.active %} on{% endif %}" href="{{ base }}?section={{ n.id }}" style="padding-left:{{ 8 + n.depth * 12 }}px"><span class="grow">{{ n.name }}</span><span class="nav-count">{{ n.count }}</span></a>
+<a class="nav sub{% if n.active %} on{% endif %}" href="{{ base }}?section={{ n.id }}" style="padding-left:{{ 8 + n.depth * 12 }}px"><span class="nav-tw" aria-hidden="true"></span><span class="grow">{{ n.name }}</span><span class="nav-count">{{ n.count }}</span></a>
 {% endif %}
 {% endfor %}
 {% endmacro %}
