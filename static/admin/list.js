@@ -148,19 +148,63 @@
     return out || '<div class="item muted">Нет такого поля</div>';
   }
 
-  function filterPicker(anchor) {
-    var p = openPop(anchor, '<div class="row"><input type="text" id="fq" placeholder="Поле…" autocomplete="off" aria-label="Поле"></div>' +
+  // Применённые условия из чипов над таблицей: их видно и можно снять прямо в диалоге.
+  function appliedFilters() {
+    return $$('.list-bar .chip').filter(function (chip) {
+      var main = $('[data-chip]', chip);
+      return main && main.dataset.chip;
+    }).map(function (chip) {
+      var main = $('[data-chip]', chip);
+      var lbl = $('.lbl', main), op = $('.op', main), val = $('.val', main);
+      return {
+        code: main.dataset.chip,
+        label: lbl ? lbl.textContent : main.dataset.chip,
+        text: [op ? op.textContent : '', val ? val.textContent : ''].join(' ').trim(),
+        url: ($('.chip-x', chip) || {}).getAttribute ? $('.chip-x', chip).getAttribute('href') : ''
+      };
+    });
+  }
+
+  function appliedHtml() {
+    var list = appliedFilters();
+    if (!list.length) return '';
+    return '<div class="sec">Применённые условия</div>' + list.map(function (f) {
+      return '<div class="applied"><button type="button" class="item grow" data-edit-chip="' + esc(f.code) + '">' +
+        esc(f.label) + (f.text ? '<span class="kind">' + esc(f.text) + '</span>' : '') +
+        '</button><a class="chip-x" href="' + esc(f.url) + '" aria-label="Убрать условие">✕</a></div>';
+    }).join('') +
+      '<div class="row"><button type="button" class="btn ghost sm" data-add-condition>+ Добавить условие</button></div>';
+  }
+
+  function pickerForm(anchor, withApplied) {
+    var p = openPop(anchor, (withApplied ? appliedHtml() : '') +
+      '<div class="row"><input type="text" id="fq" placeholder="Поле…" autocomplete="off" aria-label="Поле"></div>' +
       '<div class="list" id="fl">' + pickerHtml('') + '</div>');
     var q = $('#fq', p);
-    q.focus();
-    q.addEventListener('input', function () { $('#fl', p).innerHTML = pickerHtml(q.value); });
-    q.addEventListener('keydown', function (e) {
+    if (q) q.focus();
+    if (q) q.addEventListener('input', function () { $('#fl', p).innerHTML = pickerHtml(q.value); });
+    p.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') { e.preventDefault(); var b = $('[data-pick]', p); if (b) b.click(); }
     });
     p.addEventListener('click', function (e) {
       var b = e.target.closest('[data-pick]');
-      if (b) filterEditor(anchor, b.dataset.pick);
+      if (b) { filterEditor(anchor, b.dataset.pick); return; }
+      var edit = e.target.closest('[data-edit-chip]');
+      if (edit) filterEditor(anchor, edit.dataset.editChip);
     });
+  }
+
+  function appliedPanel(anchor) {
+    var p = openPop(anchor, appliedHtml());
+    p.addEventListener('click', function (e) {
+      var edit = e.target.closest('[data-edit-chip]');
+      if (edit) filterEditor(anchor, edit.dataset.editChip);
+    });
+  }
+
+  function filterPicker(anchor) {
+    if (appliedFilters().length) appliedPanel(anchor);
+    else pickerForm(anchor, false);
   }
 
   function filterEditor(anchor, code) {
@@ -333,6 +377,11 @@
     if (!listPage()) return;
     var add = t.closest('#list-add-filter');
     if (add) { filterPicker(add); return; }
+    if (t.closest('[data-add-condition]')) {
+      var anchor = $('#list-add-filter');
+      if (anchor) pickerForm(anchor, false);
+      return;
+    }
     var chip = t.closest('[data-chip]');
     if (chip) { filterEditor(chip, chip.dataset.chip); return; }
     var cols = t.closest('#list-cols');

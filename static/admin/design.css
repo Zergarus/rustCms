@@ -267,6 +267,12 @@ td { padding: 8px var(--sp-3); }
 .stock-table td.num input { width: 140px; text-align: right; }
 .stock-table tr.muted td { color: var(--muted); }
 
+/* Применённые условия внутри диалога фильтров */
+.pop .applied { display: flex; align-items: center; gap: 4px; }
+.pop .applied .item { flex: 1; width: auto; text-align: left; }
+.pop .applied .item .kind { margin-left: 8px; color: var(--muted); font-size: var(--fs-xs); }
+.pop .applied .chip-x { padding: 4px 8px; }
+
 /* Дерево разделов активной коллекции в боковом меню */
 .nav-tree { margin: 2px 0 6px 14px; padding-left: 6px; border-left: 1px solid var(--border); max-height: 38vh; overflow: auto; }
 .nav-tree-full { margin: 2px 0 6px; padding: 0; border-left: 0; max-height: calc(100vh - 260px); }
@@ -304,6 +310,13 @@ td { padding: 8px var(--sp-3); }
 .table-fixed th, .table-fixed td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .users-table th, .users-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .users-table .groups { max-width: none; }
+
+/* Мобильная адаптация: сенсорные цели */
+@media (max-width: 700px) {
+  .btn, .add-filter { min-height: 40px; }
+  .topbar .ico, .nav-toggle { min-width: 40px; min-height: 40px; justify-content: center; }
+  .chip-x { padding: 8px; }
+}
 
 /* Мобильная адаптация */
 @media (max-width: 900px) {
