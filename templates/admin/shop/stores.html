@@ -9,7 +9,8 @@
 </div>
 {% if items %}
 <div class="card table-wrap">
-  <table>
+  <table class="table-fixed">
+    <colgroup><col style="width:56px"><col><col style="width:140px"><col style="width:220px"><col style="width:140px"><col style="width:70px"><col style="width:70px"></colgroup>
     <thead><tr><th>ID</th><th>Название</th><th>Город</th><th>Адрес</th><th>Телефон</th><th>Акт.</th><th>Сорт.</th></tr></thead>
     <tbody>
       {% for s in items %}

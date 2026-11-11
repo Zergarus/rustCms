@@ -9,7 +9,8 @@
 </div>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <div class="card table-wrap">
-  <table>
+  <table class="table-fixed">
+    <colgroup><col style="width:120px"><col><col style="width:80px"><col style="width:90px"><col style="width:100px"><col style="width:100px"></colgroup>
     <thead><tr><th>Код</th><th>Название</th><th>Сорт.</th><th>Письмо</th><th>Заказов</th><th></th></tr></thead>
     <tbody>
       {% for s in items %}
@@ -17,7 +18,7 @@
         <td><code>{{ s.code }}</code></td>
         <td><a href="/admin/shop/statuses/{{ s.code }}">{{ s.name }}</a></td>
         <td>{{ s.sort }}</td>
-        <td>{% if s.notify %}<span class="badge ok">да</span>{% endif %}</td>
+        <td>{% if s.notify %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}</td>
         <td>{{ s.orders }}</td>
         <td class="actions">
           <form method="post" action="/admin/shop/statuses/{{ s.code }}/delete" hx-confirm="Удалить статус «{{ s.name }}»?">

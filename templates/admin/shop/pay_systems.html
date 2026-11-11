@@ -9,7 +9,8 @@
 </div>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <div class="card table-wrap">
-  <table>
+  <table class="table-fixed">
+    <colgroup><col style="width:56px"><col><col style="width:140px"><col style="width:220px"><col style="width:90px"><col style="width:80px"><col style="width:100px"></colgroup>
     <thead><tr><th>ID</th><th>Название</th><th>Тип для API</th><th>Доступна группам</th><th>Активна</th><th>Сорт.</th><th></th></tr></thead>
     <tbody>
       {% for p in items %}
@@ -18,7 +19,7 @@
         <td><a href="/admin/shop/pay-systems/{{ p.id }}">{{ p.name }}</a></td>
         <td><code>{{ p.api_type }}</code></td>
         <td>{{ p.groups or "всем" }}</td>
-        <td>{% if p.active %}<span class="badge ok">да</span>{% endif %}</td>
+        <td>{% if p.active %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}</td>
         <td>{{ p.sort }}</td>
         <td class="actions">
           <form method="post" action="/admin/shop/pay-systems/{{ p.id }}/delete" hx-confirm="Удалить платёжную систему «{{ p.name }}»?">
