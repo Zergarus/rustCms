@@ -66,8 +66,9 @@ pub async fn execute(
     Form(input): Form<SqlForm>,
 ) -> AppResult<Html<String>> {
     guard(&state, &user)?;
+    let confirmed = input.confirm.as_deref() == Some("1");
     let started = Instant::now();
-    let mut result = run(&state, &input.sql, input.confirm.is_some()).await;
+    let mut result = run(&state, &input.sql, confirmed).await;
     result.duration_ms = started.elapsed().as_millis() as u64;
     let summary = audit_summary(&input.sql, &result);
     audit::record(
@@ -86,40 +87,55 @@ pub async fn execute(
         context! {
             user,
             sql => input.sql,
-            confirm => input.confirm.is_some(),
+            confirm => confirmed,
             result,
         },
     )
 }
 
+/// Текст ошибки до обращения к БД.
+fn rejected(message: impl Into<String>) -> SqlResult {
+    SqlResult {
+        error: Some(message.into()),
+        ..SqlResult::default()
+    }
+}
+
 /// Выполняет SQL в транзакции с таймаутом и собирает [`SqlResult`].
+///
+/// Разрешён ровно один statement: `raw_sql` шлёт весь текст одним simple Query,
+/// поэтому второй оператор мог бы выйти из READ ONLY или сбросить таймаут.
 async fn run(state: &AppState, sql: &str, confirmed: bool) -> SqlResult {
-    if sql.trim().is_empty() {
-        return SqlResult {
-            error: Some("Пустой запрос".into()),
-            ..SqlResult::default()
-        };
+    let statements = split_statements(sql);
+    if statements.is_empty() {
+        return rejected("Пустой запрос");
+    }
+    if statements.len() > 1 {
+        return rejected(format!(
+            "Выполняйте по одному запросу (получено {}).",
+            statements.len()
+        ));
+    }
+    let statement = &statements[0];
+    if is_transaction_control(&first_keyword(statement)) {
+        return rejected(
+            "Управление транзакцией и настройками сессии запрещено: \
+             SET/RESET/BEGIN/START/COMMIT/ROLLBACK/END.",
+        );
     }
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
-        Err(error) => {
-            return SqlResult {
-                error: Some(db_message(&error)),
-                ..SqlResult::default()
-            };
-        }
+        Err(error) => return rejected(db_message(&error)),
     };
     if let Err(error) = setup(&mut tx, confirmed).await {
         let _ = tx.rollback().await;
-        return SqlResult {
-            error: Some(db_message(&error)),
-            ..SqlResult::default()
-        };
+        return rejected(db_message(&error));
     }
-    let outcome = if is_query(sql) {
-        fetch(&mut tx, sql).await
+    // Таймаут и режим чтения выставлены до пользовательского statement.
+    let outcome = if is_query(statement) {
+        fetch(&mut tx, statement).await
     } else {
-        execute_statement(&mut tx, sql)
+        execute_statement(&mut tx, statement)
             .await
             .map(|affected| SqlResult {
                 affected: Some(affected),
@@ -130,10 +146,7 @@ async fn run(state: &AppState, sql: &str, confirmed: bool) -> SqlResult {
         Ok(result) => result,
         Err(error) => {
             let _ = tx.rollback().await;
-            return SqlResult {
-                error: Some(db_message(&error)),
-                ..SqlResult::default()
-            };
+            return rejected(db_message(&error));
         }
     };
     if confirmed {
@@ -250,23 +263,160 @@ fn is_query(sql: &str) -> bool {
     )
 }
 
+/// Управление транзакцией и настройками сессии: запрещено, иначе можно выйти из
+/// READ ONLY или сбросить `statement_timeout`.
+fn is_transaction_control(keyword: &str) -> bool {
+    matches!(
+        keyword,
+        "set" | "reset" | "begin" | "start" | "commit" | "rollback" | "end"
+    )
+}
+
 /// Первое слово запроса без ведущих пробелов и комментариев (`--`, `/* */`).
 fn first_keyword(sql: &str) -> String {
+    skip_leading(sql)
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .next()
+        .unwrap_or("")
+        .to_lowercase()
+}
+
+/// Убирает ведущие пробелы и комментарии; блок-комментарии могут быть вложенными.
+fn skip_leading(sql: &str) -> &str {
     let mut rest = sql;
     loop {
         rest = rest.trim_start();
         if let Some(after) = rest.strip_prefix("--") {
-            rest = after.split_once('\n').map_or("", |(_, tail)| tail);
+            rest = after.find('\n').map_or("", |at| &after[at + 1..]);
         } else if let Some(after) = rest.strip_prefix("/*") {
-            rest = after.split_once("*/").map_or("", |(_, tail)| tail);
+            rest = skip_block_comment(after);
         } else {
-            break;
+            return rest;
         }
     }
-    rest.split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-        .next()
-        .unwrap_or("")
-        .to_lowercase()
+}
+
+/// Хвост после закрывающего `*/` (с учётом вложенности) или `""`, если не закрыт.
+fn skip_block_comment(after: &str) -> &str {
+    let mut depth = 1;
+    let mut chars = after.char_indices().peekable();
+    while let Some((at, ch)) = chars.next() {
+        if ch == '/' && chars.peek().is_some_and(|(_, next)| *next == '*') {
+            chars.next();
+            depth += 1;
+        } else if ch == '*' && chars.peek().is_some_and(|(_, next)| *next == '/') {
+            chars.next();
+            depth -= 1;
+            if depth == 0 {
+                return &after[at + 2..];
+            }
+        }
+    }
+    ""
+}
+
+/// Делит текст на top-level statements по `;`, не трогая кавычки, dollar-quoting
+/// и комментарии. Postgres понимает вложенные `/* */`, поэтому глубина считается.
+fn split_statements(sql: &str) -> Vec<String> {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '\'' | '"' => {
+                let quote = chars[index];
+                current.push(quote);
+                index += 1;
+                while index < chars.len() {
+                    let ch = chars[index];
+                    current.push(ch);
+                    index += 1;
+                    if ch == quote {
+                        // Удвоенная кавычка — экранирование внутри литерала.
+                        if index < chars.len() && chars[index] == quote {
+                            current.push(quote);
+                            index += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            '-' if chars.get(index + 1) == Some(&'-') => {
+                while index < chars.len() {
+                    let ch = chars[index];
+                    current.push(ch);
+                    index += 1;
+                    if ch == '\n' {
+                        break;
+                    }
+                }
+            }
+            '/' if chars.get(index + 1) == Some(&'*') => {
+                current.push('/');
+                current.push('*');
+                index += 2;
+                let mut depth = 1;
+                while index < chars.len() && depth > 0 {
+                    if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+                        current.push('/');
+                        current.push('*');
+                        index += 2;
+                        depth += 1;
+                    } else if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
+                        current.push('*');
+                        current.push('/');
+                        index += 2;
+                        depth -= 1;
+                    } else {
+                        current.push(chars[index]);
+                        index += 1;
+                    }
+                }
+            }
+            '$' => {
+                // Dollar-quoting: `$$...$$` или `$tag$...$tag$`.
+                let mut end = index + 1;
+                while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+                    end += 1;
+                }
+                if chars.get(end) == Some(&'$') {
+                    let delimiter: String = chars[index..=end].iter().collect();
+                    let delimiter_chars: Vec<char> = delimiter.chars().collect();
+                    current.push_str(&delimiter);
+                    index = end + 1;
+                    while index < chars.len() {
+                        if chars[index..].starts_with(&delimiter_chars) {
+                            current.push_str(&delimiter);
+                            index += delimiter_chars.len();
+                            break;
+                        }
+                        current.push(chars[index]);
+                        index += 1;
+                    }
+                } else {
+                    current.push('$');
+                    index += 1;
+                }
+            }
+            ';' => {
+                if !skip_leading(&current).is_empty() {
+                    statements.push(current.trim().to_string());
+                }
+                current.clear();
+                index += 1;
+            }
+            ch => {
+                current.push(ch);
+                index += 1;
+            }
+        }
+    }
+    if !skip_leading(&current).is_empty() {
+        statements.push(current.trim().to_string());
+    }
+    statements
 }
 
 /// Текст ошибки Postgres без обвязки sqlx.
@@ -294,12 +444,12 @@ fn audit_summary(sql: &str, result: &SqlResult) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_keyword, is_query, truncate};
+    use super::{first_keyword, is_query, is_transaction_control, split_statements, truncate};
 
     use sqlx::PgPool;
 
     use crate::{
-        smoke_tests::post_form,
+        smoke_tests::{get, post_form},
         test_support::{admin_cookie, permitted_cookie, test_state},
     };
 
@@ -428,6 +578,155 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn page_warns_that_data_is_not_masked(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = get(&app, PATH, &cookie).await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("Данные не маскируются"), "{body}");
+    }
+
+    #[sqlx::test]
+    async fn multiple_statements_are_rejected(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = post_form(
+            &app,
+            PATH,
+            &cookie,
+            "sql=SELECT+1;+INSERT+INTO+audit_log+(action,+entity)+VALUES+('multi','probe')",
+        )
+        .await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("по одному"), "нет ошибки о запросах: {body}");
+        let probes: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = 'multi'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(probes, 0, "многооператорный запрос выполнился");
+    }
+
+    #[sqlx::test]
+    async fn statements_cannot_escape_read_only(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = post_form(
+            &app,
+            PATH,
+            &cookie,
+            "sql=SELECT+1;+COMMIT;+INSERT+INTO+audit_log+(action,+entity)+VALUES+('escaped','probe')",
+        )
+        .await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("по одному"), "нет ошибки о запросах: {body}");
+        let escaped: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = 'escaped'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(escaped, 0, "COMMIT внутри запроса вышел из READ ONLY");
+    }
+
+    #[sqlx::test]
+    async fn session_settings_cannot_reset_timeout(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = post_form(
+            &app,
+            PATH,
+            &cookie,
+            "sql=SELECT+1;+SET+statement_timeout=0;+SELECT+pg_sleep(0.05)",
+        )
+        .await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("по одному"), "нет ошибки о запросах: {body}");
+    }
+
+    #[sqlx::test]
+    async fn single_transaction_control_is_rejected(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = post_form(&app, PATH, &cookie, "sql=SET+statement_timeout=0").await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("Ошибка"), "нет блока ошибки: {body}");
+        assert!(body.contains("запрещено"), "нет причины отказа: {body}");
+    }
+
+    #[sqlx::test]
+    async fn empty_confirmation_is_not_confirmation(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = post_form(
+            &app,
+            PATH,
+            &cookie,
+            "sql=INSERT+INTO+audit_log+(action,+entity)+VALUES+('empty','probe')&confirm=",
+        )
+        .await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("Ошибка"), "нет блока ошибки: {body}");
+        let probes: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = 'empty'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(probes, 0, "пустой confirm считается подтверждением");
+    }
+
+    #[sqlx::test]
+    async fn statement_timeout_is_set_before_user_sql(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = post_form(&app, PATH, &cookie, "sql=SHOW+statement_timeout").await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains(">15s<"), "таймаут не применён: {body}");
+    }
+
+    #[sqlx::test]
+    async fn confirmed_single_update_commits(db: PgPool) {
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO audit_log (action, entity, summary) VALUES ('fixture', 'probe', 'old') RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+
+        let (status, body) = post_form(
+            &app,
+            PATH,
+            &cookie,
+            &format!("sql=UPDATE+audit_log+SET+summary='new'+WHERE+id={id}&confirm=1"),
+        )
+        .await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(!body.contains("Ошибка"), "неожиданная ошибка: {body}");
+        let summary: String = sqlx::query_scalar("SELECT summary FROM audit_log WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(summary, "new");
+    }
+
+    #[sqlx::test]
     async fn non_super_cannot_execute(db: PgPool) {
         let app = crate::app(test_state(db.clone()));
         let cookie = permitted_cookie(&db, "op", &[]).await;
@@ -468,5 +767,42 @@ mod tests {
     fn truncation_marks_the_tail() {
         assert_eq!(truncate("abc", 3), "abc");
         assert_eq!(truncate("abcd", 3), "abc…");
+    }
+
+    #[test]
+    fn splitting_respects_quoting_and_comments() {
+        let cases = [
+            ("SELECT ';'", vec!["SELECT ';'"]),
+            ("SELECT 'it''s; fine'", vec!["SELECT 'it''s; fine'"]),
+            ("SELECT \"a;b\"", vec!["SELECT \"a;b\""]),
+            ("SELECT \"a\"\"b;c\"", vec!["SELECT \"a\"\"b;c\""]),
+            ("SELECT $$a;b$$", vec!["SELECT $$a;b$$"]),
+            ("SELECT $tag$ a;b $tag$", vec!["SELECT $tag$ a;b $tag$"]),
+            (
+                "SELECT /* ; /* nested ; */ */ 1",
+                vec!["SELECT /* ; /* nested ; */ */ 1"],
+            ),
+            (
+                "SELECT 1 -- ;\n; UPDATE t SET x = 1",
+                vec!["SELECT 1 -- ;", "UPDATE t SET x = 1"],
+            ),
+            ("SELECT 1; ; -- tail", vec!["SELECT 1"]),
+            ("  ", vec![]),
+        ];
+        for (sql, expected) in cases {
+            assert_eq!(split_statements(sql), expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn transaction_control_is_blocked() {
+        for keyword in [
+            "set", "reset", "begin", "start", "commit", "rollback", "end",
+        ] {
+            assert!(is_transaction_control(keyword), "{keyword}");
+        }
+        for keyword in ["select", "with", "insert", "show", "explain"] {
+            assert!(!is_transaction_control(keyword), "{keyword}");
+        }
     }
 }
