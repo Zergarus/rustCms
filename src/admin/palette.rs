@@ -244,7 +244,8 @@ pub(super) async fn search_fragment(
     Extension(user): Extension<Access>,
     Query(query): Query<PaletteQuery>,
 ) -> AppResult<Html<String>> {
-    let ctx = nav::load_ctx_light(&state.db, &user).await?;
+    let mut ctx = nav::load_ctx_light(&state.db, &user).await?;
+    ctx.tools_enabled = state.config.tools_enabled;
     let groups = search(&state.db, &user, &ctx, &query.q).await?;
     render(&state, "_palette.html", context! { groups })
 }

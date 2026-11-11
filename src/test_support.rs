@@ -153,6 +153,7 @@ pub fn test_state(db: PgPool) -> crate::state::AppState {
         // Тесты bxapi шлют запросы без токена; проверка CSRF покрыта отдельными тестами.
         csrf_enforce: false,
         rate_limit_per_min: 0,
+        tools_enabled: true,
     };
     let env = crate::presentation::templates_env(&config.templates_dir.join("admin"));
     crate::state::AppState {

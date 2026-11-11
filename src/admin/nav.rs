@@ -129,6 +129,8 @@ pub(crate) struct CollectionLink {
 pub(crate) struct NavCtx {
     pub shop_enabled: bool,
     pub store_control: bool,
+    /// Инструменты супер-администратора разрешены конфигом (`ADMIN_TOOLS_ENABLED`).
+    pub tools_enabled: bool,
     /// Доступные пользователю (уровень не ниже чтения), по порядку `sort, id`.
     pub collections: Vec<CollectionLink>,
 }
@@ -193,6 +195,8 @@ async fn load_ctx_with(db: &PgPool, user: &Access, counts: bool) -> sqlx::Result
     Ok(NavCtx {
         shop_enabled,
         store_control,
+        // по умолчанию инструменты включены; `build_shell` уточняет по конфигу
+        tools_enabled: true,
         collections,
     })
 }
@@ -291,6 +295,16 @@ pub(crate) fn sections(user: &Access, ctx: &NavCtx) -> Vec<Section> {
             "system",
             Mode::Cms,
         );
+    }
+    // Инструменты: только супер и только при включённом ADMIN_TOOLS_ENABLED.
+    if user.is_super() && ctx.tools_enabled {
+        for (code, label, url) in [
+            ("sql", "SQL-запрос", "/admin/tools/sql"),
+            ("tools-db", "Таблицы БД", "/admin/tools/db"),
+            ("tools-rust", "Rust-скрипты", "/admin/tools/rust"),
+        ] {
+            add(code, label, url, "system", Mode::Cms);
+        }
     }
 
     if ctx.shop_enabled {

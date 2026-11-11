@@ -23,6 +23,7 @@ pub(crate) mod shell;
 pub(crate) mod shop;
 mod sku;
 mod tabs;
+mod tools;
 mod users;
 
 use axum::{
@@ -53,6 +54,7 @@ const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 pub fn router(state: AppState) -> Router<AppState> {
     let protected = Router::new()
         .route("/", get(dashboard))
+        .merge(tools::router())
         .route(
             "/seo/sitemap",
             get(seo_sitemap::list).post(seo_sitemap::create),
@@ -538,7 +540,16 @@ async fn build_shell(
     };
     Ok(shell::Shell {
         // с query: по ней определяется активный закреплённый вид
-        nav: nav::build(&state.db, access, ctx, url).await?,
+        nav: nav::build(
+            &state.db,
+            access,
+            &nav::NavCtx {
+                tools_enabled: state.config.tools_enabled,
+                ..ctx.clone()
+            },
+            url,
+        )
+        .await?,
         prefs,
         flash: flash::read(jar),
         tabs,

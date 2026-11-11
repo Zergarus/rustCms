@@ -25,6 +25,8 @@ pub struct Config {
     pub csrf_enforce: bool,
     /// Общий лимит запросов публичного API на IP в минуту; 0 — выключено.
     pub rate_limit_per_min: u32,
+    /// Инструменты супер-администратора (SQL, таблицы, Rust); `ADMIN_TOOLS_ENABLED=0` — выключены.
+    pub tools_enabled: bool,
 }
 
 impl Config {
@@ -53,6 +55,7 @@ impl Config {
                 .filter(|s| !s.trim().is_empty()),
             csrf_enforce: var_or("CSRF_ENFORCE", "true") != "false",
             rate_limit_per_min: var_or("RATE_LIMIT_PER_MIN", "600").parse().unwrap_or(600),
+            tools_enabled: var_or("ADMIN_TOOLS_ENABLED", "1") != "0",
         })
     }
 }
