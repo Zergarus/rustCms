@@ -370,7 +370,7 @@ async fn render_table_page(
                 columns
                     .iter()
                     .enumerate()
-                    .filter(|(_, column)| !column.pk)
+                    .filter(|(_, column)| !column.pk && !column.generated)
                     .map(|(index, column)| {
                         let value = if open {
                             form.update_values
@@ -398,6 +398,7 @@ async fn render_table_page(
     let insert_fields: Vec<FieldView> = if editable {
         columns
             .iter()
+            .filter(|column| !column.generated)
             .map(|column| {
                 let value = form
                     .insert_values
@@ -592,11 +593,11 @@ fn insert_bound(column: &ColumnInfo, raw: Option<&str>) -> Result<Bound, String>
         if column.default.is_some() {
             return Ok(Bound::Default);
         }
-        if pg::is_textual(column) {
-            return Ok(Bound::Value(String::new()));
-        }
         if column.nullable {
             return Ok(Bound::Null);
+        }
+        if pg::is_textual(column) {
+            return Ok(Bound::Value(String::new()));
         }
         return Err(format!("Колонка «{}» обязательна", column.name));
     }
@@ -607,14 +608,14 @@ fn insert_bound(column: &ColumnInfo, raw: Option<&str>) -> Result<Bound, String>
 fn update_bound(column: &ColumnInfo, raw: Option<&str>) -> Result<Bound, String> {
     let raw = raw.unwrap_or_default();
     if is_blank(column, raw) {
-        if pg::is_textual(column) {
-            return Ok(Bound::Value(String::new()));
-        }
         if column.nullable {
             return Ok(Bound::Null);
         }
         if column.default.is_some() {
             return Ok(Bound::Default);
+        }
+        if pg::is_textual(column) {
+            return Ok(Bound::Value(String::new()));
         }
         return Err(format!("Колонка «{}» обязательна", column.name));
     }
@@ -649,6 +650,10 @@ fn insert_statement(
     let mut exprs = Vec::new();
     let mut params = Vec::new();
     for column in columns {
+        // Значение generated-колонки вычисляет сервер: в INSERT его не передаём.
+        if column.generated {
+            continue;
+        }
         match insert_bound(column, form.get(&column.name).map(String::as_str))? {
             Bound::Default => continue,
             Bound::Null => {
@@ -690,7 +695,10 @@ fn update_statement(
 ) -> Result<Statement, String> {
     let mut params = Vec::new();
     let mut sets = Vec::new();
-    for column in columns.iter().filter(|column| !column.pk) {
+    for column in columns
+        .iter()
+        .filter(|column| !column.pk && !column.generated)
+    {
         match update_bound(column, form.get(&column.name).map(String::as_str))? {
             Bound::Default => {
                 sets.push(format!("{} = DEFAULT", pg::quote_ident(&column.name)));
@@ -909,6 +917,8 @@ struct ColumnView {
     nullable: bool,
     default: Option<String>,
     pk: bool,
+    /// Значение вычисляет сервер — править нельзя.
+    generated: bool,
     /// Ссылка сортировки: первый клик — `asc`, повторный — `desc`.
     sort_url: String,
     /// Направление, если таблица отсортирована по этой колонке.
@@ -929,6 +939,7 @@ impl ColumnView {
             nullable: column.nullable,
             default: column.default.clone(),
             pk: column.pk,
+            generated: column.generated,
             sort_url: format!("{base_url}?sort={}&dir={next}", encode_query(&column.name)),
             sort_dir: current.then_some(dir),
         }
@@ -1759,5 +1770,135 @@ mod tests {
         assert_eq!(row.4, "22222222-2222-2222-2222-222222222222");
         assert_eq!(row.5, "2");
         assert_eq!(row.6, "3.50");
+    }
+
+    #[sqlx::test]
+    async fn generated_columns_are_read_only(db: PgPool) {
+        sqlx::query(
+            "CREATE TABLE tools_generated (
+                 id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                 name text NOT NULL,
+                 name_len integer GENERATED ALWAYS AS (length(name)) STORED
+             )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = get(&app, "/admin/tools/db/public/tools_generated", &cookie).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body.contains("вычисляется"),
+            "нет пометки generated: {body}"
+        );
+        assert!(
+            !body.contains("name=\"name_len\""),
+            "generated-колонка попала в форму: {body}"
+        );
+
+        // Вставка: id (identity ALWAYS) и name_len вычисляются сервером.
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_generated/insert",
+            &cookie,
+            &[("name", "Альфа")],
+        )
+        .await;
+        assert_eq!(status, 303, "вставка с generated не прошла: {body}");
+        let (id, name, name_len): (i64, String, i32) =
+            sqlx::query_as("SELECT id, name, name_len FROM tools_generated")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!((id, name.as_str(), name_len), (1, "Альфа", 5));
+
+        // Правка обычной колонки не должна попадать в generated.
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_generated/update",
+            &cookie,
+            &[("id", "1"), ("name", "Бета")],
+        )
+        .await;
+        assert_eq!(status, 303, "правка с generated не прошла: {body}");
+        let (name, name_len): (String, i32) =
+            sqlx::query_as("SELECT name, name_len FROM tools_generated WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!((name.as_str(), name_len), ("Бета", 4));
+    }
+
+    #[sqlx::test]
+    async fn blank_text_inputs_follow_hints(db: PgPool) {
+        sqlx::query(
+            "CREATE TABLE tools_blank (
+                 id bigint PRIMARY KEY,
+                 opt text,
+                 req text NOT NULL DEFAULT 'fallback',
+                 plain text NOT NULL
+             )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO tools_blank (id, opt, req, plain) VALUES (1, 'x', 'y', 'z')")
+            .execute(&db)
+            .await
+            .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = get(&app, "/admin/tools/db/public/tools_blank", &cookie).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("пусто = NULL"), "нет подсказки NULL: {body}");
+        // pg_get_expr отдаёт default с приведением типа: 'fallback'::text.
+        assert!(
+            body.contains("пусто = DEFAULT (") && body.contains("fallback"),
+            "нет подсказки DEFAULT: {body}"
+        );
+        assert!(
+            body.contains("пусто = пустая строка"),
+            "нет подсказки пустой строки: {body}"
+        );
+
+        // Правка: nullable text пусто → NULL, not-null text с default пусто → DEFAULT,
+        // not-null text без default пусто → пустая строка.
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_blank/update",
+            &cookie,
+            &[("id", "1"), ("opt", ""), ("req", ""), ("plain", "")],
+        )
+        .await;
+        assert_eq!(status, 303, "{body}");
+        let (opt, req, plain): (Option<String>, String, String) =
+            sqlx::query_as("SELECT opt, req, plain FROM tools_blank WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(opt, None, "nullable text пусто должен стать NULL");
+        assert_eq!(req, "fallback", "default text пусто должен дать DEFAULT");
+        assert_eq!(plain, "");
+
+        // Вставка: nullable text пусто → NULL, default → DEFAULT, без default → ''.
+        let (status, body) = post(
+            &app,
+            "/admin/tools/db/public/tools_blank/insert",
+            &cookie,
+            &[("id", "2"), ("opt", ""), ("req", ""), ("plain", "")],
+        )
+        .await;
+        assert_eq!(status, 303, "{body}");
+        let (opt, req, plain): (Option<String>, String, String) =
+            sqlx::query_as("SELECT opt, req, plain FROM tools_blank WHERE id = 2")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(opt, None);
+        assert_eq!(req, "fallback");
+        assert_eq!(plain, "");
     }
 }

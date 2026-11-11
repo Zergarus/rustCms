@@ -43,6 +43,8 @@ pub struct ColumnInfo {
     pub nullable: bool,
     pub default: Option<String>,
     pub pk: bool,
+    /// Значение вычисляет сервер: `GENERATED ALWAYS` (stored) или identity ALWAYS.
+    pub generated: bool,
 }
 
 /// Первичный ключ: одна или несколько колонок в порядке объявления.
@@ -154,6 +156,7 @@ pub(crate) async fn columns(db: &PgPool, schema: &str, table: &str) -> AppResult
                 t.typname AS type_name,
                 NOT a.attnotnull AS nullable,
                 pg_get_expr(d.adbin, d.adrelid) AS \"default\",
+                (a.attgenerated <> '' OR a.attidentity = 'a') AS generated,
                 EXISTS (SELECT 1
                           FROM pg_index i
                           CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY
@@ -184,6 +187,7 @@ pub(crate) async fn columns(db: &PgPool, schema: &str, table: &str) -> AppResult
             nullable: row.nullable,
             default: row.default,
             pk: row.pk,
+            generated: row.generated,
         })
         .collect())
 }
@@ -196,6 +200,7 @@ struct ColumnRow {
     nullable: bool,
     default: Option<String>,
     pk: bool,
+    generated: bool,
 }
 
 /// Страница данных: до `per` строк (не больше 200), точный `count(*)` с таймаутом.

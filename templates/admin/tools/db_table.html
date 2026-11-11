@@ -52,7 +52,7 @@
           <td><code>{{ column.name }}</code></td>
           <td><code>{{ column.data_type }}</code></td>
           <td>{% if column.nullable %}да{% else %}нет{% endif %}</td>
-          <td>{% if column.default %}<code>{{ column.default }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td>{% if column.generated %}<span class="badge">вычисляется</span>{% elif column.default %}<code>{{ column.default }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
           <td>{% if column.pk %}<span class="badge ok">PK</span>{% else %}<span class="muted">—</span>{% endif %}</td>
         </tr>
         {% else %}
