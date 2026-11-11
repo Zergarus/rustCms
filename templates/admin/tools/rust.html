@@ -2,8 +2,138 @@
 {% set section = "system" %}
 {% block title %}Rust-скрипты{% endblock %}
 {% block content %}
-<div class="page-head"><h1>Rust-скрипты</h1></div>
-<div class="card">
-  <p>Редактор Rust-скриптов появится в следующем обновлении.</p>
+{% if editor %}
+<div class="page-head">
+  <h1>{{ form.name if form.name else "Новый скрипт" }}</h1>
+  <a class="btn" href="/admin/tools/rust">К списку</a>
 </div>
+
+<div class="alert" role="alert">
+  <strong>Произвольный код.</strong> Скрипт сохраняется как есть и будет выполняться
+  с правами CMS и доступом к <code>DATABASE_URL</code> — песочницы нет.
+  Запускайте только доверенный код. Запуск появится в следующем обновлении.
+</div>
+
+{% if error %}
+<div class="alert" role="alert">
+  <strong>Ошибка</strong>
+  <p>{{ error }}</p>
+</div>
+{% endif %}
+
+<form class="card" method="post" action="{% if id %}/admin/tools/rust/{{ id }}{% else %}/admin/tools/rust{% endif %}">
+  <label>Имя
+    <input name="name" value="{{ form.name }}" maxlength="100" required autocomplete="off" spellcheck="false" placeholder="Например, отчёт по заказам">
+    <small class="field-hint">1–100 символов, имя уникально.</small>
+  </label>
+  <label>Код
+    <textarea class="mono" name="code" rows="18" spellcheck="false" placeholder="// тело async fn main">{{ form.code }}</textarea>
+    <small class="field-hint">
+      Код — тело <code>async fn main</code>; доступен <code>pool</code> (sqlx::PgPool).
+      Пустой код сохранить можно, но запуск позже сообщит об ошибке компиляции.
+    </small>
+  </label>
+  <div class="settings-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+  </div>
+</form>
+
+{% if script %}
+<div class="card">
+  <p class="muted">Последняя правка: {{ script.updated_at }}</p>
+  <form method="post" action="/admin/tools/rust/{{ id }}/delete" onsubmit="return confirm('Удалить скрипт?')">
+    <button class="btn danger" type="submit">Удалить</button>
+  </form>
+</div>
+
+<h2>История запусков</h2>
+{% if runs %}
+<div class="card table-wrap">
+  <table class="table-fixed">
+    <colgroup><col style="width:180px"><col style="width:110px"><col style="width:120px"><col></colgroup>
+    <thead><tr><th>Когда</th><th>Статус</th><th>Длительность</th><th>Вывод</th></tr></thead>
+    <tbody>
+      {% for r in runs %}
+      <tr>
+        <td class="muted">{{ r.started_at }}</td>
+        <td>{% if r.ok is none %}<span class="muted">—</span>{% elif r.ok %}<span class="badge ok">OK</span>{% else %}<span class="badge">Ошибка</span>{% endif %}</td>
+        <td>{% if r.duration_ms is not none %}{{ r.duration_ms }} мс{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="mono">{{ r.output_short }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card empty">
+  <p>Запусков пока нет.</p>
+  <p class="muted">История появится после первого запуска скрипта.</p>
+</div>
+{% endif %}
+{% endif %}
+
+{% else %}
+<div class="page-head">
+  <h1>Rust-скрипты</h1>
+  <a class="btn primary" href="/admin/tools/rust/new">Новый скрипт</a>
+</div>
+
+<div class="alert" role="alert">
+  <strong>Произвольный код.</strong> Скрипты выполняются с правами CMS и доступом
+  к <code>DATABASE_URL</code>; песочницы нет. Запуск появится в следующем обновлении.
+</div>
+
+{% if error %}
+<div class="alert" role="alert">
+  <strong>Ошибка</strong>
+  <p>{{ error }}</p>
+</div>
+{% endif %}
+
+{% if items %}
+<div class="card table-wrap">
+  <table class="table-fixed">
+    <colgroup><col><col style="width:180px"><col style="width:140px"><col style="width:190px"></colgroup>
+    <thead><tr><th>Имя</th><th>Обновлён</th><th>Кто</th><th></th></tr></thead>
+    <tbody>
+      {% for s in items %}
+      <tr>
+        <td><a href="/admin/tools/rust/{{ s.id }}">{{ s.name }}</a></td>
+        <td class="muted">{{ s.updated_at }}</td>
+        <td class="muted">{{ s.updated_by }}</td>
+        <td>
+          <a class="btn" href="/admin/tools/rust/{{ s.id }}">Открыть</a>
+          <form method="post" action="/admin/tools/rust/{{ s.id }}/delete" style="display:inline" onsubmit="return confirm('Удалить скрипт?')">
+            <button class="btn danger" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card empty">
+  <p>Скриптов пока нет.</p>
+  <p class="muted">Создайте первый скрипт: код хранится в редакторе, запуск появится позже.</p>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Новый скрипт</h2>
+  <form method="post" action="/admin/tools/rust">
+    <label>Имя
+      <input name="name" value="{{ form.name }}" maxlength="100" required autocomplete="off" spellcheck="false" placeholder="Например, отчёт по заказам">
+    </label>
+    <label>Код
+      <textarea class="mono" name="code" rows="8" spellcheck="false" placeholder="// тело async fn main">{{ form.code }}</textarea>
+      <small class="field-hint">Код — тело <code>async fn main</code>; доступен <code>pool</code> (sqlx::PgPool). Можно сохранить и пустым.</small>
+    </label>
+    <div class="settings-actions">
+      <button class="btn primary" type="submit">Создать</button>
+      <a class="btn" href="/admin/tools/rust/new">Открыть большой редактор</a>
+    </div>
+  </form>
+</div>
+{% endif %}
 {% endblock %}

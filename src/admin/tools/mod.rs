@@ -1,19 +1,18 @@
 //! Инструменты супер-администратора: SQL, таблицы БД, Rust-скрипты.
 //!
-//! SQL-консоль и обозреватель таблиц работают; Rust-скрипты — заглушка. Общий выключатель
-//! `ADMIN_TOOLS_ENABLED` и доступ только супер-администратору.
+//! SQL-консоль, обозреватель таблиц и хранение/редактор Rust-скриптов работают;
+//! запуск скриптов — отдельная задача. Общий выключатель `ADMIN_TOOLS_ENABLED` и
+//! доступ только супер-администратору.
 
 pub(crate) mod db;
 pub(crate) mod pg;
+pub(crate) mod rust;
 pub(crate) mod sql;
 
 use axum::{
-    Extension, Router,
-    extract::State,
-    response::Html,
+    Router,
     routing::{get, post},
 };
-use minijinja::context;
 
 use super::render;
 use crate::{
@@ -55,15 +54,10 @@ pub(crate) fn router() -> Router<AppState> {
             "/tools/db/{schema}/{table}/column-drop",
             post(db::column_drop),
         )
-        .route("/tools/rust", get(rust_page))
-}
-
-async fn rust_page(
-    State(state): State<AppState>,
-    Extension(user): Extension<Access>,
-) -> AppResult<Html<String>> {
-    guard(&state, &user)?;
-    render(&state, "tools/rust.html", context! { user })
+        .route("/tools/rust", get(rust::list).post(rust::save))
+        .route("/tools/rust/new", get(rust::new_form))
+        .route("/tools/rust/{id}", get(rust::edit).post(rust::update))
+        .route("/tools/rust/{id}/delete", post(rust::delete))
 }
 
 #[cfg(test)]
