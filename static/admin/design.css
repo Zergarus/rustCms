@@ -409,6 +409,7 @@ td { padding: 8px var(--sp-3); }
 .stat-label { font-size: var(--fs-sm); color: var(--label); }
 .api-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .api-list li { display: flex; gap: var(--sp-2); align-items: baseline; flex-wrap: wrap; }
+.api-list code { overflow-wrap: anywhere; }
 .api-list code, .settings-help code {
   background: var(--raised); border-radius: var(--r-sm);
   padding: 1px 6px; font-family: var(--mono); font-size: 12px;
