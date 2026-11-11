@@ -666,6 +666,31 @@
   // htmx:load приходит и на первой загрузке, и для каждого подменённого фрагмента; init идемпотентен
   document.addEventListener('htmx:load', init);
   document.addEventListener('htmx:afterSettle', function () { document.body.classList.remove('nav-open'); });
+
+  // Модальное редактирование строки в обозревателе таблиц БД
+  document.addEventListener('click', function (e) {
+    var opener = e.target.closest('[data-row-edit]');
+    if (opener) {
+      var dialog = document.getElementById(opener.dataset.rowEdit);
+      if (dialog && dialog.showModal && !dialog.open) dialog.showModal();
+      return;
+    }
+    var closer = e.target.closest('[data-row-close]');
+    if (closer) {
+      var openDialog = closer.closest('dialog');
+      if (openDialog) openDialog.close();
+      return;
+    }
+    var backdrop = e.target.closest('dialog.row-edit-dialog');
+    if (backdrop && e.target === backdrop) backdrop.close();
+  });
+  function openAutoDialogs() {
+    document.querySelectorAll('dialog.row-edit-dialog[data-autoopen]').forEach(function (d) {
+      if (!d.open) d.showModal();
+    });
+  }
+  openAutoDialogs();
+  document.addEventListener('htmx:afterSettle', openAutoDialogs);
   // Текущая страница в полосе вкладок всегда видна, даже если вкладок много
   function revealActiveTab() {
     const active = document.querySelector('.open-tabs .rec.on');

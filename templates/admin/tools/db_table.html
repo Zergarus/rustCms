@@ -173,22 +173,7 @@
           {% for cell in row.cells %}<td class="mono">{{ cell }}</td>{% endfor %}
           {% if editable %}
           <td>
-            <details{% if row.open %} open{% endif %}>
-              <summary>Изменить</summary>
-              <form method="post" action="{{ base_url }}/update">
-                {% for key in row.keys %}<input type="hidden" name="{{ key.name }}" value="{{ key.value }}">{% endfor %}
-                {% for field in row.fields %}
-                <label>{{ field.name }}
-                  {{ field_input(field) }}
-                </label>
-                {% endfor %}
-                <button class="btn primary" type="submit">Сохранить</button>
-              </form>
-              <form method="post" action="{{ base_url }}/delete" hx-confirm="Удалить строку?">
-                {% for key in row.keys %}<input type="hidden" name="{{ key.name }}" value="{{ key.value }}">{% endfor %}
-                <button class="btn danger" type="submit">Удалить</button>
-              </form>
-            </details>
+            <button type="button" class="btn ghost sm" data-row-edit="row-edit-{{ loop.index }}">Изменить</button>
           </td>
           {% endif %}
         </tr>
@@ -196,6 +181,34 @@
       </tbody>
     </table>
   </div>
+  {% if editable %}
+  {% for row in data %}
+  <dialog class="row-edit-dialog" id="row-edit-{{ loop.index }}"{% if row.open %} data-autoopen{% endif %}>
+    <form method="post" action="{{ base_url }}/update" class="row-edit-form">
+      <div class="dialog-head">
+        <h2>Изменить строку</h2>
+        <button type="button" class="ico" data-row-close aria-label="Закрыть">✕</button>
+      </div>
+      {% for key in row.keys %}<input type="hidden" name="{{ key.name }}" value="{{ key.value }}">{% endfor %}
+      <div class="grid-2">
+        {% for field in row.fields %}
+        <label>{{ field.name }}
+          {{ field_input(field) }}
+        </label>
+        {% endfor %}
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn" data-row-close>Отмена</button>
+        <button class="btn primary" type="submit">Сохранить</button>
+      </div>
+    </form>
+    <form method="post" action="{{ base_url }}/delete" class="row-edit-delete" hx-confirm="Удалить строку?">
+      {% for key in row.keys %}<input type="hidden" name="{{ key.name }}" value="{{ key.value }}">{% endfor %}
+      <button class="btn danger sm" type="submit">Удалить строку</button>
+    </form>
+  </dialog>
+  {% endfor %}
+  {% endif %}
   {% if not data %}<p class="muted">В таблице пока нет строк.</p>{% endif %}
   {% else %}
   <p class="muted">В таблице пока нет строк.</p>

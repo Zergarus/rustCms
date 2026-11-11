@@ -297,6 +297,26 @@ td { padding: 8px var(--sp-3); }
 .section-pick > .menu a.on { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
 .section-pick > .menu .cnt { margin-left: auto; color: var(--muted); font-size: var(--fs-xs); }
 
+/* Модальное редактирование строки таблицы БД */
+.row-edit-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(86vh, 900px);
+  padding: 0; color: var(--text); background: var(--panel);
+  border: 1px solid var(--border-strong); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-pop);
+}
+.row-edit-dialog::backdrop { background: rgba(0, 0, 0, .55); }
+.row-edit-form { padding: var(--sp-4); max-height: calc(86vh - 72px); overflow: auto; }
+.row-edit-form .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.row-edit-form .grid-2 label { min-width: 0; }
+.row-edit-form .grid-2 input, .row-edit-form .grid-2 select, .row-edit-form .grid-2 textarea { width: 100%; }
+.dialog-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); margin-bottom: var(--sp-3); }
+.dialog-head h2 { margin: 0; }
+.row-edit-delete { padding: 0 var(--sp-4) var(--sp-4); border-top: 1px solid var(--border); padding-top: var(--sp-2); }
+@media (max-width: 700px) {
+  .row-edit-form .grid-2 { grid-template-columns: 1fr; }
+}
+
 /* Группы пользователей в накопительной скидке — в две колонки */
 .groups-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 24px; max-width: 720px; }
 .groups-grid .check { padding: 3px 0; }
