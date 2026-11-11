@@ -291,9 +291,9 @@ td { padding: 8px var(--sp-3); }
 .nav-branch > summary a { color: inherit; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-tree-children { margin-left: 10px; padding-left: 4px; border-left: 1px solid var(--border); }
 .nav-tree .nav { min-height: 26px; font-size: var(--fs-sm); }
-.nav-tree .nav-count, .side-nav > .nav .nav-count {
+.nav-tree .nav-count, .nav-tree-full .nav-count, .side-nav > .nav .nav-count {
   background: none; color: var(--muted); font-weight: 400;
-  font-size: var(--fs-xs); padding: 0; min-width: 0;
+  font-size: var(--fs-base); padding: 0; min-width: 0; border-radius: 0;
 }
 .nav-tree-full > .nav { padding-left: 8px; }
 .nav-tree-setup { color: var(--muted); }

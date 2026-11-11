@@ -30,14 +30,14 @@ use axum::{
     extract::{
         DefaultBodyLimit, Multipart, OriginalUri, Request, State, multipart::MultipartError,
     },
-    http::{Method, StatusCode, header},
+    http::{HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use axum_extra::extract::CookieJar;
 use minijinja::{Value, context};
-use tower_http::services::ServeDir;
+use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 
 use crate::{
     access::Access,
@@ -425,13 +425,21 @@ pub fn router(state: AppState) -> Router<AppState> {
         ));
 
     let static_dir = state.config.static_dir.join("admin");
+    // Админские CSS/JS небольшие: браузер должен перепроверять их, иначе правки
+    // дизайна не доезжают до уже открытых страниц.
+    let static_files = Router::new()
+        .nest_service("/static", ServeDir::new(static_dir))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        ));
     Router::new()
         .route(
             "/login",
             get(auth_pages::login_form).post(auth_pages::login),
         )
         .merge(protected)
-        .nest_service("/static", ServeDir::new(static_dir))
+        .merge(static_files)
         .layer(middleware::from_fn(same_origin_guard))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
 }

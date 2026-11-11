@@ -6,8 +6,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Админка{% endblock %} — CMS</title>
   <link rel="preload" href="/admin/static/fonts/inter-cyrillic-400.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="/admin/static/admin.css">
-  <link rel="stylesheet" href="/admin/static/design.css">
+  <link rel="stylesheet" href="/admin/static/admin.css?v=3">
+  <link rel="stylesheet" href="/admin/static/design.css?v=3">
   {#- 403 показываем как обычную страницу, ошибки остальных кодов выводит admin.js -#}
   <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"403","swap":true,"error":false},{"code":"[45]..","swap":false,"error":true}]}'>
   <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
