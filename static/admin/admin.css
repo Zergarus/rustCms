@@ -189,12 +189,7 @@ body[data-tabs="off"] .topbar:not(:has(.nav-toggle:not([hidden]))) { min-height:
 .rec-x:hover { background: var(--hover); color: var(--text); }
 .rec-x .icon { width: 14px; height: 14px; }
 
-.container { width: 100%; max-width: 1400px; margin: 0 auto; padding: 28px 24px 64px; }
-/* На широких экранах оставляем ощутимые поля от сайдбара и справа (≈90px) */
-@media (min-width: 1680px) {
-  /* Не упираемся в max-width: иначе на 1920+ поля снова растут больше 90px */
-  .container { width: calc(100% - 180px); max-width: none; }
-}
+.container { width: calc(100% - 20px); max-width: none; margin: 0 auto; padding: 28px 24px 64px; }
 .page-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
 .page-head h1 { margin: 0; }
 .head-actions { display: flex; gap: 8px; align-items: center; }
