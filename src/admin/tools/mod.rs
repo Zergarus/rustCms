@@ -7,7 +7,12 @@ pub(crate) mod db;
 pub(crate) mod pg;
 pub(crate) mod sql;
 
-use axum::{Extension, Router, extract::State, response::Html, routing::get};
+use axum::{
+    Extension, Router,
+    extract::State,
+    response::Html,
+    routing::{get, post},
+};
 use minijinja::context;
 
 use super::render;
@@ -37,6 +42,9 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/tools/sql", get(sql::page).post(sql::execute))
         .route("/tools/db", get(db::list))
         .route("/tools/db/{schema}/{table}", get(db::table))
+        .route("/tools/db/{schema}/{table}/insert", post(db::row_insert))
+        .route("/tools/db/{schema}/{table}/update", post(db::row_update))
+        .route("/tools/db/{schema}/{table}/delete", post(db::row_delete))
         .route("/tools/rust", get(rust_page))
 }
 

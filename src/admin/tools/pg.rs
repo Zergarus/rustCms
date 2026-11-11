@@ -38,18 +38,59 @@ pub struct TableInfo {
 pub struct ColumnInfo {
     pub name: String,
     pub data_type: String,
+    /// Внутреннее имя типа (`int4`, `_text`, имя домена) — по нему выбирается форма.
+    pub type_name: String,
     pub nullable: bool,
     pub default: Option<String>,
     pub pk: bool,
 }
 
+/// Первичный ключ: одна или несколько колонок в порядке объявления.
+#[derive(Debug, Clone, Serialize)]
+pub struct PrimaryKey {
+    pub columns: Vec<String>,
+}
+
+impl PrimaryKey {
+    /// `None`, если у таблицы нет PK: тогда правка строк недоступна.
+    pub(crate) fn of(columns: &[ColumnInfo]) -> Option<Self> {
+        let columns: Vec<String> = columns
+            .iter()
+            .filter(|column| column.pk)
+            .map(|column| column.name.clone())
+            .collect();
+        (!columns.is_empty()).then_some(Self { columns })
+    }
+}
+
 /// Одна страница данных таблицы.
 #[derive(Debug, Default, Serialize)]
 pub struct RowsPage {
-    pub rows: Vec<Vec<String>>,
+    pub rows: Vec<Vec<RowCell>>,
     /// Точное число строк; `None`, если `count(*)` не уложился в таймаут.
     pub total: Option<i64>,
     pub count_error: Option<String>,
+}
+
+/// Ячейка строки: значение для показа и значение для input формы.
+#[derive(Debug, Clone, Serialize)]
+pub struct RowCell {
+    /// Отформатированное значение; NULL показывается как `NULL`.
+    pub display: String,
+    /// Значение для формы; NULL — пустая строка, без обрезки.
+    pub input: String,
+}
+
+/// Что за поле рисовать в форме строки.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputKind {
+    Text,
+    Number,
+    Date,
+    /// `<select>` true/false: пустое значение — NULL или DEFAULT.
+    Boolean,
+    /// Многострочный текст (json/jsonb).
+    Multiline,
 }
 
 /// Экранирует идентификатор PostgreSQL двойными кавычками.
@@ -110,16 +151,21 @@ pub(crate) async fn columns(db: &PgPool, schema: &str, table: &str) -> AppResult
     let rows: Vec<ColumnRow> = sqlx::query_as(
         "SELECT a.attname AS name,
                 format_type(a.atttypid, a.atttypmod) AS data_type,
+                t.typname AS type_name,
                 NOT a.attnotnull AS nullable,
                 pg_get_expr(d.adbin, d.adrelid) AS \"default\",
                 EXISTS (SELECT 1
                           FROM pg_index i
+                          CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY
+                               AS k(attnum, ord)
                          WHERE i.indrelid = a.attrelid
                            AND i.indisprimary
-                           AND a.attnum = ANY (i.indkey)) AS pk
+                           AND k.attnum = a.attnum
+                           AND k.ord <= i.indnkeyatts) AS pk
            FROM pg_attribute a
            JOIN pg_class c ON c.oid = a.attrelid
            JOIN pg_namespace n ON n.oid = c.relnamespace
+           JOIN pg_type t ON t.oid = a.atttypid
            LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
           WHERE n.nspname = $1 AND c.relname = $2
             AND a.attnum > 0 AND NOT a.attisdropped
@@ -134,6 +180,7 @@ pub(crate) async fn columns(db: &PgPool, schema: &str, table: &str) -> AppResult
         .map(|row| ColumnInfo {
             name: row.name,
             data_type: row.data_type,
+            type_name: row.type_name,
             nullable: row.nullable,
             default: row.default,
             pk: row.pk,
@@ -145,6 +192,7 @@ pub(crate) async fn columns(db: &PgPool, schema: &str, table: &str) -> AppResult
 struct ColumnRow {
     name: String,
     data_type: String,
+    type_name: String,
     nullable: bool,
     default: Option<String>,
     pk: bool,
@@ -178,7 +226,22 @@ pub(crate) async fn rows(
     let qualified = format!("{}.{}", quote_ident(schema), quote_ident(table));
     let (total, count_error) = count(db, &qualified).await;
 
-    let mut sql = format!("SELECT * FROM {qualified}");
+    // Для типов без binary-декодера берём текстовое представление: так значение
+    // можно и показать, и подставить в input, не теряя данные при правке.
+    let select = columns
+        .iter()
+        .map(|column| {
+            let ident = quote_ident(&column.name);
+            if has_binary_format(&column.type_name) {
+                ident
+            } else {
+                format!("{ident}::text")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut sql = format!("SELECT {select} FROM {qualified}");
     if let Some((column, dir)) = &sort {
         sql.push_str(&format!(" ORDER BY {column} {dir}"));
     }
@@ -201,7 +264,10 @@ pub(crate) async fn rows(
         .iter()
         .map(|row| {
             (0..row.len())
-                .map(|index| format_value(row, index))
+                .map(|index| RowCell {
+                    display: format_value(row, index),
+                    input: input_value(row, index),
+                })
                 .collect()
         })
         .collect();
@@ -322,6 +388,134 @@ pub(crate) fn format_value(row: &PgRow, index: usize) -> String {
         _ => None,
     };
     truncate(&formatted.unwrap_or_else(|| "…".into()), MAX_CELL_CHARS)
+}
+
+/// Есть ли у типа binary-декодер в [`format_value`]; иначе колонка читается `::text`.
+fn has_binary_format(type_name: &str) -> bool {
+    matches!(
+        type_name.to_ascii_uppercase().as_str(),
+        "BOOL"
+            | "INT2"
+            | "INT4"
+            | "INT8"
+            | "FLOAT4"
+            | "FLOAT8"
+            | "NUMERIC"
+            | "TEXT"
+            | "VARCHAR"
+            | "BPCHAR"
+            | "NAME"
+            | "UNKNOWN"
+            | "CITEXT"
+            | "JSON"
+            | "JSONB"
+            | "DATE"
+            | "TIME"
+            | "TIMESTAMP"
+            | "TIMESTAMPTZ"
+            | "UUID"
+            | "BYTEA"
+    )
+}
+
+/// Вид поля формы по типу колонки.
+pub(crate) fn input_kind(column: &ColumnInfo) -> InputKind {
+    match column.type_name.to_ascii_uppercase().as_str() {
+        "INT2" | "INT4" | "INT8" | "FLOAT4" | "FLOAT8" | "NUMERIC" => InputKind::Number,
+        "DATE" => InputKind::Date,
+        "BOOL" => InputKind::Boolean,
+        "JSON" | "JSONB" => InputKind::Multiline,
+        _ => InputKind::Text,
+    }
+}
+
+/// Шаг `<input type="number">`: целые — 1, дробные — любой.
+pub(crate) fn input_step(column: &ColumnInfo) -> Option<&'static str> {
+    match column.type_name.to_ascii_uppercase().as_str() {
+        "INT2" | "INT4" | "INT8" => Some("1"),
+        "FLOAT4" | "FLOAT8" | "NUMERIC" => Some("any"),
+        _ => None,
+    }
+}
+
+/// Символьный тип: пустой ввод — пустая строка, а не NULL.
+pub(crate) fn is_textual(column: &ColumnInfo) -> bool {
+    matches!(
+        column.type_name.to_ascii_uppercase().as_str(),
+        "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "CITEXT"
+    )
+}
+
+/// Значение для input формы: без обрезки, NULL — пустая строка, `bytea` — `\x…`.
+pub(crate) fn input_value(row: &PgRow, index: usize) -> String {
+    let Ok(raw) = row.try_get_raw(index) else {
+        return String::new();
+    };
+    if raw.is_null() {
+        return String::new();
+    }
+    let type_name = row.column(index).type_info().name();
+    let value: Option<String> = match type_name {
+        "BOOL" => row
+            .try_get::<bool, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "INT2" => row
+            .try_get::<i16, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "INT4" => row
+            .try_get::<i32, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "INT8" => row
+            .try_get::<i64, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "FLOAT4" => row
+            .try_get::<f32, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "FLOAT8" => row
+            .try_get::<f64, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "NUMERIC" => raw.as_bytes().ok().and_then(format_numeric),
+        "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "UNKNOWN" | "CITEXT" => {
+            row.try_get::<String, _>(index).ok()
+        }
+        "JSON" | "JSONB" => row
+            .try_get::<serde_json::Value, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "DATE" => row
+            .try_get::<chrono::NaiveDate, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "TIME" => row
+            .try_get::<chrono::NaiveTime, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "TIMESTAMP" => row
+            .try_get::<chrono::NaiveDateTime, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "TIMESTAMPTZ" => row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>(index)
+            .ok()
+            .map(|value| value.to_string()),
+        "UUID" => raw
+            .as_bytes()
+            .ok()
+            .and_then(|bytes| uuid::Uuid::from_slice(bytes).ok())
+            .map(|id| id.to_string()),
+        "BYTEA" => row
+            .try_get::<Vec<u8>, _>(index)
+            .ok()
+            .map(|bytes| format!("\\x{}", hex::encode(bytes))),
+        _ => None,
+    };
+    value.unwrap_or_default()
 }
 
 /// `bytea` — hex, обрезанный по [`MAX_BYTEA_HEX_CHARS`].

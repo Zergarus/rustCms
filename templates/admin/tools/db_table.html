@@ -1,6 +1,22 @@
 {% extends "base.html" %}
 {% set section = "system" %}
 {% block title %}{{ schema }}.{{ table }}{% endblock %}
+
+{% macro field_input(field) %}
+  {%- if field.boolean %}
+  <select name="{{ field.name }}">
+    <option value="">—</option>
+    <option value="true"{% if field.value == "true" %} selected{% endif %}>true</option>
+    <option value="false"{% if field.value == "false" %} selected{% endif %}>false</option>
+  </select>
+  {%- elif field.multiline %}
+  <textarea class="mono" name="{{ field.name }}" rows="3" spellcheck="false">{{ field.value }}</textarea>
+  {%- else %}
+  <input name="{{ field.name }}" type="{{ field.input_type }}" value="{{ field.value }}"{% if field.step %} step="{{ field.step }}"{% endif %}>
+  {%- endif %}
+  <small class="field-hint">{{ field.hint }}</small>
+{% endmacro %}
+
 {% block content %}
 <div class="page-head">
   <a class="btn" href="/admin/tools/db">Назад к таблицам</a>
@@ -8,9 +24,20 @@
   <span class="muted">{{ kind_label }}</span>
 </div>
 
+{% if error %}
+<div class="alert" role="alert">
+  <strong>Ошибка</strong>
+  <pre class="mono">{{ error }}</pre>
+</div>
+{% endif %}
+
 <div class="alert" role="alert">
   <strong>Данные не маскируются:</strong> видны все значения, включая секреты. Доступ только супер-администраторам.
 </div>
+
+{% if readonly_reason %}
+<div class="notice">{{ readonly_reason }}</div>
+{% endif %}
 
 <div class="card">
   <h2>Структура</h2>
@@ -36,6 +63,24 @@
   </div>
 </div>
 
+{% if editable %}
+<div class="card">
+  <details{% if insert_open %} open{% endif %}>
+    <summary><strong>Добавить строку</strong></summary>
+    <form method="post" action="{{ base_url }}/insert">
+      <div class="grid-2">
+        {% for field in insert_fields %}
+        <label>{{ field.name }}
+          {{ field_input(field) }}
+        </label>
+        {% endfor %}
+      </div>
+      <div class="settings-actions"><button class="btn primary" type="submit">Добавить</button></div>
+    </form>
+  </details>
+</div>
+{% endif %}
+
 <div class="card">
   <h2>Данные</h2>
   <p class="muted">
@@ -56,11 +101,34 @@
             <a href="{{ column.sort_url }}" title="Сортировать по «{{ column.name }}»">{{ column.name }}{% if column.sort_dir == "asc" %} ↑{% elif column.sort_dir == "desc" %} ↓{% endif %}</a>
           </th>
           {% endfor %}
+          {% if editable %}<th>Правка</th>{% endif %}
         </tr>
       </thead>
       <tbody>
         {% for row in data %}
-        <tr>{% for cell in row %}<td class="mono">{{ cell }}</td>{% endfor %}</tr>
+        <tr>
+          {% for cell in row.cells %}<td class="mono">{{ cell }}</td>{% endfor %}
+          {% if editable %}
+          <td>
+            <details{% if row.open %} open{% endif %}>
+              <summary>Изменить</summary>
+              <form method="post" action="{{ base_url }}/update">
+                {% for key in row.keys %}<input type="hidden" name="{{ key.name }}" value="{{ key.value }}">{% endfor %}
+                {% for field in row.fields %}
+                <label>{{ field.name }}
+                  {{ field_input(field) }}
+                </label>
+                {% endfor %}
+                <button class="btn primary" type="submit">Сохранить</button>
+              </form>
+              <form method="post" action="{{ base_url }}/delete" hx-confirm="Удалить строку?">
+                {% for key in row.keys %}<input type="hidden" name="{{ key.name }}" value="{{ key.value }}">{% endfor %}
+                <button class="btn danger" type="submit">Удалить</button>
+              </form>
+            </details>
+          </td>
+          {% endif %}
+        </tr>
         {% endfor %}
       </tbody>
     </table>
