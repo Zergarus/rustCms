@@ -1,8 +1,8 @@
-//! Rust-скрипты: хранение кода и редактор.
+//! Rust-скрипты: хранение, редактор и запуск.
 //!
-//! Запуск скриптов — отдельная задача; здесь только список, создание, правка и
-//! удаление. Код не выполняется и не проверяется, поэтому страница постоянно
-//! предупреждает о произвольном коде.
+//! Сохранённый код компилируется и выполняется через [`runner`] на странице
+//! скрипта; несохранённые правки формы не запускаются. Код не проверяется до
+//! запуска, поэтому страница постоянно предупреждает о произвольном коде.
 
 use axum::{
     Extension, Form,
@@ -13,7 +13,9 @@ use minijinja::context;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-use super::{guard, pg, render};
+use std::time::Instant;
+
+use super::{guard, pg, render, runner};
 use crate::{
     access::Access,
     admin::flash::{self, FlashKind},
@@ -75,6 +77,29 @@ struct RunView {
     output_short: String,
 }
 
+/// Итог только что выполненного запуска для страницы редактора.
+#[derive(Debug, Serialize)]
+struct RunResultView {
+    ok: bool,
+    duration_ms: u64,
+    stdout: String,
+    stderr: String,
+    error: Option<String>,
+    truncated: bool,
+}
+
+/// Данные для записи в историю запусков.
+struct RunRecord {
+    script_id: i64,
+    user_id: i64,
+    user_login: String,
+    started_at: chrono::DateTime<chrono::Utc>,
+    duration_ms: u64,
+    ok: bool,
+    output: String,
+    error: String,
+}
+
 /// GET `/admin/tools/rust` — список скриптов и форма нового.
 pub async fn list(
     State(state): State<AppState>,
@@ -90,7 +115,7 @@ pub async fn new_form(
     Extension(user): Extension<Access>,
 ) -> AppResult<Html<String>> {
     guard(&state, &user)?;
-    render_editor(&state, user, None, RustForm::default(), None).await
+    render_editor(&state, user, None, RustForm::default(), None, None).await
 }
 
 /// GET `/admin/tools/rust/{id}` — редактор существующего скрипта и история запусков.
@@ -105,7 +130,81 @@ pub async fn edit(
         name: script.name.clone(),
         code: script.code.clone(),
     };
-    render_editor(&state, user, Some(script), form, None).await
+    render_editor(&state, user, Some(script), form, None, None).await
+}
+
+/// POST `/admin/tools/rust/{id}/run` — выполнить сохранённый код скрипта.
+///
+/// Запускается именно сохранённый код: несохранённые правки формы не
+/// передаются. Итог пишется в историю (последние 50 запусков) и в журнал
+/// действий; страница сразу показывает stdout/stderr и ошибку.
+pub async fn run(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+) -> AppResult<Html<String>> {
+    guard(&state, &user)?;
+    let script = load_script(&state.db, id).await?;
+    let started_at = chrono::Utc::now();
+    let started = Instant::now();
+    let result = runner::run(&script.code).await;
+    let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+
+    let (ok, stdout, stderr, error, truncated) = match result {
+        Ok(output) => (true, output.stdout, output.stderr, None, output.truncated),
+        Err(error) => (false, String::new(), String::new(), Some(error), false),
+    };
+    let output = if ok {
+        combine_streams(&stdout, &stderr)
+    } else {
+        String::new()
+    };
+    record_run(
+        &state.db,
+        RunRecord {
+            script_id: id,
+            user_id: user.user.id,
+            user_login: user.user.login.clone(),
+            started_at,
+            duration_ms,
+            ok,
+            output,
+            error: error.clone().unwrap_or_default(),
+        },
+    )
+    .await?;
+    let status = if ok { "ok" } else { "ошибка" };
+    audit::record(
+        &state.db,
+        user.user.id,
+        &user.user.login,
+        "rust-run",
+        "tools",
+        id,
+        &format!("{}: {status}, {duration_ms} мс", script.name),
+    )
+    .await;
+
+    let form = RustForm {
+        name: script.name.clone(),
+        code: script.code.clone(),
+    };
+    render_editor(
+        &state,
+        user,
+        Some(script),
+        form,
+        None,
+        Some(RunResultView {
+            ok,
+            duration_ms,
+            stdout,
+            stderr,
+            error,
+            truncated,
+        }),
+    )
+    .await
 }
 
 /// POST `/admin/tools/rust` — создать скрипт.
@@ -118,7 +217,7 @@ pub async fn save(
     let name = match validate_name(&form.name) {
         Ok(name) => name,
         Err(error) => {
-            return Ok(render_editor(&state, user, None, form, Some(error))
+            return Ok(render_editor(&state, user, None, form, Some(error), None)
                 .await?
                 .into_response());
         }
@@ -152,7 +251,7 @@ pub async fn save(
         }
         Err(error) if is_unique_violation(&error) => {
             let message = "Скрипт с таким именем уже есть".to_string();
-            Ok(render_editor(&state, user, None, form, Some(message))
+            Ok(render_editor(&state, user, None, form, Some(message), None)
                 .await?
                 .into_response())
         }
@@ -172,9 +271,11 @@ pub async fn update(
     let name = match validate_name(&form.name) {
         Ok(name) => name,
         Err(error) => {
-            return Ok(render_editor(&state, user, Some(script), form, Some(error))
-                .await?
-                .into_response());
+            return Ok(
+                render_editor(&state, user, Some(script), form, Some(error), None)
+                    .await?
+                    .into_response(),
+            );
         }
     };
     let result = sqlx::query_scalar::<_, i64>(
@@ -211,7 +312,7 @@ pub async fn update(
             let script = load_script(&state.db, id).await?;
             let message = "Скрипт с таким именем уже есть".to_string();
             Ok(
-                render_editor(&state, user, Some(script), form, Some(message))
+                render_editor(&state, user, Some(script), form, Some(message), None)
                     .await?
                     .into_response(),
             )
@@ -250,6 +351,51 @@ pub async fn delete(
         "Удалено",
         FlashKind::Ok,
     ))
+}
+
+/// Сохраняет запуск и удаляет из истории всё, кроме последних 50.
+async fn record_run(db: &sqlx::PgPool, run: RunRecord) -> AppResult<()> {
+    let duration_ms = run.duration_ms.min(i32::MAX as u64) as i32;
+    sqlx::query(
+        "INSERT INTO admin_rust_runs
+             (script_id, user_id, user_login, started_at, duration_ms, ok, output, error)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(run.script_id)
+    .bind(run.user_id)
+    .bind(&run.user_login)
+    .bind(run.started_at)
+    .bind(duration_ms)
+    .bind(run.ok)
+    .bind(&run.output)
+    .bind(&run.error)
+    .execute(db)
+    .await?;
+    sqlx::query(
+        "DELETE FROM admin_rust_runs
+         WHERE script_id = $1
+           AND id NOT IN (
+               SELECT id FROM admin_rust_runs
+               WHERE script_id = $1
+               ORDER BY started_at DESC NULLS LAST, id DESC
+               LIMIT $2
+           )",
+    )
+    .bind(run.script_id)
+    .bind(HISTORY_LIMIT)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// stdout и stderr в одну строку для истории; пустые потоки не добавляют переводов.
+fn combine_streams(stdout: &str, stderr: &str) -> String {
+    match (stdout.trim().is_empty(), stderr.trim().is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => stdout.to_string(),
+        (true, false) => stderr.to_string(),
+        (false, false) => format!("{stdout}\n{stderr}"),
+    }
 }
 
 /// Проверка имени: тримим, требуем 1–100 символов.
@@ -346,6 +492,7 @@ async fn render_editor(
     script: Option<RustScript>,
     form: RustForm,
     error: Option<String>,
+    run_result: Option<RunResultView>,
 ) -> AppResult<Html<String>> {
     let id = script.as_ref().map(|script| script.id);
     let runs = match id {
@@ -355,7 +502,7 @@ async fn render_editor(
     render(
         state,
         "tools/rust.html",
-        context! { user, script, form, error, runs, id, editor => true },
+        context! { user, script, form, error, runs, id, run_result, editor => true },
     )
 }
 
@@ -364,6 +511,7 @@ mod tests {
     use axum::http::{StatusCode, header};
     use sqlx::PgPool;
 
+    use super::{RunRecord, record_run};
     use crate::{
         smoke_tests::{get, post_form},
         test_support::{admin_cookie, permitted_cookie, post_form_raw, test_state},
@@ -708,13 +856,18 @@ mod tests {
             "нет предупреждения: {body}"
         );
         assert!(
-            body.contains("появится позже") || body.contains("следующем обновлении"),
-            "нет предупреждения об отсутствии запуска: {body}"
+            body.contains("сначала сохраните"),
+            "нет подсказки о сохранении перед запуском: {body}"
         );
         assert!(body.contains("Сохранить"), "нет кнопки сохранения: {body}");
         assert!(
-            !body.contains("Запустить"),
-            "кнопка запуска не должна быть: {body}"
+            body.contains(&format!("/admin/tools/rust/{id}/run")),
+            "нет формы запуска: {body}"
+        );
+        assert!(body.contains("Запустить"), "нет кнопки запуска: {body}");
+        assert!(
+            !body.contains("Запуск появится"),
+            "осталось предупреждение об отсутствии запуска: {body}"
         );
         assert!(body.contains("История запусков"), "нет истории: {body}");
         assert!(body.contains("готово: 42"), "нет вывода запуска: {body}");
@@ -732,6 +885,10 @@ mod tests {
         assert!(body.contains("Новый скрипт"), "нет заголовка: {body}");
         assert!(body.contains("async fn main"), "нет подсказки: {body}");
         assert!(body.contains("Сохранить"), "нет кнопки: {body}");
+        assert!(
+            !body.contains("Запустить"),
+            "у несохранённого скрипта нет кнопки запуска: {body}"
+        );
 
         let (status, body) = get(&app, &format!("{PATH}/{id}"), &cookie).await;
         assert_eq!(status, 200, "{body}");
@@ -752,6 +909,172 @@ mod tests {
         }
         let (status, _) = post_form(&app, &format!("{PATH}/999999/delete"), &cookie, "").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = post_form(&app, &format!("{PATH}/999999/run"), &cookie, "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    async fn failed_run_is_recorded_and_shown_in_history(db: PgPool) {
+        let id = insert_script(&db, "Сломанный", "this is not rust").await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let admin = admin_id(&db).await;
+        let started_at = chrono::Utc::now();
+        record_run(
+            &db,
+            RunRecord {
+                script_id: id,
+                user_id: admin,
+                user_login: "smoke".into(),
+                started_at,
+                duration_ms: 123,
+                ok: false,
+                output: String::new(),
+                error: "Сборка не удалась: expected `;`".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let (status, body) = get(&app, &format!("{PATH}/{id}"), &cookie).await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body.contains("Сборка не удалась"),
+            "нет ошибки запуска в истории: {body}"
+        );
+        assert!(body.contains("123"), "нет длительности: {body}");
+        let (login, user_id, ok, duration, error, has_started_at): (
+            String,
+            Option<i64>,
+            bool,
+            i32,
+            String,
+            bool,
+        ) = sqlx::query_as(
+            "SELECT user_login, user_id, ok, duration_ms, COALESCE(error, ''),
+                    started_at IS NOT NULL
+             FROM admin_rust_runs WHERE script_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(login, "smoke");
+        assert_eq!(user_id, Some(admin));
+        assert!(!ok);
+        assert_eq!(duration, 123);
+        assert!(error.contains("expected"));
+        assert!(has_started_at, "не записано started_at");
+    }
+
+    #[sqlx::test]
+    async fn only_last_50_runs_are_kept(db: PgPool) {
+        let id = insert_script(&db, "Много запусков", "").await;
+        let _cookie = admin_cookie(&db).await;
+        let admin = admin_id(&db).await;
+        for index in 0..55 {
+            record_run(
+                &db,
+                RunRecord {
+                    script_id: id,
+                    user_id: admin,
+                    user_login: "smoke".into(),
+                    started_at: chrono::Utc::now(),
+                    duration_ms: index,
+                    ok: true,
+                    output: format!("run {index}"),
+                    error: String::new(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM admin_rust_runs WHERE script_id = $1")
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(count, 50, "история не обрезана до 50");
+
+        let oldest: String = sqlx::query_scalar(
+            "SELECT output FROM admin_rust_runs WHERE script_id = $1
+             ORDER BY started_at ASC, id ASC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(oldest, "run 5", "удалены не самые старые запуски");
+    }
+
+    #[sqlx::test]
+    #[ignore = "собирает временный Rust-крейт (долго), нужен toolchain и DATABASE_URL"]
+    async fn run_endpoint_executes_and_records(db: PgPool) {
+        let _serial = crate::admin::tools::runner::TEST_RUN_LOCK.lock().await;
+        let id = insert_script(&db, "Печать", "println!(\"ok\");").await;
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = post_form(&app, &format!("{PATH}/{id}/run"), &cookie, "").await;
+
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("Результат запуска"), "{body}");
+        assert!(body.contains("stdout"), "{body}");
+        assert!(body.contains("ok"), "нет вывода скрипта: {body}");
+        let (login, ok, duration, output, error): (String, bool, i32, String, String) =
+            sqlx::query_as(
+                "SELECT user_login, ok, duration_ms, COALESCE(output, ''), COALESCE(error, '')
+                 FROM admin_rust_runs WHERE script_id = $1 ORDER BY id DESC LIMIT 1",
+            )
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(login, "smoke");
+        assert!(ok, "запуск записан как ошибка: {error}");
+        assert!(duration > 0, "нет длительности");
+        assert!(output.contains("ok"), "нет вывода в истории");
+        assert!(error.is_empty(), "ошибка при успешном запуске: {error}");
+
+        let (action, entity, summary) = last_audit(&db).await;
+        assert_eq!(action, "rust-run");
+        assert_eq!(entity, "tools");
+        assert!(summary.contains("Печать"), "нет имени: {summary}");
+        assert!(summary.contains("ok"), "нет статуса: {summary}");
+        assert!(summary.contains("мс"), "нет длительности: {summary}");
+
+        // Ошибка компиляции тоже становится run с ok=false и текстом.
+        sqlx::query("UPDATE admin_rust_scripts SET code = 'this is not rust' WHERE id = $1")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let (status, body) = post_form(&app, &format!("{PATH}/{id}/run"), &cookie, "").await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("Сборка не удалась"), "{body}");
+        let (ok, error): (bool, String) = sqlx::query_as(
+            "SELECT ok, COALESCE(error, '') FROM admin_rust_runs
+             WHERE script_id = $1 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert!(!ok, "ошибка компиляции записана как успех");
+        assert!(error.contains("Сборка не удалась"), "{error}");
+        assert!(
+            error.contains("expected"),
+            "нет вывода компилятора: {error}"
+        );
+
+        let (action, entity, summary) = last_audit(&db).await;
+        assert_eq!(action, "rust-run");
+        assert_eq!(entity, "tools");
+        assert!(summary.contains("Печать"), "нет имени: {summary}");
+        assert!(summary.contains("ошибка"), "нет статуса ошибки: {summary}");
     }
 
     #[sqlx::test]
@@ -775,6 +1098,7 @@ mod tests {
                 form_body(&[("name", "Взлом"), ("code", "x")]),
             ),
             (format!("{PATH}/{id}/delete"), String::new()),
+            (format!("{PATH}/{id}/run"), String::new()),
         ] {
             let (status, response) = post_form(&app, &path, &cookie, &body).await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {response}");

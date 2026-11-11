@@ -1,11 +1,11 @@
 //! Инструменты супер-администратора: SQL, таблицы БД, Rust-скрипты.
 //!
-//! SQL-консоль, обозреватель таблиц и хранение/редактор Rust-скриптов работают;
-//! запуск скриптов — отдельная задача. Общий выключатель `ADMIN_TOOLS_ENABLED` и
-//! доступ только супер-администратору.
+//! SQL-консоль, обозреватель таблиц, хранение, редактор и запуск Rust-скриптов.
+//! Общий выключатель `ADMIN_TOOLS_ENABLED` и доступ только супер-администратору.
 
 pub(crate) mod db;
 pub(crate) mod pg;
+pub(crate) mod runner;
 pub(crate) mod rust;
 pub(crate) mod sql;
 
@@ -57,6 +57,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/tools/rust", get(rust::list).post(rust::save))
         .route("/tools/rust/new", get(rust::new_form))
         .route("/tools/rust/{id}", get(rust::edit).post(rust::update))
+        .route("/tools/rust/{id}/run", post(rust::run))
         .route("/tools/rust/{id}/delete", post(rust::delete))
 }
 

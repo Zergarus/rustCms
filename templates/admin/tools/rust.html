@@ -11,13 +11,41 @@
 <div class="alert" role="alert">
   <strong>Произвольный код.</strong> Скрипт сохраняется как есть и будет выполняться
   с правами CMS и доступом к <code>DATABASE_URL</code> — песочницы нет.
-  Запускайте только доверенный код. Запуск появится в следующем обновлении.
+  Запускайте только доверенный код: кнопка запуска — ниже.
 </div>
 
 {% if error %}
 <div class="alert" role="alert">
   <strong>Ошибка</strong>
   <p>{{ error }}</p>
+</div>
+{% endif %}
+
+{% if run_result %}
+<div class="card">
+  <h2>Результат запуска</h2>
+  <p class="muted">
+    {% if run_result.ok %}<span class="badge ok">OK</span>{% else %}<span class="badge danger">Ошибка</span>{% endif %}
+    Длительность: {{ run_result.duration_ms }} мс.
+    {% if run_result.truncated %}<strong>Вывод обрезан до 64 КБ.</strong>{% endif %}
+  </p>
+  {% if run_result.error %}
+  <div class="alert" role="alert">
+    <strong>Ошибка</strong>
+    <pre class="mono">{{ run_result.error }}</pre>
+  </div>
+  {% endif %}
+  {% if run_result.stdout %}
+  <h3>stdout</h3>
+  <pre class="mono">{{ run_result.stdout }}</pre>
+  {% endif %}
+  {% if run_result.stderr %}
+  <h3>stderr</h3>
+  <pre class="mono">{{ run_result.stderr }}</pre>
+  {% endif %}
+  {% if not run_result.error and not run_result.stdout and not run_result.stderr %}
+  <p class="muted">Скрипт ничего не вывел.</p>
+  {% endif %}
 </div>
 {% endif %}
 
@@ -30,7 +58,7 @@
     <textarea class="mono" name="code" rows="18" spellcheck="false" placeholder="// тело async fn main">{{ form.code }}</textarea>
     <small class="field-hint">
       Код — тело <code>async fn main</code>; доступен <code>pool</code> (sqlx::PgPool).
-      Пустой код сохранить можно, но запуск позже сообщит об ошибке компиляции.
+      Пустой код сохранить можно, но запуск сообщит об ошибке компиляции.
     </small>
   </label>
   <div class="settings-actions">
@@ -39,6 +67,14 @@
 </form>
 
 {% if script %}
+<div class="card">
+  <h2>Запуск</h2>
+  <p class="muted">Выполняется сохранённый код. Если вы меняли текст в редакторе, сначала сохраните: несохранённые правки не запускаются.</p>
+  <form method="post" action="/admin/tools/rust/{{ id }}/run" onsubmit="return confirm('Выполнить сохранённый код на сервере? Код имеет доступ к базе данных и файлам CMS.')">
+    <button class="btn danger" type="submit">Запустить</button>
+  </form>
+</div>
+
 <div class="card">
   <p class="muted">Последняя правка: {{ script.updated_at }}</p>
   <form method="post" action="/admin/tools/rust/{{ id }}/delete" onsubmit="return confirm('Удалить скрипт?')">
@@ -80,7 +116,7 @@
 
 <div class="alert" role="alert">
   <strong>Произвольный код.</strong> Скрипты выполняются с правами CMS и доступом
-  к <code>DATABASE_URL</code>; песочницы нет. Запуск появится в следующем обновлении.
+  к <code>DATABASE_URL</code>; песочницы нет. Запускайте только доверенный код.
 </div>
 
 {% if error %}
@@ -115,7 +151,7 @@
 {% else %}
 <div class="card empty">
   <p>Скриптов пока нет.</p>
-  <p class="muted">Создайте первый скрипт: код хранится в редакторе, запуск появится позже.</p>
+  <p class="muted">Создайте первый скрипт: код хранится в редакторе, запускать можно со страницы скрипта.</p>
 </div>
 {% endif %}
 
