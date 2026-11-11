@@ -267,6 +267,21 @@ td { padding: 8px var(--sp-3); }
 .stock-table td.num input { width: 140px; text-align: right; }
 .stock-table tr.muted td { color: var(--muted); }
 
+/* Выбор раздела в панели списка */
+.section-pick { position: relative; }
+.section-pick > summary { list-style: none; cursor: pointer; }
+.section-pick > summary::-webkit-details-marker { display: none; }
+.section-pick > .menu {
+  position: absolute; left: 0; top: calc(100% + 4px); z-index: 40;
+  display: grid; min-width: 240px; max-height: 50vh; overflow: auto;
+  padding: var(--sp-1); background: var(--panel);
+  border: 1px solid var(--border-strong); border-radius: var(--r-md); box-shadow: var(--shadow-pop);
+}
+.section-pick > .menu a { display: flex; align-items: center; gap: 8px; padding: 6px var(--sp-2); border-radius: var(--r-sm); color: var(--text); white-space: nowrap; }
+.section-pick > .menu a:hover { background: var(--hover); text-decoration: none; }
+.section-pick > .menu a.on { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
+.section-pick > .menu .cnt { margin-left: auto; color: var(--muted); font-size: var(--fs-xs); }
+
 /* Группы пользователей в накопительной скидке — в две колонки */
 .groups-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 24px; max-width: 720px; }
 .groups-grid .check { padding: 3px 0; }
