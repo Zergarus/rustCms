@@ -264,7 +264,7 @@ pub async fn resolve(
 
 // ---------- строка видов ----------
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ViewItem {
     id: i64,
     name: String,
@@ -291,8 +291,12 @@ pub struct ViewsBar {
     all_url: String,
     all_current: bool,
     items: Vec<ViewItem>,
+    /// Виды сверх первых пяти — в меню «Ещё», чтобы полоса не расползалась.
+    more: Vec<ViewItem>,
     open: Option<OpenView>,
     dirty: bool,
+    /// Адрес открытого вида без правок: «вернуть настройки».
+    revert_url: Option<String>,
     reset_url: String,
     can_share: bool,
     /// Текущее состояние без страницы и вида — то, что сохраняется в вид.
@@ -325,7 +329,7 @@ pub async fn bar(
         Some(v) => query != normalize(spec, &v.query),
         None => !query.is_empty(),
     };
-    let items = all
+    let mut items: Vec<ViewItem> = all
         .iter()
         .map(|v| ViewItem {
             id: v.id,
@@ -338,12 +342,28 @@ pub async fn bar(
             url: format!("{path}?view={}", v.id),
         })
         .collect();
+    let mut more = if items.len() > 6 {
+        items.split_off(5)
+    } else {
+        Vec::new()
+    };
+    // Открытый вид не должен прятаться в «Ещё»
+    if let Some(view) = open
+        && let Some(pos) = more.iter().position(|item| item.id == view.id)
+    {
+        items.push(more.remove(pos));
+    }
+    let revert_url = open
+        .filter(|_| dirty)
+        .map(|view| format!("{path}?view={}", view.id));
     Ok(ViewsBar {
         list_key: spec.key.clone(),
         path: path.to_string(),
         all_url: all_url.clone(),
         all_current: open.is_none(),
         items,
+        more,
+        revert_url,
         reset_url: match open {
             Some(v) => format!("{path}?view={}", v.id),
             None => all_url,
@@ -1037,6 +1057,30 @@ mod tests {
             loc.contains("f.name=has%3Ax") && loc.ends_with(&format!("view={id}")),
             "{loc}"
         );
+    }
+
+    #[sqlx::test]
+    async fn many_views_go_to_more_and_dirty_view_has_revert(db: PgPool) {
+        let c = content_fixture(&db).await;
+        let app = app(&db);
+        let cookie = admin_cookie(&db).await;
+        let (uid, _) = user_cookie(&db, "many", true).await;
+        let key = format!("collection:{}", c.collection_id);
+        for _ in 0..7 {
+            insert_view(&db, &key, uid, "", true).await;
+        }
+        let path = list_path(c.collection_id);
+        let (status, _, html) = full_get(&app, &path, &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("Ещё ▾"), "{html}");
+        assert_eq!(html.matches("class=\"view-name\"").count(), 5, "{html}");
+
+        // Открытый изменённый вид: рядом с «Сохранить» есть возврат к настройкам вида
+        let id = insert_view(&db, &key, uid, "f.name=has%3Ax", true).await;
+        let (status, _, html) =
+            hx_get(&app, &format!("{path}?view={id}&f.name=has%3Ay"), &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        assert!(html.contains("Вернуть"), "{html}");
     }
 
     #[sqlx::test]

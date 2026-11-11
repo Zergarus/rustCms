@@ -267,6 +267,19 @@ td { padding: 8px var(--sp-3); }
 .stock-table td.num input { width: 140px; text-align: right; }
 .stock-table tr.muted td { color: var(--muted); }
 
+/* Длинный список видов уходит в «Ещё» */
+.view-more { position: relative; }
+.view-more > summary { list-style: none; cursor: pointer; }
+.view-more > summary::-webkit-details-marker { display: none; }
+.view-more > .view-menu-body {
+  position: absolute; left: 0; top: calc(100% + 4px); z-index: 40;
+  display: grid; min-width: 220px; padding: var(--sp-1);
+  background: var(--panel); border: 1px solid var(--border-strong);
+  border-radius: var(--r-md); box-shadow: var(--shadow-pop);
+}
+.view-more > .view-menu-body a { padding: 6px var(--sp-2); border-radius: var(--r-sm); color: var(--text); white-space: nowrap; }
+.view-more > .view-menu-body a:hover { background: var(--hover); text-decoration: none; }
+
 /* Выбор раздела в панели списка */
 .section-pick { position: relative; }
 .section-pick > summary { list-style: none; cursor: pointer; }

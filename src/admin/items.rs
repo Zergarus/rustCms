@@ -3654,7 +3654,7 @@ mod list_tests {
             html.contains("Первая новость") && html.contains("ВтораяНовость"),
             "{html}"
         );
-        assert!(html.contains("только этот раздел"), "{html}");
+        assert!(html.contains("включая подразделы"), "{html}");
         assert!(
             html.contains("Подраздел Б"),
             "ветка до раздела в дереве: {html}"

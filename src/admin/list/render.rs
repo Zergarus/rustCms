@@ -33,7 +33,7 @@ pub struct ListPage {
     pub tree: Option<Value>,
     /// Название выбранного раздела для чипа (у «Без раздела» — пусто).
     pub section_name: Option<String>,
-    /// У выбранного раздела есть подразделы: показывается галочка «только этот раздел».
+    /// У выбранного раздела есть подразделы: показывается галочка «включая подразделы».
     pub section_has_kids: bool,
     /// Итог массового действия: блок в начале `#list-body`.
     pub bulk: Option<super::bulk::BulkSummary>,
