@@ -1,8 +1,10 @@
 //! Инструменты супер-администратора: SQL, таблицы БД, Rust-скрипты.
 //!
-//! SQL-консоль работает; остальные страницы пока заглушки. Общий выключатель
+//! SQL-консоль и обозреватель таблиц работают; Rust-скрипты — заглушка. Общий выключатель
 //! `ADMIN_TOOLS_ENABLED` и доступ только супер-администратору.
 
+pub(crate) mod db;
+pub(crate) mod pg;
 pub(crate) mod sql;
 
 use axum::{Extension, Router, extract::State, response::Html, routing::get};
@@ -33,16 +35,9 @@ pub(crate) fn guard(state: &AppState, user: &Access) -> AppResult<()> {
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/tools/sql", get(sql::page).post(sql::execute))
-        .route("/tools/db", get(db_list_page))
+        .route("/tools/db", get(db::list))
+        .route("/tools/db/{schema}/{table}", get(db::table))
         .route("/tools/rust", get(rust_page))
-}
-
-async fn db_list_page(
-    State(state): State<AppState>,
-    Extension(user): Extension<Access>,
-) -> AppResult<Html<String>> {
-    guard(&state, &user)?;
-    render(&state, "tools/db_list.html", context! { user })
 }
 
 async fn rust_page(

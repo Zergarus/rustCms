@@ -16,22 +16,15 @@ use axum::{Extension, Form, extract::State, response::Html};
 use futures_util::TryStreamExt;
 use minijinja::context;
 use serde::{Deserialize, Serialize};
-use sqlx::{
-    AssertSqlSafe, Column, Executor, PgConnection, Row, SqlSafeStr, Statement, TypeInfo, ValueRef,
-    postgres::PgRow,
-};
+use sqlx::{AssertSqlSafe, Column, Executor, PgConnection, Row, SqlSafeStr, Statement};
 
-use super::{guard, render};
+use super::{guard, pg, render};
 use crate::{access::Access, audit, error::AppResult, state::AppState};
 
 /// Сколько строк результата показываем.
 const MAX_ROWS: usize = 200;
 /// Сколько байт значений показываем.
 const MAX_BYTES: usize = 256 * 1024;
-/// Предохранитель от одного гигантского значения (1 ГБ в поле Postgres).
-const MAX_CELL_CHARS: usize = 8192;
-/// Сколько байт `bytea` показываем в hex.
-const MAX_BYTEA_HEX_CHARS: usize = 128;
 /// Сколько символов SQL попадает в журнал действий.
 const SQL_PREVIEW_CHARS: usize = 500;
 
@@ -128,11 +121,11 @@ async fn run(state: &AppState, sql: &str, confirmed: bool) -> SqlResult {
     }
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
-        Err(error) => return rejected(db_message(&error)),
+        Err(error) => return rejected(pg::db_message(&error)),
     };
     if let Err(error) = setup(&mut tx, confirmed).await {
         let _ = tx.rollback().await;
-        return rejected(db_message(&error));
+        return rejected(pg::db_message(&error));
     }
     // Таймаут и режим чтения выставлены до пользовательского statement.
     let outcome = if is_query(statement) {
@@ -149,15 +142,15 @@ async fn run(state: &AppState, sql: &str, confirmed: bool) -> SqlResult {
         Ok(result) => result,
         Err(error) => {
             let _ = tx.rollback().await;
-            return rejected(db_message(&error));
+            return rejected(pg::db_message(&error));
         }
     };
     if confirmed {
         if let Err(error) = tx.commit().await {
-            result.error = Some(db_message(&error));
+            result.error = Some(pg::db_message(&error));
         }
     } else if let Err(error) = tx.rollback().await {
-        result.error = Some(db_message(&error));
+        result.error = Some(pg::db_message(&error));
     }
     result
 }
@@ -196,7 +189,7 @@ async fn fetch(conn: &mut PgConnection, sql: &str) -> Result<SqlResult, sqlx::Er
     let mut stream = prepared.query().fetch(&mut *conn);
     while let Some(row) = stream.try_next().await? {
         let values: Vec<String> = (0..row.len())
-            .map(|index| format_value(&row, index))
+            .map(|index| pg::format_value(&row, index))
             .collect();
         let size: usize = values.iter().map(String::len).sum();
         if result.rows.len() >= MAX_ROWS || used + size > MAX_BYTES {
@@ -213,178 +206,6 @@ async fn fetch(conn: &mut PgConnection, sql: &str) -> Result<SqlResult, sqlx::Er
 async fn execute_statement(conn: &mut PgConnection, sql: &str) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(AssertSqlSafe(sql)).execute(&mut *conn).await?;
     Ok(result.rows_affected())
-}
-
-/// Представление значения ячейки: значения приходят в binary-формате, поэтому
-/// тип колонки важен.
-pub(crate) fn format_value(row: &PgRow, index: usize) -> String {
-    let Ok(raw) = row.try_get_raw(index) else {
-        return "…".into();
-    };
-    if raw.is_null() {
-        return "NULL".into();
-    }
-    let type_name = row.column(index).type_info().name();
-    let formatted: Option<String> = match type_name {
-        "BOOL" => row
-            .try_get::<bool, _>(index)
-            .ok()
-            .map(|value| value.to_string()),
-        "INT2" => row
-            .try_get::<i16, _>(index)
-            .ok()
-            .map(|value| value.to_string()),
-        "INT4" => row
-            .try_get::<i32, _>(index)
-            .ok()
-            .map(|value| value.to_string()),
-        "INT8" => row
-            .try_get::<i64, _>(index)
-            .ok()
-            .map(|value| value.to_string()),
-        "FLOAT4" => row
-            .try_get::<f32, _>(index)
-            .ok()
-            .map(|value| value.to_string()),
-        "FLOAT8" => row
-            .try_get::<f64, _>(index)
-            .ok()
-            .map(|value| value.to_string()),
-        "NUMERIC" => row
-            .try_get_raw(index)
-            .ok()
-            .and_then(|raw| raw.as_bytes().ok())
-            .and_then(format_numeric),
-        "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "UNKNOWN" | "CITEXT" => {
-            row.try_get::<String, _>(index).ok()
-        }
-        "JSON" | "JSONB" => row
-            .try_get::<serde_json::Value, _>(index)
-            .ok()
-            .map(|value| value.to_string()),
-        "DATE" => row
-            .try_get::<chrono::NaiveDate, _>(index)
-            .ok()
-            .map(|value| value.to_string()),
-        "TIME" => row
-            .try_get::<chrono::NaiveTime, _>(index)
-            .ok()
-            .map(|value| value.to_string()),
-        "TIMESTAMP" => row
-            .try_get::<chrono::NaiveDateTime, _>(index)
-            .ok()
-            .map(|value| value.to_string()),
-        "TIMESTAMPTZ" => row
-            .try_get::<chrono::DateTime<chrono::Utc>, _>(index)
-            .ok()
-            .map(|value| value.to_string()),
-        "UUID" => row
-            .try_get_raw(index)
-            .ok()
-            .and_then(|raw| raw.as_bytes().ok())
-            .and_then(|bytes| uuid::Uuid::from_slice(bytes).ok())
-            .map(|id| id.to_string()),
-        "BYTEA" => row
-            .try_get::<Vec<u8>, _>(index)
-            .ok()
-            .map(|bytes| format_bytea(&bytes)),
-        _ => None,
-    };
-    truncate(&formatted.unwrap_or_else(|| "…".into()), MAX_CELL_CHARS)
-}
-
-/// `bytea` — hex, обрезанный по [`MAX_BYTEA_HEX_CHARS`].
-fn format_bytea(bytes: &[u8]) -> String {
-    let mut hex = hex::encode(bytes);
-    if hex.len() > MAX_BYTEA_HEX_CHARS {
-        hex.truncate(MAX_BYTEA_HEX_CHARS);
-        hex.push('…');
-    }
-    hex
-}
-
-/// `NUMERIC` из binary-формата Postgres: знак, база-10000 цифры, вес и scale.
-fn format_numeric(bytes: &[u8]) -> Option<String> {
-    const SIGN_NEG: u16 = 0x4000;
-    const SIGN_NAN: u16 = 0xC000;
-    const SIGN_PINF: u16 = 0xD000;
-    const SIGN_NINF: u16 = 0xF000;
-    if bytes.len() < 8 {
-        return None;
-    }
-    let digits_count = i16::from_be_bytes([bytes[0], bytes[1]]);
-    let weight = i16::from_be_bytes([bytes[2], bytes[3]]);
-    let sign = u16::from_be_bytes([bytes[4], bytes[5]]);
-    let scale = i16::from_be_bytes([bytes[6], bytes[7]]);
-    match sign {
-        SIGN_NAN => return Some("NaN".into()),
-        SIGN_PINF => return Some("Infinity".into()),
-        SIGN_NINF => return Some("-Infinity".into()),
-        _ => {}
-    }
-    if digits_count < 0 || scale < 0 {
-        return None;
-    }
-    let digits_count = digits_count as usize;
-    if bytes.len() < 8 + digits_count * 2 {
-        return None;
-    }
-    let digits: Vec<u16> = bytes[8..8 + digits_count * 2]
-        .chunks_exact(2)
-        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
-        .collect();
-    let mut out = String::new();
-    if sign == SIGN_NEG {
-        out.push('-');
-    }
-    let mut started = false;
-    if weight >= 0 {
-        for exponent in (0..=weight).rev() {
-            let group = digits
-                .get((weight - exponent) as usize)
-                .copied()
-                .unwrap_or(0);
-            if !started {
-                if group == 0 {
-                    continue;
-                }
-                out.push_str(&group.to_string());
-                started = true;
-            } else {
-                out.push_str(&format!("{group:04}"));
-            }
-        }
-    }
-    if !started {
-        out.push('0');
-    }
-    let scale = scale as usize;
-    if scale > 0 {
-        let mut fraction = String::with_capacity(scale.div_ceil(4) * 4);
-        for offset in 1..=scale.div_ceil(4) {
-            let position = weight as i64 + offset as i64;
-            let group = if position >= 0 {
-                digits.get(position as usize).copied().unwrap_or(0)
-            } else {
-                0
-            };
-            fraction.push_str(&format!("{group:04}"));
-        }
-        fraction.truncate(scale);
-        out.push('.');
-        out.push_str(&fraction);
-    }
-    Some(out)
-}
-
-/// Обрезает строку по числу символов, помечая хвост многоточием.
-fn truncate(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let mut short: String = text.chars().take(max_chars).collect();
-    short.push('…');
-    short
 }
 
 /// Классификация: вернёт ли запрос строки.
@@ -449,20 +270,6 @@ fn skip_block_comment(after: &str) -> &str {
     ""
 }
 
-/// Текст ошибки Postgres без обвязки sqlx.
-fn db_message(error: &sqlx::Error) -> String {
-    let message = match error {
-        sqlx::Error::Database(database) => database.message().to_string(),
-        other => other.to_string(),
-    };
-    // Extended protocol отклоняет несколько команд до выполнения: показываем
-    // понятную подсказку вместо текста драйвера.
-    if message.contains("cannot insert multiple commands into a prepared statement") {
-        return "Выполняйте по одному запросу.".into();
-    }
-    message
-}
-
 /// Сводка для журнала: первые 500 символов SQL и статус.
 fn audit_summary(sql: &str, result: &SqlResult) -> String {
     let head: String = sql.trim().chars().take(SQL_PREVIEW_CHARS).collect();
@@ -480,7 +287,9 @@ fn audit_summary(sql: &str, result: &SqlResult) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_keyword, is_query, is_transaction_control, truncate};
+    use super::{first_keyword, is_query, is_transaction_control};
+
+    use crate::admin::tools::pg;
 
     use sqlx::PgPool;
 
@@ -902,8 +711,8 @@ mod tests {
 
     #[test]
     fn truncation_marks_the_tail() {
-        assert_eq!(truncate("abc", 3), "abc");
-        assert_eq!(truncate("abcd", 3), "abc…");
+        assert_eq!(pg::truncate("abc", 3), "abc");
+        assert_eq!(pg::truncate("abcd", 3), "abc…");
     }
 
     #[test]

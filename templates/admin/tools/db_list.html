@@ -3,7 +3,36 @@
 {% block title %}Таблицы БД{% endblock %}
 {% block content %}
 <div class="page-head"><h1>Таблицы БД</h1></div>
+
 <div class="card">
-  <p>Обозреватель таблиц появится в следующем обновлении.</p>
+  <p class="muted">
+    Пользовательские схемы, таблицы и представления. Число строк — оценка Postgres
+    (<code>pg_class.reltuples</code>), точный <code>count(*)</code> считается на странице таблицы.
+  </p>
 </div>
+
+{% if tables %}
+<div class="card table-wrap">
+  <table class="table-fixed">
+    <thead>
+      <tr><th>Схема</th><th>Таблица</th><th>Тип</th><th>Строк (оценка)</th><th>Размер</th><th>Колонок</th><th>PK</th></tr>
+    </thead>
+    <tbody>
+      {% for t in tables %}
+      <tr>
+        <td><code>{{ t.schema }}</code></td>
+        <td><a href="{{ t.url }}">{{ t.name }}</a></td>
+        <td class="muted">{{ t.kind_label }}</td>
+        <td>{{ t.rows_label }}</td>
+        <td class="muted">{{ t.size }}</td>
+        <td>{{ t.columns }}</td>
+        <td>{% if t.has_pk %}<span class="badge ok">PK</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card"><p class="muted">Пользовательских таблиц нет.</p></div>
+{% endif %}
 {% endblock %}

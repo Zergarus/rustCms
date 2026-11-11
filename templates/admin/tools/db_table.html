@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% set section = "system" %}
+{% block title %}{{ schema }}.{{ table }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <a class="btn" href="/admin/tools/db">Назад к таблицам</a>
+  <h1>{{ schema }}.{{ table }}</h1>
+  <span class="muted">{{ kind_label }}</span>
+</div>
+
+<div class="alert" role="alert">
+  <strong>Данные не маскируются:</strong> видны все значения, включая секреты. Доступ только супер-администраторам.
+</div>
+
+<div class="card">
+  <h2>Структура</h2>
+  <div class="table-wrap">
+    <table class="table-fixed">
+      <thead>
+        <tr><th>Колонка</th><th>Тип</th><th>NULL</th><th>По умолчанию</th><th>PK</th></tr>
+      </thead>
+      <tbody>
+        {% for column in columns %}
+        <tr>
+          <td><code>{{ column.name }}</code></td>
+          <td><code>{{ column.data_type }}</code></td>
+          <td>{% if column.nullable %}да{% else %}нет{% endif %}</td>
+          <td>{% if column.default %}<code>{{ column.default }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td>{% if column.pk %}<span class="badge ok">PK</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">У таблицы нет колонок.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Данные</h2>
+  <p class="muted">
+    {% if total is not none %}Всего строк: {{ total }}.{% else %}Точное число строк получить не удалось.{% endif %}
+    Страница {{ page }}{% if pages > 1 %} из {{ pages }}{% endif %}; на странице до 50 строк.
+  </p>
+  {% if count_error %}
+  <p class="muted">count(*): {{ count_error }}</p>
+  {% endif %}
+
+  {% if columns %}
+  <div class="table-wrap">
+    <table class="table-fixed">
+      <thead>
+        <tr>
+          {% for column in columns %}
+          <th>
+            <a href="{{ column.sort_url }}" title="Сортировать по «{{ column.name }}»">{{ column.name }}{% if column.sort_dir == "asc" %} ↑{% elif column.sort_dir == "desc" %} ↓{% endif %}</a>
+          </th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in data %}
+        <tr>{% for cell in row %}<td class="mono">{{ cell }}</td>{% endfor %}</tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if not data %}<p class="muted">В таблице пока нет строк.</p>{% endif %}
+  {% else %}
+  <p class="muted">В таблице пока нет строк.</p>
+  {% endif %}
+
+  {% if pager|length %}
+  <nav class="pager" aria-label="Страницы">
+    {% for p in pager %}
+      {% if p.current %}<span class="current">{{ p.label }}</span>
+      {% elif p.url %}<a href="{{ p.url }}">{{ p.label }}</a>
+      {% else %}<span class="gap">{{ p.label }}</span>{% endif %}
+    {% endfor %}
+  </nav>
+  {% endif %}
+</div>
+{% endblock %}
