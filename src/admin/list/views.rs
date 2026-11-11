@@ -1518,7 +1518,8 @@ mod tests {
         let tree = format!("/admin/collections/{}/tree/collapsed", c.collection_id);
         // Дерево разделов теперь в боковом меню, а не панелью рядом с таблицей
         let (_, _, out) = full_get(&app, &url, &cookie).await;
-        assert!(out.contains("class=\"nav-tree\""), "{out}");
+        assert!(out.contains("nav-tree-full"), "{out}");
+        assert!(out.contains("Все коллекции"), "{out}");
         assert!(!out.contains("id=\"list-tree\""), "{out}");
         // Свёрнутость дерева по-прежнему сохраняется (пригодится для сайдбара)
         let (st, _, _) = hx_post(&app, &tree, &cookie, "value=1").await;

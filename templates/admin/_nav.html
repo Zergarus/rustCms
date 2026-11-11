@@ -1,15 +1,15 @@
 {#- Меню строится только из user.shell.nav -#}
 {% import "_ui.html" as ui %}
 {% set nav = user.shell.nav %}
-{% macro tree_nodes(nodes, base) %}
+{% macro tree_nodes(nodes, base, all_open=false) %}
 {% for n in nodes %}
 {% if n.children %}
-<details class="nav-branch"{% if n.open %} open{% endif %}>
+<details class="nav-branch"{% if n.open or all_open %} open{% endif %}>
   <summary class="nav sub{% if n.active %} on{% endif %}" style="padding-left:{{ 8 + n.depth * 12 }}px">
     <a class="grow" href="{{ base }}?section={{ n.id }}">{{ n.name }}</a>
     <span class="nav-count">{{ n.count }}</span>
   </summary>
-  <div class="nav-tree-children">{{ tree_nodes(n.children, base) }}</div>
+  <div class="nav-tree-children">{{ tree_nodes(n.children, base, all_open) }}</div>
 </details>
 {% else %}
 <a class="nav sub{% if n.active %} on{% endif %}" href="{{ base }}?section={{ n.id }}" style="padding-left:{{ 8 + n.depth * 12 }}px"><span class="grow">{{ n.name }}</span><span class="nav-count">{{ n.count }}</span></a>
@@ -28,6 +28,16 @@
   </details>
 {% endmacro %}
 <nav class="side-nav" aria-label="Разделы">
+  {% if nav.collection_mode and nav.tree %}
+  <a class="nav" href="/admin/collections">{{ ui.icon("back") }}<span class="grow">Все коллекции</span></a>
+  <div class="nav-title">{{ ui.icon("collection") }}<span>{{ nav.tree.collection_name }}</span></div>
+  <a class="nav{% if nav.tree.active_all %} on{% endif %}" href="{{ nav.tree.url }}">
+    <span class="grow">Все записи</span><span class="nav-count">{{ nav.tree.total }}</span>
+  </a>
+  <div class="nav-tree nav-tree-full">{{ tree_nodes(nav.tree.nodes, nav.tree.url, true) }}</div>
+  <a class="nav sub nav-tree-setup" href="{{ nav.tree.sections_url }}">Разделы коллекции</a>
+  <a class="nav sub nav-tree-setup" href="/admin/collections/{{ nav.tree.collection_id }}/fields">Поля</a>
+  {% else %}
   {% if nav.mode == "shop" %}
   <a class="nav" href="/admin">{{ ui.icon("back") }}<span class="grow">Все разделы</span></a>
   <div class="nav-title">{{ ui.icon("shop") }}<span>Магазин</span></div>
@@ -69,4 +79,5 @@
   {% endif %}
   {% endfor %}
   {% if nav.shop and not nav.groups|selectattr("code", "equalto", "system")|list %}{{ modules(nav, ui) }}{% endif %}
+  {% endif %}
 </nav>

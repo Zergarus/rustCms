@@ -442,6 +442,8 @@ pub(crate) struct Nav {
     pub goto: Vec<(char, String)>,
     /// Разделы коллекции, если открыт её список записей.
     pub tree: Option<NavTree>,
+    /// Меню занято одной коллекцией: показываем дерево разделов вместо обычных групп.
+    pub collection_mode: bool,
 }
 
 type SectionRow = (i64, String, Option<i64>, bool);
@@ -458,12 +460,7 @@ async fn nav_tree(
     let Some(rest) = path.strip_prefix("/admin/collections/") else {
         return Ok(None);
     };
-    let Some((id, tail)) = rest.split_once('/') else {
-        return Ok(None);
-    };
-    if tail != "items" {
-        return Ok(None);
-    }
+    let id = rest.split('/').next().unwrap_or_default();
     let Ok(collection_id) = id.parse::<i64>() else {
         return Ok(None);
     };
@@ -762,6 +759,7 @@ pub(crate) async fn build(
 
     let tree = nav_tree(db, user, ctx, path, query).await?;
     Ok(Nav {
+        collection_mode: tree.is_some(),
         mode,
         groups,
         shop,
@@ -1104,6 +1102,7 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(nav.collection_mode, "меню коллекции занимает сайдбар");
         let tree = nav.tree.expect("дерево разделов");
         assert_eq!(tree.collection_id, f.collection_id);
         assert!(
