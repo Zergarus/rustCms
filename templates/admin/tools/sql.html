@@ -3,7 +3,48 @@
 {% block title %}SQL-запрос{% endblock %}
 {% block content %}
 <div class="page-head"><h1>SQL-запрос</h1></div>
-<div class="card">
-  <p>SQL-консоль появится в следующем обновлении.</p>
-</div>
+
+<form class="card" method="post" action="/admin/tools/sql">
+  <label>Запрос
+    <textarea class="mono" name="sql" rows="12" spellcheck="false" placeholder="SELECT 1 AS one">{{ sql if sql else "" }}</textarea>
+    <small class="field-hint">Таймаут — 15 секунд. Без подтверждения запрос выполняется в транзакции только для чтения и откатывается.</small>
+  </label>
+  <label class="check">
+    <input type="checkbox" name="confirm" value="1"{% if confirm %} checked{% endif %}>
+    <span>Запрос может изменить данные</span>
+  </label>
+  <div class="settings-actions"><button class="btn primary" type="submit">Выполнить</button></div>
+</form>
+
+{% if result %}
+  {% if result.error %}
+  <div class="alert" role="alert">
+    <strong>Ошибка</strong>
+    <pre class="mono">{{ result.error }}</pre>
+  </div>
+  {% else %}
+  <div class="card">
+    <p class="muted">
+      Выполнено за {{ result.duration_ms }} мс.
+      {% if result.affected is not none %}Затронуто строк: {{ result.affected }}.{% endif %}
+      {% if result.columns %}
+        Строк: {{ result.rows|length }}.
+        {% if result.truncated %}Вывод обрезан: не более 200 строк и 256 КБ.{% endif %}
+      {% endif %}
+    </p>
+    {% if result.columns %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr>{% for column in result.columns %}<th>{{ column }}</th>{% endfor %}</tr></thead>
+        <tbody>
+          {% for row in result.rows %}
+          <tr>{% for cell in row %}<td class="mono">{{ cell }}</td>{% endfor %}</tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+{% endif %}
 {% endblock %}

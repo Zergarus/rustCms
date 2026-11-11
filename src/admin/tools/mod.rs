@@ -1,7 +1,9 @@
 //! Инструменты супер-администратора: SQL, таблицы БД, Rust-скрипты.
 //!
-//! Каркас: страницы-заглушки, общий выключатель `ADMIN_TOOLS_ENABLED` и
-//! доступ только супер-администратору.
+//! SQL-консоль работает; остальные страницы пока заглушки. Общий выключатель
+//! `ADMIN_TOOLS_ENABLED` и доступ только супер-администратору.
+
+pub(crate) mod sql;
 
 use axum::{Extension, Router, extract::State, response::Html, routing::get};
 use minijinja::context;
@@ -30,17 +32,9 @@ pub(crate) fn guard(state: &AppState, user: &Access) -> AppResult<()> {
 /// Маршруты инструментов (монтируются в админку, то есть под `/admin`).
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
-        .route("/tools/sql", get(sql_page))
+        .route("/tools/sql", get(sql::page).post(sql::execute))
         .route("/tools/db", get(db_list_page))
         .route("/tools/rust", get(rust_page))
-}
-
-async fn sql_page(
-    State(state): State<AppState>,
-    Extension(user): Extension<Access>,
-) -> AppResult<Html<String>> {
-    guard(&state, &user)?;
-    render(&state, "tools/sql.html", context! { user })
 }
 
 async fn db_list_page(
