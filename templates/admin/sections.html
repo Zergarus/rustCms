@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% set section = "collections" %}
+{% block title %}Разделы — {{ collection.name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <a class="btn" href="/admin/collections/{{ collection.id }}/items">← Записи</a>
+    <h1>Разделы «{{ collection.name }}»</h1>
+  </div>
+  <div class="head-actions">
+    <a class="btn primary" href="/admin/collections/{{ collection.id }}/sections/new">Добавить раздел</a>
+  </div>
+</div>
+
+{% if sections %}
+<div class="card table-wrap">
+  <table class="list-table">
+    <thead><tr><th>Название</th><th>Код</th><th>Активен</th><th>Сорт.</th><th></th></tr></thead>
+    <tbody>
+      {% for item in sections %}
+      <tr{% if not item.active %} class="muted"{% endif %}>
+        <td style="padding-left:{{ 12 + item.depth_level * 18 }}px"><a href="/admin/sections/{{ item.id }}">{{ item.name }}</a></td>
+        <td><code>{{ item.code }}</code></td>
+        <td>{% if item.active %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}</td>
+        <td>{{ item.sort }}</td>
+        <td class="actions">
+          <a class="btn ghost sm" href="/admin/sections/{{ item.id }}">Изменить</a>
+          <form method="post" action="/admin/sections/{{ item.id }}/delete" hx-confirm="Удалить раздел «{{ item.name }}»?">
+            <button class="link danger" type="submit">Удалить</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card empty">
+  <p>Разделов пока нет.</p>
+  <a class="btn primary" href="/admin/collections/{{ collection.id }}/sections/new">Создать первый раздел</a>
+</div>
+{% endif %}
+{% endblock %}

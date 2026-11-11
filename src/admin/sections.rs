@@ -150,6 +150,20 @@ pub struct NewQuery {
     parent: Option<i64>,
 }
 
+pub async fn list(
+    State(state): State<AppState>,
+    Extension(user): Extension<Access>,
+    Path(id): Path<i64>,
+) -> AppResult<Html<String>> {
+    user.require_collection(id, Level::Write)?;
+    let (collection, sections) = load(&state, id).await?;
+    render(
+        &state,
+        "sections.html",
+        context! { user, collection, sections },
+    )
+}
+
 pub async fn new_form(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
