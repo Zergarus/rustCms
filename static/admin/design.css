@@ -229,6 +229,8 @@ td { padding: 8px var(--sp-3); }
 .grid-2 .wide { grid-column: 1 / -1; }
 .grid-2 label input, .grid-2 label select { max-width: none; width: 100%; }
 .settings-card small code { background: none; padding: 0; color: var(--muted); }
+.field-hint { display: block; margin-top: var(--sp-1); color: var(--muted); font-size: var(--fs-xs); line-height: 1.4; }
+.field-hint code { font-size: inherit; }
 .settings-actions { display: flex; justify-content: flex-end; }
 .settings-card .form { margin: 0; }
 @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }

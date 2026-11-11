@@ -14,9 +14,9 @@
     <p>Название и домен подставляются в письма; отправитель — адрес по умолчанию.</p>
   </div>
   <div class="grid-2">
-    <label>Название<input name="site_name" value="{{ input.site_name if input else settings.site_name }}" maxlength="255"><small><code>#SITE_NAME#</code></small></label>
-    <label>Домен<input name="server_name" value="{{ input.server_name if input else settings.server_name }}" maxlength="255" placeholder="example.ru"><small><code>#SERVER_NAME#</code></small></label>
-    <label class="wide">Отправитель по умолчанию<input name="email_from" value="{{ input.email_from if input else settings.email_from }}" maxlength="255" placeholder="no-reply@example.ru"><small><code>#DEFAULT_EMAIL_FROM#</code></small></label>
+    <label>Название<input name="site_name" value="{{ input.site_name if input else settings.site_name }}" maxlength="255"><small class="field-hint">Переменная для шаблонов: <code>#SITE_NAME#</code></small></label>
+    <label>Домен<input name="server_name" value="{{ input.server_name if input else settings.server_name }}" maxlength="255" placeholder="example.ru"><small class="field-hint">Переменная для шаблонов: <code>#SERVER_NAME#</code></small></label>
+    <label class="wide">Отправитель по умолчанию<input name="email_from" value="{{ input.email_from if input else settings.email_from }}" maxlength="255" placeholder="no-reply@example.ru"><small class="field-hint">Переменная для шаблонов: <code>#DEFAULT_EMAIL_FROM#</code></small></label>
   </div>
 </section>
 
@@ -29,7 +29,7 @@
     <label>Хост<input name="smtp_host" value="{{ input.smtp_host if input else settings.smtp_host }}" maxlength="255" placeholder="smtp.example.ru"></label>
     <label>Порт<input name="smtp_port" value="{{ input.smtp_port if input else settings.smtp_port }}" maxlength="5" placeholder="465"></label>
     <label>Пользователь<input name="smtp_user" value="{{ input.smtp_user if input else settings.smtp_user }}" maxlength="255"></label>
-    <label>Пароль<input name="smtp_password" type="password" value="" autocomplete="new-password" placeholder="оставьте пустым, чтобы не менять"></label>
+    <label>Пароль<input name="smtp_password" type="password" value="" autocomplete="new-password" placeholder="новый пароль"><small class="field-hint">Оставьте пустым, чтобы не менять сохранённый пароль.</small></label>
     <label class="wide">Шифрование<select name="smtp_secure">
 {% for value, label in [("auto", "Авто (465 — TLS, иначе STARTTLS)"), ("none", "Без шифрования"), ("starttls", "STARTTLS"), ("tls", "TLS")] %}
 {% set current = (input.smtp_secure if input else settings.smtp_secure) or "auto" %}

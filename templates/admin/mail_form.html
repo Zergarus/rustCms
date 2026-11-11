@@ -6,7 +6,7 @@
   <h1>{{ form.event_name or "Новый шаблон" }}</h1>
   <a class="btn" href="/admin/mail">К списку</a>
 </div>
-<form class="card form" method="post" action="{% if id %}/admin/mail/{{ id }}{% else %}/admin/mail{% endif %}">
+<form class="card form form-narrow" method="post" action="{% if id %}/admin/mail/{{ id }}{% else %}/admin/mail{% endif %}">
 {% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
 <label>Код события<input name="event_name" value="{{ form.event_name }}" maxlength="64" required></label>
 <p class="muted">Заглавные латинские буквы, цифры и «_», например <code>SALE_NEW_ORDER</code>.</p>
@@ -21,7 +21,7 @@
 <option value="{{ value }}" {% if current == value %}selected{% endif %}>{{ label }}</option>
 {% endfor %}</select></label>
 <p class="muted">Подстановки: <code>#ПОЛЕ#</code> из события, плюс <code>#SITE_NAME#</code>, <code>#SERVER_NAME#</code>, <code>#DEFAULT_EMAIL_FROM#</code>. В HTML-письмах значения полей экранируются.</p>
-<label class="checkbox"><input type="checkbox" name="active" value="on" {% if form.active %}checked{% endif %}> Активен</label>
-<button class="btn primary" type="submit">Сохранить</button>
+<label class="check"><input type="checkbox" name="active" value="on" {% if form.active %}checked{% endif %}> Активен</label>
+<div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
 </form>
 {% endblock %}

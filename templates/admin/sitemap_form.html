@@ -22,7 +22,7 @@
 <p class="muted">Можно выбрать несколько: счётчик суммируется, дата берётся самая свежая.</p>
 <label>Шаблон адреса<input name="path_template" value="{{ form.path_template }}" maxlength="500" placeholder="/product/#ELEMENT_CODE_OR_ID#/"></label>
 <p class="muted">Пусто — берётся шаблон коллекции: <code>detail_page_url</code> для записей, <code>section_page_url</code> для разделов. Подстановки: <code>#ELEMENT_ID#</code>, <code>#ELEMENT_CODE#</code>, <code>#ELEMENT_CODE_OR_ID#</code>, <code>#SECTION_CODE#</code>, <code>#SECTION_CODE_PATH#</code>, <code>#ID#</code>, <code>#CODE#</code>, <code>#SITE_DIR#</code>.</p>
-<label class="checkbox"><input type="checkbox" name="active" value="on" {% if form.active %}checked{% endif %}> Активен</label>
+<label class="check"><input type="checkbox" name="active" value="on" {% if form.active %}checked{% endif %}> Активен</label>
 <button class="btn primary" type="submit">Сохранить</button>
 </form>
 {% endblock %}
