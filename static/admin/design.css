@@ -267,6 +267,19 @@ td { padding: 8px var(--sp-3); }
 .stock-table td.num input { width: 140px; text-align: right; }
 .stock-table tr.muted td { color: var(--muted); }
 
+/* Изменённый вид: только жёлтая точка, подпись — по наведению */
+.view-dirty .dirty { position: relative; gap: 0; padding: 5px; margin: -5px; border-radius: 50%; }
+.view-dirty .dirty-text {
+  position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
+  z-index: 20; white-space: nowrap; visibility: hidden; opacity: 0;
+  padding: 3px 8px; border-radius: var(--r-sm);
+  background: var(--panel); border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-pop); font-size: var(--fs-xs); color: var(--warn);
+  transition: opacity .12s ease;
+}
+.view-dirty .dirty:hover .dirty-text,
+.view-dirty .dirty:focus-visible .dirty-text { visibility: visible; opacity: 1; }
+
 /* Применённые условия внутри диалога фильтров */
 .pop .applied { display: flex; align-items: center; gap: 4px; }
 .pop .applied .item { flex: 1; width: auto; text-align: left; }

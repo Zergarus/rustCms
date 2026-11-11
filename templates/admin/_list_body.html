@@ -44,7 +44,7 @@
     {% endfor %}
     {% if vb.dirty %}
     <span class="view-dirty">
-      <span class="dirty"><span class="dot"></span>Вид изменён</span>
+      <span class="dirty" aria-label="Вид изменён"><span class="dot"></span><span class="dirty-text" aria-hidden="true">Вид изменён</span></span>
       {% if vb.open and vb.open.may_edit %}
       <form class="inline" data-view-save hx-post="/admin/views/{{ vb.open.id }}" hx-target="#list-body" hx-swap="outerHTML" hx-push-url="false">
         <input type="hidden" name="path" value="{{ vb.path }}"><input type="hidden" name="query" value="{{ vb.query }}">
