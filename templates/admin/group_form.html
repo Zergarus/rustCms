@@ -1,13 +1,17 @@
 {% extends "base.html" %}
 {% set section = "groups" %}
+{% import "_ui.html" as ui %}
 {% block title %}{% if group_id %}{{ form.name }}{% else %}Новая группа{% endif %}{% endblock %}
 {% block content %}
 <div class="breadcrumbs"><a href="/admin/groups">Группы</a> /</div>
 <h1>{% if group_id %}{{ form.name }}{% else %}Новая группа{% endif %}</h1>
 
+<div data-card>
+{{ ui.card_tabs(card_tabs, tabctx) }}
 <form class="card form" method="post" action="{% if group_id %}/admin/groups/{{ group_id }}{% else %}/admin/groups{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 
+  {% call ui.tab_pane("main", tabctx) %}
   <div class="grid-2">
     <label>Название *
       <input name="name" value="{{ form.name }}" required>
@@ -24,51 +28,44 @@
       <input name="sort" type="number" value="{{ form.sort }}">
     </label>
   </div>
+  {% endcall %}
 
-  <fieldset>
-    <legend>Права на разделы</legend>
-    {% for p in all_permissions %}
-    <label class="check perm">
-      <input type="checkbox" name="permission" value="{{ p.code }}" {% if p.code in form.permissions %}checked{% endif %}>
-      <span><strong>{{ p.name }}</strong><br><span class="muted small">{{ p.description }}</span></span>
-    </label>
-    {% endfor %}
-  </fieldset>
+  {% call ui.tab_pane("permissions", tabctx) %}
+  <p class="muted">Права действуют на всю админку. «Вход в админку» нужен для любого доступа.</p>
+  {% for p in all_permissions %}
+  <label class="check perm">
+    <input type="checkbox" name="permission" value="{{ p.code }}" {% if p.code in form.permissions %}checked{% endif %}>
+    <span><strong>{{ p.name }}</strong><br><span class="muted small">{{ p.description }}</span></span>
+  </label>
+  {% endfor %}
+  {% endcall %}
 
-  <fieldset>
-    <legend>Доступ к коллекциям</legend>
-    {% if collections %}
-    <p class="muted hint">Право «Управление коллекциями» даёт изменение во всех коллекциях — тогда настройки ниже не нужны.</p>
-    <div class="access-grid">
-      {% for ib in collections %}
-      {% set current = form.levels[ib.id|string] or "none" %}
-      <div class="access-row">
-        <span>{{ ib.name }} <code>{{ ib.code }}</code></span>
-        <div class="segmented" role="radiogroup" aria-label="Доступ к {{ ib.name }}">
-          {% for value, label in [("none", "Нет"), ("read", "Чтение"), ("write", "Изменение")] %}
-          <label>
-            <input type="radio" name="collection_{{ ib.id }}" value="{{ value }}" {% if current == value %}checked{% endif %}>
-            <span>{{ label }}</span>
-          </label>
-          {% endfor %}
-        </div>
+  {% call ui.tab_pane("collections", tabctx) %}
+  {% if collections %}
+  <p class="muted hint">Право «Управление коллекциями» даёт изменение во всех коллекциях — тогда настройки ниже не нужны.</p>
+  <div class="access-grid">
+    {% for ib in collections %}
+    {% set current = form.levels[ib.id|string] or "none" %}
+    <div class="access-row">
+      <span>{{ ib.name }} <code>{{ ib.code }}</code></span>
+      <div class="segmented" role="radiogroup" aria-label="Доступ к {{ ib.name }}">
+        {% for value, label in [("none", "Нет"), ("read", "Чтение"), ("write", "Изменение")] %}
+        <label>
+          <input type="radio" name="collection_{{ ib.id }}" value="{{ value }}" {% if current == value %}checked{% endif %}>
+          <span>{{ label }}</span>
+        </label>
+        {% endfor %}
       </div>
-      {% endfor %}
     </div>
-    {% else %}
-    <p class="muted hint">Коллекций пока нет.</p>
-    {% endif %}
-  </fieldset>
-
-  <div class="form-actions">
-    <button class="btn primary" type="submit">Сохранить</button>
-    <a class="btn" href="/admin/groups">Отмена</a>
+    {% endfor %}
   </div>
-</form>
+  {% else %}
+  <p class="muted hint">Коллекций пока нет.</p>
+  {% endif %}
+  {% endcall %}
 
-{% if group_id %}
-<section class="card">
-  <h2>Участники <span class="muted count">{{ members|length }}</span></h2>
+  {% if group_id %}
+  {% call ui.tab_pane("members", tabctx) %}
   {% if members %}
   <p class="muted">Состав группы меняется в карточке пользователя.</p>
   <ul class="member-list">
@@ -82,8 +79,17 @@
   {% else %}
   <p class="muted">В группе пока никого нет. Добавить пользователя можно в его карточке.</p>
   {% endif %}
-</section>
+  {% endcall %}
+  {% endif %}
 
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Сохранить</button>
+    <a class="btn" href="/admin/groups">Отмена</a>
+  </div>
+</form>
+</div>
+
+{% if group_id %}
 <section class="card danger-zone">
   <h2>Удаление</h2>
   <p class="muted">Участники останутся, но потеряют права этой группы.</p>

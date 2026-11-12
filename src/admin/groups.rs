@@ -11,7 +11,10 @@ use axum::{
 use minijinja::{Value, context};
 use serde::Serialize;
 
-use super::{parse_sort, render};
+use super::{
+    card::{TabErrors, tab_context},
+    parse_sort, render,
+};
 use crate::{
     access::{Access, Level, PERMISSIONS, is_known_permission},
     collection::{is_valid_code, repo as collection_repo},
@@ -99,6 +102,16 @@ async fn render_form(
         Some(id) => groups::members(&state.db, id).await?,
         None => Vec::new(),
     };
+    let mut card_tabs: Vec<(&'static str, &'static str, Option<usize>)> = vec![
+        ("main", "Основное", None),
+        ("permissions", "Права", None),
+        ("collections", "Коллекции", None),
+    ];
+    if group_id.is_some() {
+        card_tabs.push(("members", "Участники", Some(members.len())));
+    }
+    let visible: Vec<&'static str> = card_tabs.iter().map(|tab| tab.0).collect();
+    let tabctx = tab_context(&TabErrors::new(), &visible, None);
     render(
         state,
         "group_form.html",
@@ -109,6 +122,8 @@ async fn render_form(
             error,
             collections,
             members,
+            card_tabs,
+            tabctx,
             all_permissions => Value::from_serialize(PERMISSIONS),
         },
     )
