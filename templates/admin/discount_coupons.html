@@ -7,7 +7,7 @@
   {% for k in kinds %}<option value="{{ k[0] }}" {% if k[0] == current %}selected{% endif %}>{{ k[1] }}</option>{% endfor %}
 </select>
 {% endmacro %}
-<div class="breadcrumbs"><a href="/admin/discounts">Правила работы с корзиной</a> / <a href="/admin/discounts/{{ rule_id }}">{{ rule_name }}</a> /</div>
+<div class="breadcrumbs"><a href="/admin/discounts">Правила работы с корзиной</a> / <a href="/admin/discounts/{{ rule_id }}">{{ rule_name }}</a></div>
 <h1>Купоны <span class="muted count">{{ total }}</span></h1>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 

@@ -2,7 +2,7 @@
 {% set section = "exchange" %}
 {% block title %}Соответствие реквизитов — {{ person_type }}{% endblock %}
 {% block content %}
-<div class="breadcrumbs"><a href="/admin/exchange?tab=sale">Обмен с 1С</a> /</div>
+<div class="breadcrumbs"><a href="/admin/exchange?tab=sale">Обмен с 1С</a></div>
 <h1>Соответствие реквизитов: {{ person_type }}</h1>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 {% macro source_select(name, current) %}

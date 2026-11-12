@@ -3,7 +3,7 @@
 {% set tab = "deliveries" %}
 {% block title %}{% if id %}{{ form.name }}{% else %}Новая служба доставки{% endif %}{% endblock %}
 {% block content %}
-<div class="breadcrumbs"><a href="/admin/shop/deliveries">Службы доставки</a> /</div>
+<div class="breadcrumbs"><a href="/admin/shop/deliveries">Службы доставки</a></div>
 <h1>{% if id %}{{ form.name }}{% else %}Новая служба доставки{% endif %}</h1>
 <form class="card form" method="post" action="{% if id %}/admin/shop/deliveries/{{ id }}{% else %}/admin/shop/deliveries{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}

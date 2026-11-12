@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% set section = "system" %}
-{% block title %}Rust-скрипты{% endblock %}
+{% block title %}{% if editor and form.name %}{{ form.name }} — Rust{% else %}Rust-скрипты{% endif %}{% endblock %}
 {% block content %}
 {% if editor %}
 <div class="page-head">

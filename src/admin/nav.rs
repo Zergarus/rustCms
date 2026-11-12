@@ -572,8 +572,8 @@ async fn nav_tree(
         sections_url: format!("/admin/collections/{collection_id}/sections"),
         total: collection.count,
         without_count: count_of(None),
-        active_all: current.is_none(),
-        active_without: current == Some(None),
+        active_all: current.is_none() && path.ends_with("/items"),
+        active_without: current == Some(None) && path.ends_with("/items"),
         nodes,
     }))
 }

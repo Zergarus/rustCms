@@ -260,6 +260,11 @@ td { padding: 8px var(--sp-3); }
 .rec.on { background: var(--raised); color: var(--text); border-color: var(--border-strong); }
 .rec-x { width: 24px; height: 24px; display: grid; place-items: center; border-radius: var(--r-sm); }
 .open-tabs .dot { display: none; }
+.open-tabs .rec { max-width: 280px; }
+.open-tabs .rec.on {
+  background: var(--accent-soft); border-color: var(--accent-line);
+  color: var(--text); box-shadow: inset 0 -2px 0 var(--accent);
+}
 
 /* Остатки по складам в карточке товара: компактная таблица вместо длинного столбца */
 .stock-table-wrap { margin-top: var(--sp-2); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; }
@@ -296,6 +301,26 @@ td { padding: 8px var(--sp-3); }
 .section-pick > .menu a:hover { background: var(--hover); text-decoration: none; }
 .section-pick > .menu a.on { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
 .section-pick > .menu .cnt { margin-left: auto; color: var(--muted); font-size: var(--fs-xs); }
+
+/* Список пользователей: поиск, порционность, мобильный режим */
+.users-toolbar { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-3); }
+.users-toolbar input[type="search"] { flex: 1 1 260px; min-width: 0; max-width: 420px; }
+.users-toolbar select { width: auto; min-width: 72px; }
+.users-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; margin-top: var(--sp-3); }
+.users-pager { display: flex; align-items: center; gap: var(--sp-2); }
+@media (max-width: 700px) {
+  .users-table colgroup { display: none; }
+  .users-table { table-layout: auto; }
+  .users-table th:nth-child(1), .users-table td:nth-child(1),
+  .users-table th:nth-child(4), .users-table td:nth-child(4),
+  .users-table th:nth-child(5), .users-table td:nth-child(5),
+  .users-table th:nth-child(6), .users-table td:nth-child(6),
+  .users-table th:nth-child(8), .users-table td:nth-child(8) { display: none; }
+  .users-table th:nth-child(3), .users-table td:nth-child(3) { display: none; }
+  .users-table th:nth-child(2), .users-table td:nth-child(2) { width: 60%; }
+  .users-table th:nth-child(7), .users-table td:nth-child(7) { width: 40%; }
+  .users-table th:nth-child(9), .users-table td:nth-child(9) { display: none; }
+}
 
 /* Модальное редактирование строки таблицы БД */
 .row-edit-dialog {
@@ -453,3 +478,20 @@ td { padding: 8px var(--sp-3); }
 
 /* Пустое состояние */
 .empty, .muted-empty { color: var(--muted); font-size: var(--fs-base); }
+
+
+/* Пользователи на телефоне: таблица не расширяется до 640px, видны логин, статус и действие */
+@media (max-width: 700px) {
+  .table-wrap > .users-table { min-width: 0; }
+  .users-table { table-layout: auto; }
+  .users-table colgroup { display: none; }
+  .users-table th:nth-child(1), .users-table td:nth-child(1),
+  .users-table th:nth-child(3), .users-table td:nth-child(3),
+  .users-table th:nth-child(4), .users-table td:nth-child(4),
+  .users-table th:nth-child(5), .users-table td:nth-child(5),
+  .users-table th:nth-child(6), .users-table td:nth-child(6),
+  .users-table th:nth-child(8), .users-table td:nth-child(8) { display: none; }
+  .users-table th:nth-child(2), .users-table td:nth-child(2) { width: 60%; }
+  .users-table th:nth-child(7), .users-table td:nth-child(7) { width: 40%; }
+  .users-table th:nth-child(9), .users-table td:nth-child(9) { display: none; }
+}

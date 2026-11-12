@@ -97,7 +97,10 @@ pub fn router(state: AppState) -> Router<AppState> {
         )
         .route("/fields/{id}/options", post(collections::save_options))
         .route("/fields/{id}/delete", post(collections::delete_field))
-        .route("/collections/{id}/sections", get(sections::list).post(sections::create))
+        .route(
+            "/collections/{id}/sections",
+            get(sections::list).post(sections::create),
+        )
         .route("/collections/{id}/sections/new", get(sections::new_form))
         .route(
             "/sections/{id}",

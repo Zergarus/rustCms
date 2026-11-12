@@ -3,7 +3,7 @@
 {% set tab = "statuses" %}
 {% block title %}{% if code %}{{ form.name }}{% else %}Новый статус{% endif %}{% endblock %}
 {% block content %}
-<div class="breadcrumbs"><a href="/admin/shop/statuses">Статусы заказа</a> /</div>
+<div class="breadcrumbs"><a href="/admin/shop/statuses">Статусы заказа</a></div>
 <h1>{% if code %}{{ form.name }}{% else %}Новый статус{% endif %}</h1>
 <form class="card form" method="post" action="{% if code %}/admin/shop/statuses/{{ code }}{% else %}/admin/shop/statuses{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}

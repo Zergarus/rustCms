@@ -186,13 +186,50 @@ fn check_target(user: &Access, target: &UserRow) -> AppResult<()> {
     Ok(())
 }
 
+#[derive(Default, Deserialize)]
+pub struct UsersQuery {
+    q: Option<String>,
+    page: Option<i64>,
+    per: Option<i64>,
+}
+
+/// Адрес страницы списка; `q` кодируется формой, значения — только числа.
+fn users_url(q: &str, per: i64, page: i64) -> String {
+    let mut url = format!("/admin/users?per={per}&page={page}");
+    if !q.is_empty() {
+        url.push_str("&q=");
+        url.extend(form_urlencoded::byte_serialize(q.as_bytes()));
+    }
+    url
+}
+
 pub async fn list(
     State(state): State<AppState>,
     Extension(user): Extension<Access>,
+    Query(query): Query<UsersQuery>,
 ) -> AppResult<Html<String>> {
     user.require(USERS_MANAGE)?;
-    let items = users::list(&state.db).await?;
-    render(&state, "users.html", context! { user, items })
+    let q = query.q.unwrap_or_default().trim().to_string();
+    let per = match query.per {
+        Some(100) => 100,
+        Some(20) => 20,
+        _ => 50,
+    };
+    let page = query.page.unwrap_or(1).max(1);
+    let (items, total) = users::list_page(&state.db, &q, per, (page - 1) * per).await?;
+    let pages = ((total + per - 1) / per).max(1);
+    let page = page.min(pages);
+    let range_start = if total == 0 { 0 } else { (page - 1) * per + 1 };
+    let range_end = range_start + items.len() as i64 - 1;
+    let prev = (page > 1).then(|| users_url(&q, per, page - 1));
+    let next = (page < pages).then(|| users_url(&q, per, page + 1));
+    render(
+        &state,
+        "users.html",
+        context! {
+            user, items, q, total, page, pages, per, range_start, range_end, prev, next,
+        },
+    )
 }
 
 pub async fn new_form(
@@ -587,6 +624,39 @@ mod tests {
             password_confirm: confirm.into(),
             ..Default::default()
         }
+    }
+
+    #[sqlx::test]
+    async fn list_searches_and_paginates(db: PgPool) {
+        sqlx::query(
+            "INSERT INTO users (login, name, password_hash)
+             SELECT 'pageuser' || lpad(g::text, 2, '0'), 'User ' || g, 'x'
+             FROM generate_series(1, 25) g",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+
+        let (status, body) = get(&app, "/admin/users?q=pageuser&per=20&page=2", &cookie).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body.contains("pageuser21") && body.contains("pageuser25"),
+            "{body}"
+        );
+        assert!(
+            !body.contains(">pageuser01<"),
+            "первая страница не должна повторяться: {body}"
+        );
+        assert!(body.contains("Показано 21–25 из 25"), "{body}");
+
+        let (status, body) = get(&app, "/admin/users?q=pageuser01", &cookie).await;
+        assert_eq!(status, 200);
+        assert!(
+            body.contains("pageuser01") && !body.contains("pageuser02<"),
+            "{body}"
+        );
     }
 
     #[test]

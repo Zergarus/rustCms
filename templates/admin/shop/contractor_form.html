@@ -3,7 +3,7 @@
 {% set tab = "contractors" %}
 {% block title %}{% if id %}Поставщик #{{ id }}{% else %}Новый поставщик{% endif %}{% endblock %}
 {% block content %}
-<div class="breadcrumbs"><a href="/admin/shop/contractors">Поставщики</a> /</div>
+<div class="breadcrumbs"><a href="/admin/shop/contractors">Поставщики</a></div>
 <h1>{% if id %}Поставщик #{{ id }}{% else %}Новый поставщик{% endif %}</h1>
 <form class="card form" method="post" action="{% if id %}/admin/shop/contractors/{{ id }}{% else %}/admin/shop/contractors{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}

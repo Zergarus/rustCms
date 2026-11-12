@@ -172,12 +172,31 @@ pub async fn update_profile(
     Ok(())
 }
 
-pub async fn list(db: &PgPool) -> sqlx::Result<Vec<UserRow>> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {USER_COLS} FROM users ORDER BY id"
+/// Страница списка пользователей с поиском по логину, имени и e-mail.
+pub async fn list_page(
+    db: &PgPool,
+    query: &str,
+    limit: i64,
+    offset: i64,
+) -> sqlx::Result<(Vec<UserRow>, i64)> {
+    let filter = "($1 = '' OR login ILIKE $2 OR name ILIKE $2 OR COALESCE(email, '') ILIKE $2)";
+    let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM users WHERE {filter}"
     )))
+    .bind(query)
+    .bind(format!("%{query}%"))
+    .fetch_one(db)
+    .await?;
+    let rows = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {USER_COLS} FROM users WHERE {filter} ORDER BY id LIMIT $3 OFFSET $4"
+    )))
+    .bind(query)
+    .bind(format!("%{query}%"))
+    .bind(limit)
+    .bind(offset)
     .fetch_all(db)
-    .await
+    .await?;
+    Ok((rows, total))
 }
 
 pub async fn get(db: &PgPool, id: i64) -> sqlx::Result<Option<UserRow>> {

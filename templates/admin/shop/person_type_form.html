@@ -3,7 +3,7 @@
 {% set tab = "person-types" %}
 {% block title %}{% if id %}{{ form.name }}{% else %}Новый тип плательщика{% endif %}{% endblock %}
 {% block content %}
-<div class="breadcrumbs"><a href="/admin/shop/person-types">Типы плательщика</a> /</div>
+<div class="breadcrumbs"><a href="/admin/shop/person-types">Типы плательщика</a></div>
 <h1>{% if id %}{{ form.name }}{% else %}Новый тип плательщика{% endif %}</h1>
 <form class="card form" method="post" action="{% if id %}/admin/shop/person-types/{{ id }}{% else %}/admin/shop/person-types{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}

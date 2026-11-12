@@ -6,7 +6,7 @@
 {% call ui.page_head([("Коллекции", "/admin/collections"), (collection.name, "/admin/collections/" ~ collection.id ~ "/items"), ("SEO — " ~ name, none)]) %}
 <a class="btn" href="{{ back }}">К карточке</a>
 {% endcall %}
-<form class="card form" method="post" data-dirty-guard action="/admin/seo/{{ kind }}/{{ id }}">
+<form class="card form form-narrow" method="post" data-dirty-guard action="/admin/seo/{{ kind }}/{{ id }}">
 {% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
 <p>Пустое поле наследует настройку родительского раздела или коллекции. Настройки раздела действуют также на вложенные разделы и записи.</p>
 <p>Переменные: <code>{name}</code> — название текущей страницы, <code>{code}</code> — её код, <code>{collection}</code> — коллекция, <code>{section}</code> — раздел.</p>

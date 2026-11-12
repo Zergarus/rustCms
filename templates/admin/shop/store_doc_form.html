@@ -3,7 +3,7 @@
 {% set tab = "store-docs" %}
 {% block title %}{{ title }}{% endblock %}
 {% block content %}
-<div class="breadcrumbs"><a href="/admin/shop/store-docs">Складские документы</a> /</div>
+<div class="breadcrumbs"><a href="/admin/shop/store-docs">Складские документы</a></div>
 <h1>{{ title }} {% if status == "Y" %}<span class="badge ok">Проведён</span>{% elif id %}<span class="badge">Черновик</span>{% endif %}</h1>
 {% for e in errors %}<div class="alert">{{ e }}</div>{% endfor %}
 {% set done = status == "Y" %}

@@ -3,7 +3,7 @@
 {% import "_ui.html" as ui %}
 {% block title %}{% if group_id %}{{ form.name }}{% else %}Новая группа{% endif %}{% endblock %}
 {% block content %}
-<div class="breadcrumbs"><a href="/admin/groups">Группы</a> /</div>
+<div class="breadcrumbs"><a href="/admin/groups">Группы</a></div>
 <h1>{% if group_id %}{{ form.name }}{% else %}Новая группа{% endif %}</h1>
 
 <div data-card>
