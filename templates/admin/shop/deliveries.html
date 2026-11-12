@@ -24,7 +24,7 @@
         <td class="muted">{{ d.id }}</td>
         <td><a href="/admin/shop/deliveries/{{ d.id }}" title="{{ d.name }}">{{ d.name }}</a></td>
         <td>{{ d.price }} {{ d.currency }}</td>
-        <td>{{ d.stores }}</td>
+        <td>{% if d.stores %}{{ d.stores }}{% else %}<span class="muted">—</span>{% endif %}</td>
         <td>{% if d.active %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}</td>
         <td>{% if d.public %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}</td>
         <td>{{ d.sort }}</td>

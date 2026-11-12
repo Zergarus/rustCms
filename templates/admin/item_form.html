@@ -196,7 +196,7 @@
           {% for st in catalog.stores %}
           <tr{% if not st[2] %} class="muted"{% endif %}>
             <td>{{ st[1] }}{% if not st[2] %} <span class="muted">(неактивен)</span>{% endif %} <span class="muted">#{{ st[0] }}</span></td>
-            <td class="num"><input name="amount_{{ st[0] }}" inputmode="decimal" value="{{ form['amount_' ~ st[0]] }}" placeholder="нет записи" {% if store_control %}disabled{% endif %}></td>
+            <td class="num"><input name="amount_{{ st[0] }}" inputmode="decimal" value="{{ form['amount_' ~ st[0]] }}" placeholder="—" {% if store_control %}disabled{% endif %}></td>
           </tr>
           {% endfor %}
         </tbody>

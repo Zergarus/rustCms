@@ -4,11 +4,6 @@
 {% block content %}
 {% import "_ui.html" as ui %}
 {% call ui.page_head([("Пользователи", "/admin/users"), (target.login if target else "Новый пользователь", none)]) %}
-  {%- if target and not is_self %}
-  <form method="post" action="/admin/users/{{ target.id }}/delete" hx-confirm="Удалить пользователя «{{ target.login }}»?">
-    <button class="btn danger" type="submit">Удалить</button>
-  </form>
-  {%- endif %}
 {% endcall %}
 {{ ui.card_errors(tabctx) }}
 
@@ -199,4 +194,14 @@
 {% endif %}
 {% endif %}
 </div>
+
+{% if target and not is_self %}
+<section class="card danger-zone">
+  <h2>Удаление</h2>
+  <p class="muted">Пользователь будет удалён без возможности восстановления.</p>
+  <form method="post" action="/admin/users/{{ target.id }}/delete" hx-confirm="Удалить пользователя «{{ target.login }}»?">
+    <button class="btn danger" type="submit">Удалить пользователя</button>
+  </form>
+</section>
+{% endif %}
 {% endblock %}
