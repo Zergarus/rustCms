@@ -69,18 +69,23 @@ pub async fn list(
     Query(q): Query<UsedQuery>,
 ) -> AppResult<Html<String>> {
     require_shop(&user)?;
+    let search = q.search();
     let items: Vec<PersonTypeRow> = sqlx::query_as(
         "SELECT t.id, t.code, t.name, t.active, t.sort,
                 (SELECT count(*) FROM order_properties p WHERE p.person_type_id = t.id) AS properties,
                 (SELECT count(*) FROM orders o WHERE o.person_type_id = t.id) AS orders
-         FROM person_types t ORDER BY t.sort, t.id",
+         FROM person_types t
+         WHERE ($1 = '' OR t.name ILIKE $2 OR t.code ILIKE $2)
+         ORDER BY t.sort, t.id",
     )
+    .bind(&search)
+    .bind(format!("%{search}%"))
     .fetch_all(&state.db)
     .await?;
     render(
         &state,
         "shop/person_types.html",
-        context! { user, items, error => q.message() },
+        context! { user, items, q => search, error => q.message() },
     )
 }
 

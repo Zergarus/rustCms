@@ -7,6 +7,12 @@
   <h1>Платёжные системы <span class="muted count">{{ items|length }}</span></h1>
   <a class="btn primary" href="/admin/shop/pay-systems/new">Добавить платёжную систему</a>
 </div>
+<form class="users-toolbar" method="get" action="/admin/shop/pay-systems">
+  <input type="search" name="q" value="{{ q }}" placeholder="Название или API-тип" autocomplete="off" aria-label="Поиск">
+  <button class="btn primary" type="submit">Найти</button>
+  {% if q %}<a class="btn ghost" href="/admin/shop/pay-systems">Сбросить</a>{% endif %}
+</form>
+
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <div class="card table-wrap">
   <table class="table-fixed">

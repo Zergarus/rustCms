@@ -7,6 +7,12 @@
   <h1>Службы доставки <span class="muted count">{{ items|length }}</span></h1>
   <a class="btn primary" href="/admin/shop/deliveries/new">Добавить службу</a>
 </div>
+<form class="users-toolbar" method="get" action="/admin/shop/deliveries">
+  <input type="search" name="q" value="{{ q }}" placeholder="Название службы доставки" autocomplete="off" aria-label="Поиск">
+  <button class="btn primary" type="submit">Найти</button>
+  {% if q %}<a class="btn ghost" href="/admin/shop/deliveries">Сбросить</a>{% endif %}
+</form>
+
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <div class="card table-wrap">
   <table class="table-fixed deliveries-table">

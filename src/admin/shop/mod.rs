@@ -37,9 +37,15 @@ use crate::{
 #[derive(Deserialize)]
 pub struct UsedQuery {
     used: Option<i64>,
+    #[serde(default)]
+    q: Option<String>,
 }
 
 impl UsedQuery {
+    fn search(&self) -> String {
+        self.q.as_deref().unwrap_or("").trim().to_string()
+    }
+
     fn message(&self) -> Option<String> {
         self.used
             .map(|n| format!("Нельзя удалить — используется в заказах: {n}. Снимите активность."))

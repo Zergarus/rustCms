@@ -94,18 +94,23 @@ pub async fn list(
     Query(q): Query<UsedQuery>,
 ) -> AppResult<Html<String>> {
     require_shop(&user)?;
+    let search = q.search();
     let items: Vec<PaySystemRow> = sqlx::query_as(
         "SELECT p.id, p.name, p.active, p.sort, p.api_type,
                 COALESCE((SELECT string_agg(g.name, ', ' ORDER BY g.sort, g.id)
                           FROM groups g WHERE g.id = ANY(p.group_ids)), '') AS groups
-         FROM pay_systems p ORDER BY p.sort, p.id",
+         FROM pay_systems p
+         WHERE ($1 = '' OR p.name ILIKE $2 OR p.api_type ILIKE $2)
+         ORDER BY p.sort, p.id",
     )
+    .bind(&search)
+    .bind(format!("%{search}%"))
     .fetch_all(&state.db)
     .await?;
     render(
         &state,
         "shop/pay_systems.html",
-        context! { user, items, error => q.message() },
+        context! { user, items, q => search, error => q.message() },
     )
 }
 
