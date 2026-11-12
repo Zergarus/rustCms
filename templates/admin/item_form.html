@@ -30,7 +30,7 @@
 <div class="tabs-row">
   {{ ui.card_tabs(card_tabs, tabctx) }}
 </div>
-<form class="card form" method="post" enctype="multipart/form-data" data-dirty-guard
+<form class="card form form-long" method="post" enctype="multipart/form-data" data-dirty-guard
       action="{% if item_id %}/admin/items/{{ item_id }}{% else %}/admin/collections/{{ collection.id }}/items{% endif %}">
   <input type="hidden" name="tab" value="{{ tabctx.active }}">
   {% if not can_write %}<div class="notice">Только просмотр: у вас нет прав на изменение записей этой коллекции.</div>{% endif %}

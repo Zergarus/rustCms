@@ -9,7 +9,7 @@
 </nav>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 {% if tab == "catalog" %}
-<form class="card form form-narrow" method="post" action="/admin/exchange">
+<form class="card form form-narrow form-long" method="post" action="/admin/exchange">
   <label>Коллекция по умолчанию
     <select name="default_collection">
       <option value="">— не выбрана —</option>
@@ -50,7 +50,7 @@
 {% endif %}
 {% if tab == "sale" %}
 {% macro yn(name, label, on) %}<label class="check"><input type="checkbox" name="{{ name }}" {% if on %}checked{% endif %}> {{ label }}</label>{% endmacro %}
-<form class="card form form-narrow" method="post" action="/admin/exchange/sale">
+<form class="card form form-narrow form-long" method="post" action="/admin/exchange/sale">
   <h2>Выгрузка заказов в 1С</h2>
   {{ yn("export_paid_only", "Выгружать только оплаченные заказы", s.export_paid_only) }}
   {{ yn("export_allow_delivery_only", "Выгружать только заказы с разрешённой доставкой", s.export_allow_delivery_only) }}
