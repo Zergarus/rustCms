@@ -89,8 +89,6 @@
   {% endcall %}
   {% if properties %}
   {% call ui.tab_pane("fields", tabctx) %}
-  <fieldset>
-    <legend>Поля</legend>
     {% for p in properties %}
       {% set key = "prop_" ~ p.code %}
       {% if p.kind == "boolean" %}
@@ -136,20 +134,14 @@
         </label>
       {% endif %}
     {% endfor %}
-  </fieldset>
   {% endcall %}
   {% endif %}
 
   {% if catalog %}
   {% call ui.tab_pane("catalog", tabctx) %}
   {% if offers_priced %}
-  <fieldset>
-    <legend>Торговый каталог</legend>
-    <p class="muted">Цены и остатки задаются у предложений. Доступность товара считается по ним.</p>
-  </fieldset>
+  <p class="muted">Цены и остатки задаются у предложений. Доступность товара считается по ним.</p>
   {% elif catalog %}
-  <fieldset>
-    <legend>Торговый каталог</legend>
     <div class="grid-3">
       <label class="check"><input type="checkbox" name="available" {% if form.available %}checked{% endif %}> Доступен для покупки</label>
       {% for key, label in [("quantity_trace", "Учитывать количество"), ("can_buy_zero", "Покупка при нулевом остатке")] %}
@@ -163,7 +155,6 @@
       {% endfor %}
     </div>
     <label>Вес, г<input name="weight" inputmode="decimal" value="{{ form.weight }}" placeholder="0"></label>
-  </fieldset>
 
   <fieldset>
     <legend>Цены</legend>
