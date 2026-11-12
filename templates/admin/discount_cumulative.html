@@ -90,7 +90,7 @@
   <label class="check"><input type="checkbox" name="skip_discounted" value="Y" {% if form.skip_discounted %}checked{% endif %}> Не действовать, если есть скидки на товар</label>
   <label class="check"><input type="checkbox" name="apply_if_more_profitable" value="Y" {% if form.apply_if_more_profitable %}checked{% endif %}> Отменять скидки на товар, если накопительная скидка больше</label>
 
-  <div class="form-actions">
+  <div class="form-actions form-actions-sticky">
     <button class="btn primary" type="submit">Сохранить</button>
     <a class="btn" href="/admin/discounts">Отмена</a>
   </div>

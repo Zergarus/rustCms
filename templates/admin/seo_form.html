@@ -19,7 +19,7 @@
 {% for value, label in [("", "Наследовать"), ("index,follow", "Индексировать, переходить по ссылкам"), ("noindex,follow", "Не индексировать, переходить по ссылкам"), ("index,nofollow", "Индексировать, не переходить по ссылкам"), ("noindex,nofollow", "Не индексировать, не переходить по ссылкам")] %}
 <option value="{{ value }}" {% if form.robots == value %}selected{% endif %}>{{ label }}</option>
 {% endfor %}</select></label>
-<div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
+<div class="form-actions form-actions-sticky"><button class="btn primary" type="submit">Сохранить</button></div>
 </form>
 <div class="card">
 <h2>Результат сохранённых настроек</h2>

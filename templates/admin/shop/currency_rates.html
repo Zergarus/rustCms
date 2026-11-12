@@ -23,7 +23,7 @@
   {% else %}
   <p class="muted">Загрузок ещё не было.</p>
   {% endif %}
-  <div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
+  <div class="form-actions form-actions-sticky"><button class="btn primary" type="submit">Сохранить</button></div>
 </form>
 <form class="card form" method="get" action="/admin/shop/currency-rates">
   <div class="grid-3">
@@ -36,7 +36,7 @@
     <label>С даты<input type="date" name="from" value="{{ filter[1] }}"></label>
     <label>По дату<input type="date" name="to" value="{{ filter[2] }}"></label>
   </div>
-  <div class="form-actions"><button class="btn" type="submit">Показать</button></div>
+  <div class="form-actions form-actions-sticky"><button class="btn" type="submit">Показать</button></div>
 </form>
 <div class="card table-wrap">
   <table>

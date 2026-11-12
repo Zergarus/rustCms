@@ -40,7 +40,7 @@
         <td class="actions">
           {% if u.id != user.id and (user.is_admin or not u.is_admin) %}
           <form method="post" action="/admin/users/{{ u.id }}/delete" hx-confirm="Удалить пользователя «{{ u.login }}»?">
-            <button class="link danger" type="submit">Удалить</button>
+            <button class="link danger row-delete" type="submit">Удалить</button>
           </form>
           {% endif %}
         </td>

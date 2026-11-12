@@ -88,7 +88,7 @@
 
   {% endcall %}
 
-  <div class="form-actions" data-form-actions{% if tabctx.active in ["keys", "orders"] %} hidden{% endif %}>
+  <div class="form-actions form-actions-sticky" data-form-actions{% if tabctx.active in ["keys", "orders"] %} hidden{% endif %}>
     <button class="btn primary" type="submit">Сохранить</button>
     <a class="btn" href="/admin/users">Отмена</a>
   </div>
@@ -112,7 +112,7 @@
   <form method="post" action="/admin/users/{{ target.id }}/api-keys/{{ confirm_key.id }}/revoke" hx-push-url="false">
     <div class="alert">Отозвать ключ «{{ confirm_key.name }}» (cms_{{ confirm_key.prefix }}_…)? Внешние системы с этим ключом потеряют доступ, действие необратимо.</div>
     <input type="hidden" name="confirm" value="1">
-    <div class="form-actions"><button class="btn danger" type="submit">Отозвать</button>
+    <div class="form-actions form-actions-sticky"><button class="btn danger" type="submit">Отозвать</button>
       <a class="btn" href="/admin/users/{{ target.id }}?tab=keys">Отмена</a></div>
   </form>
   {% endif %}
@@ -166,7 +166,7 @@
       </label>
       {% endfor %}
     </fieldset>
-    <div class="form-actions"><button class="btn primary" type="submit">Выпустить ключ</button></div>
+    <div class="form-actions form-actions-sticky"><button class="btn primary" type="submit">Выпустить ключ</button></div>
   </form>
 </div>
 {% endcall %}

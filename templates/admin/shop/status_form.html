@@ -16,7 +16,7 @@
     <label class="check"><input type="checkbox" name="notify" {% if form.notify %}checked{% endif %}> Письмо покупателю при переходе в статус (SALE_STATUS_CHANGED_{{ form.code or "код" }})</label>
   </div>
   <label>Описание<textarea name="description" rows="3">{{ form.description }}</textarea></label>
-  <div class="form-actions">
+  <div class="form-actions form-actions-sticky">
     <button class="btn primary" type="submit">Сохранить</button>
     <a class="btn" href="/admin/shop/statuses">Отмена</a>
   </div>

@@ -27,5 +27,5 @@
   </div>
   {% if extra %}<p class="muted">Прочие значения: {% for v in extra %}{{ v.name }}: {{ v.value }}{% if not loop.last %}; {% endif %}{% endfor %}</p>{% endif %}
   <label>Комментарий менеджера<textarea name="manager_comment" rows="2">{{ order.manager_comment }}</textarea></label>
-  <div class="form-actions"><button class="btn primary" type="submit">Сохранить свойства</button></div>
+  <div class="form-actions form-actions-sticky"><button class="btn primary" type="submit">Сохранить свойства</button></div>
 </form>

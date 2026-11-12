@@ -23,7 +23,7 @@
         <td>{{ p.sort }}</td>
         <td class="actions">
           <form method="post" action="/admin/shop/pay-systems/{{ p.id }}/delete" hx-confirm="Удалить платёжную систему «{{ p.name }}»?">
-            <button class="link danger" type="submit">Удалить</button>
+            <button class="link danger row-delete" type="submit">Удалить</button>
           </form>
         </td>
       </tr>

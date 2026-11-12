@@ -13,7 +13,7 @@
     <label>Сортировка<input name="sort" type="number" value="{{ form.sort }}"></label>
   </div>
   <datalist id="block-codes">{% for c in block_codes %}<option value="{{ c }}">{% endfor %}</datalist>
-  <div class="form-actions">
+  <div class="form-actions form-actions-sticky">
     <button class="btn primary" type="submit">Сохранить</button>
     <a class="btn" href="/admin/shop/person-types/{{ person_type }}/props">Отмена</a>
   </div>

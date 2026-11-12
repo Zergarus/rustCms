@@ -24,7 +24,7 @@
         <td class="actions">
           <a href="/admin/shop/person-types/{{ t.id }}">Изменить</a>
           <form method="post" action="/admin/shop/person-types/{{ t.id }}/delete" hx-confirm="Удалить тип «{{ t.name }}» со всеми свойствами?">
-            <button class="link danger" type="submit">Удалить</button>
+            <button class="link danger row-delete" type="submit">Удалить</button>
           </form>
         </td>
       </tr>

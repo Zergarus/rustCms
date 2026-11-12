@@ -68,13 +68,13 @@
   </div>
   <p>Сумма: <strong>{{ "%.2f"|format(total) }}</strong></p>
   </fieldset>
-  <div class="form-actions">
+  <div class="form-actions form-actions-sticky">
     {% if not done %}<button class="btn primary" type="submit">Сохранить</button>{% endif %}
     <a class="btn" href="/admin/shop/store-docs">К списку</a>
   </div>
 </form>
 {% if id %}
-<div class="form-actions">
+<div class="form-actions form-actions-sticky">
   {% if done %}
   <form method="post" action="/admin/shop/store-docs/{{ id }}/cancel" style="display:inline"><button class="btn" type="submit">Отменить проведение</button></form>
   {% else %}

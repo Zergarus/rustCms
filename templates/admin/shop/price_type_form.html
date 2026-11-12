@@ -15,7 +15,7 @@
     <label>Сортировка<input name="sort" type="number" value="{{ form.sort }}"></label>
     <label class="check"><input type="checkbox" name="is_base" {% if form.is_base %}checked{% endif %}> Базовый — основная цена товара</label>
   </div>
-  <div class="form-actions">
+  <div class="form-actions form-actions-sticky">
     <button class="btn primary" type="submit">Сохранить</button>
     <a class="btn" href="/admin/shop/price-types">Отмена</a>
   </div>

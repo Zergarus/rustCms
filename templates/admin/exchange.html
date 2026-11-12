@@ -44,7 +44,7 @@
   <label>Лимит размера части файла, МБ (1–4096)
     <input type="number" name="file_limit_mb" min="1" max="4096" value="{{ file_limit_mb }}">
   </label>
-  <div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
+  <div class="form-actions form-actions-sticky"><button class="btn primary" type="submit">Сохранить</button></div>
 </form>
 
 {% endif %}
@@ -95,7 +95,7 @@
       {% for d in deliveries %}<option value="{{ d[0] }}" {% if d[0]|string == s.default_delivery %}selected{% endif %}>{{ d[1] }}</option>{% endfor %}
     </select>
   </label>
-  <div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
+  <div class="form-actions form-actions-sticky"><button class="btn primary" type="submit">Сохранить</button></div>
 </form>
 
 <h2>Соответствие реквизитов контрагента</h2>

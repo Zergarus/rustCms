@@ -30,7 +30,7 @@
       <input name="user_id" value="{{ add.user_id }}">
     </label>
     <label>Описание <input name="description" value="{{ add.description }}"></label>
-    <div class="form-actions"><button class="btn primary" type="submit">Добавить</button></div>
+    <div class="form-actions form-actions-sticky"><button class="btn primary" type="submit">Добавить</button></div>
   </form>
 
   <form class="card form" method="post" action="/admin/discounts/{{ rule_id }}/coupons/generate">
@@ -52,7 +52,7 @@
       <label>Начало активности <input name="active_from" value="{{ generate.active_from }}" placeholder="ДД.ММ.ГГГГ ЧЧ:ММ"></label>
       <label>Окончание активности <input name="active_to" value="{{ generate.active_to }}" placeholder="ДД.ММ.ГГГГ ЧЧ:ММ"></label>
     </div>
-    <div class="form-actions"><button class="btn primary" type="submit">Сгенерировать</button></div>
+    <div class="form-actions form-actions-sticky"><button class="btn primary" type="submit">Сгенерировать</button></div>
   </form>
 </div>
 

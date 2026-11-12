@@ -42,7 +42,7 @@
       <select name="pay_system_id">{% for p in pay_systems %}<option value="{{ p[0] }}" {% if order.payment and order.payment.pay_system_id == p[0] %}selected{% endif %}>{{ p[1] }}</option>{% endfor %}</select>
     </label>
   </div>
-  <div class="form-actions"><button class="btn primary" type="submit">Сохранить состав</button>{% if shipped %} <span class="muted">Заказ отгружен — состав не правится</span>{% elif order.canceled %} <span class="muted">Заказ отменён — остатки не меняются</span>{% endif %}</div>
+  <div class="form-actions form-actions-sticky"><button class="btn primary" type="submit">Сохранить состав</button>{% if shipped %} <span class="muted">Заказ отгружен — состав не правится</span>{% elif order.canceled %} <span class="muted">Заказ отменён — остатки не меняются</span>{% endif %}</div>
   </fieldset>
 </form>
 

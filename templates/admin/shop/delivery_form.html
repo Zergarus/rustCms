@@ -30,9 +30,11 @@
   <label>Описание<textarea name="description" rows="2">{{ form.description }}</textarea></label>
   <div class="field">
     <span class="field-label">Склады самовывоза (пункты выдачи)</span>
-    {% for s in stores %}<label class="check"><input type="checkbox" name="store_ids" value="{{ s[0] }}" {% if s[0] in form.store_ids %}checked{% endif %}> {{ s[1] }}{% if not s[2] %} <span class="muted">(неактивен)</span>{% endif %}</label>{% endfor %}
+    <div class="check-grid">
+      {% for s in stores %}<label class="check"><input type="checkbox" name="store_ids" value="{{ s[0] }}" {% if s[0] in form.store_ids %}checked{% endif %}> {{ s[1] }}{% if not s[2] %} <span class="muted">(неактивен)</span>{% endif %}</label>{% endfor %}
+    </div>
   </div>
-  <div class="form-actions">
+  <div class="form-actions form-actions-sticky">
     <button class="btn primary" type="submit">Сохранить</button>
     <a class="btn" href="/admin/shop/deliveries">Отмена</a>
   </div>

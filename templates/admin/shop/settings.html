@@ -37,14 +37,14 @@
   </label>
   {% endif %}
   {% if rebuilding %}<p class="muted">Партии перестраиваются: {{ rebuilding[0] }} из {{ rebuilding[1] }}</p>{% endif %}
-  <div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
+  <div class="form-actions form-actions-sticky"><button class="btn primary" type="submit">Сохранить</button></div>
 </form>
 {% if confirm_code %}
 <form class="card form" method="post" action="/admin/shop/settings">
   <div class="alert">Метод выбирается один раз, сменить его потом будет нельзя. Выбранный метод: {{ confirm_label }}.</div>
   <input type="hidden" name="cost_method" value="{{ confirm_code }}">
   <input type="hidden" name="confirm" value="1">
-  <div class="form-actions"><button class="btn primary" type="submit">Выбрать</button>
+  <div class="form-actions form-actions-sticky"><button class="btn primary" type="submit">Выбрать</button>
     <a class="btn" href="/admin/shop/settings">Отмена</a></div>
 </form>
 {% endif %}

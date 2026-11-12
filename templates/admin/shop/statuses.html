@@ -22,7 +22,7 @@
         <td>{{ s.orders }}</td>
         <td class="actions">
           <form method="post" action="/admin/shop/statuses/{{ s.code }}/delete" hx-confirm="Удалить статус «{{ s.name }}»?">
-            <button class="link danger" type="submit">Удалить</button>
+            <button class="link danger row-delete" type="submit">Удалить</button>
           </form>
         </td>
       </tr>

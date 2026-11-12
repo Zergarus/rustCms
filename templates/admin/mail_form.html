@@ -22,6 +22,6 @@
 {% endfor %}</select></label>
 <p class="muted">Подстановки: <code>#ПОЛЕ#</code> из события, плюс <code>#SITE_NAME#</code>, <code>#SERVER_NAME#</code>, <code>#DEFAULT_EMAIL_FROM#</code>. В HTML-письмах значения полей экранируются.</p>
 <label class="check"><input type="checkbox" name="active" value="on" {% if form.active %}checked{% endif %}> Активен</label>
-<div class="form-actions"><button class="btn primary" type="submit">Сохранить</button></div>
+<div class="form-actions form-actions-sticky"><button class="btn primary" type="submit">Сохранить</button></div>
 </form>
 {% endblock %}
