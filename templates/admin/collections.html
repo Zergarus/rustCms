@@ -9,8 +9,8 @@
 
 {% if items %}
 <div class="card table-wrap">
-  <table class="table-fixed">
-    <colgroup><col style="width:56px"><col><col style="width:160px"><col style="width:110px"><col style="width:90px"><col style="width:80px"><col style="width:100px"></colgroup>
+  <table class="table-fixed collections-table">
+    <colgroup><col style="width:50px"><col><col style="width:140px"><col style="width:100px"><col style="width:80px"><col style="width:70px"><col style="width:110px"></colgroup>
     <thead>
       <tr><th>ID</th><th>Название</th><th>Код</th><th>Записей</th><th>API</th><th>Сорт.</th><th></th></tr>
     </thead>
@@ -18,7 +18,7 @@
       {% for ib in items %}
       <tr>
         <td class="muted">{{ ib.id }}</td>
-        <td><a href="/admin/collections/{{ ib.id }}/items">{{ ib.name }}</a></td>
+        <td><a href="/admin/collections/{{ ib.id }}/items" title="{{ ib.name }}">{{ ib.name }}</a></td>
         <td><code>{{ ib.code }}</code></td>
         <td>{{ ib.item_count }}</td>
         <td>{% if ib.api_enabled %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}</td>

@@ -508,3 +508,43 @@ form.card.form { padding-bottom: 72px; }
 @media (max-width: 700px) { .check-grid { grid-template-columns: 1fr; } }
 .actions .row-delete { opacity: .55; font-size: var(--fs-xs); }
 tr:hover .actions .row-delete, .actions .row-delete:focus-visible { opacity: 1; }
+
+
+/* Мобильные таблицы: название важнее технических колонок */
+@media (max-width: 700px) {
+  .table-wrap > .collections-table, .table-wrap > .groups-table,
+  .table-wrap > .deliveries-table, .table-wrap > .db-tables-table { min-width: 0; }
+  .collections-table, .groups-table, .deliveries-table, .db-tables-table { table-layout: fixed; }
+  .collections-table colgroup, .groups-table colgroup, .deliveries-table colgroup, .db-tables-table colgroup { display: none; }
+  .collections-table th:nth-child(1), .collections-table td:nth-child(1),
+  .collections-table th:nth-child(3), .collections-table td:nth-child(3),
+  .collections-table th:nth-child(4), .collections-table td:nth-child(4),
+  .collections-table th:nth-child(5), .collections-table td:nth-child(5),
+  .collections-table th:nth-child(6), .collections-table td:nth-child(6),
+  .collections-table th:nth-child(7), .collections-table td:nth-child(7) { display: none; }
+  .collections-table th:nth-child(2), .collections-table td:nth-child(2) { width: 100%; }
+
+  .groups-table th:nth-child(1), .groups-table td:nth-child(1),
+  .groups-table th:nth-child(3), .groups-table td:nth-child(3),
+  .groups-table th:nth-child(4), .groups-table td:nth-child(4),
+  .groups-table th:nth-child(6), .groups-table td:nth-child(6) { display: none; }
+  .groups-table th:nth-child(2), .groups-table td:nth-child(2) { width: 72%; }
+  .groups-table th:nth-child(5), .groups-table td:nth-child(5) { width: 28%; }
+
+  .deliveries-table th:nth-child(1), .deliveries-table td:nth-child(1),
+  .deliveries-table th:nth-child(3), .deliveries-table td:nth-child(3),
+  .deliveries-table th:nth-child(4), .deliveries-table td:nth-child(4),
+  .deliveries-table th:nth-child(6), .deliveries-table td:nth-child(6),
+  .deliveries-table th:nth-child(7), .deliveries-table td:nth-child(7),
+  .deliveries-table th:nth-child(8), .deliveries-table td:nth-child(8) { display: none; }
+  .deliveries-table th:nth-child(2), .deliveries-table td:nth-child(2) { width: 70%; }
+  .deliveries-table th:nth-child(5), .deliveries-table td:nth-child(5) { width: 30%; }
+
+  .db-tables-table th:nth-child(3), .db-tables-table td:nth-child(3),
+  .db-tables-table th:nth-child(4), .db-tables-table td:nth-child(4),
+  .db-tables-table th:nth-child(5), .db-tables-table td:nth-child(5),
+  .db-tables-table th:nth-child(6), .db-tables-table td:nth-child(6),
+  .db-tables-table th:nth-child(7), .db-tables-table td:nth-child(7) { display: none; }
+  .db-tables-table th:nth-child(1), .db-tables-table td:nth-child(1) { width: 30%; }
+  .db-tables-table th:nth-child(2), .db-tables-table td:nth-child(2) { width: 70%; }
+}

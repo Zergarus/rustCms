@@ -9,14 +9,14 @@
 </div>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <div class="card table-wrap">
-  <table class="table-fixed">
-    <colgroup><col style="width:56px"><col><col style="width:120px"><col style="width:220px"><col style="width:90px"><col style="width:130px"><col style="width:80px"><col style="width:100px"></colgroup>
+  <table class="table-fixed deliveries-table">
+    <colgroup><col style="width:50px"><col><col style="width:100px"><col style="width:180px"><col style="width:80px"><col style="width:110px"><col style="width:70px"><col style="width:90px"></colgroup>
     <thead><tr><th>ID</th><th>Название</th><th>Цена</th><th>Склады самовывоза</th><th>Активна</th><th>Видна покупателю</th><th>Сорт.</th><th></th></tr></thead>
     <tbody>
       {% for d in items %}
       <tr{% if not d.active %} class="muted"{% endif %}>
         <td class="muted">{{ d.id }}</td>
-        <td><a href="/admin/shop/deliveries/{{ d.id }}">{{ d.name }}</a></td>
+        <td><a href="/admin/shop/deliveries/{{ d.id }}" title="{{ d.name }}">{{ d.name }}</a></td>
         <td>{{ d.price }} {{ d.currency }}</td>
         <td>{{ d.stores }}</td>
         <td>{% if d.active %}<span class="badge ok">да</span>{% else %}<span class="badge">нет</span>{% endif %}</td>
