@@ -230,8 +230,7 @@
 
   {% if item_id and seo is not none %}
   {% call ui.tab_pane("seo", tabctx) %}
-  <fieldset>
-    <legend>SEO</legend>
+  <div class="seo-pane">
     <p class="muted">Пустое поле наследует настройку раздела или коллекции. Переменные: <code>{name}</code>, <code>{code}</code>, <code>{collection}</code>, <code>{section}</code>.</p>
     <label>Title<input name="seo_title" value="{{ seo.title }}" maxlength="2000"></label>
     <label>Description<textarea name="seo_description" rows="3" maxlength="2000">{{ seo.description }}</textarea></label>
@@ -243,7 +242,7 @@
       {% endfor %}
     </select></label>
     <p class="muted"><a href="/admin/seo/items/{{ item_id }}">Открыть страницу SEO отдельно</a> — там же предпросмотр наследованных значений.</p>
-  </fieldset>
+  </div>
   {% endcall %}
   {% endif %}
 
