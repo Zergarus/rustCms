@@ -2604,7 +2604,7 @@ mod tests {
             let (_, item) = setup(&db, false, true).await;
             let (_, html) = get(&app, &format!("/admin/items/{item}"), &cookie).await;
             assert!(
-                html.contains("<div class=\"form-actions\" data-form-actions>"),
+                html.contains("class=\"form-actions form-actions-sticky\" data-form-actions"),
                 "{html}"
             );
         }
@@ -2722,7 +2722,7 @@ mod tests {
             let (_, item) = setup(&db, false, true).await;
             let (_, html) = get(&app, &format!("/admin/items/{item}"), &cookie).await;
             // одна форма: поля «Основного» и «Каталога» — внутри неё, вкладка в скрытом поле
-            let form_start = html.find("<form class=\"card form\"").unwrap();
+            let form_start = html.find("<form class=\"card form").unwrap();
             let form_end = html[form_start..].find("</form>").unwrap() + form_start;
             let form = &html[form_start..form_end];
             for name in ["name=\"name\"", "name=\"price_1\"", "name=\"tab\""] {
