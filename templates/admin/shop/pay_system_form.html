@@ -1,12 +1,18 @@
 {% extends "base.html" %}
 {% set section = "shop" %}
 {% set tab = "pay-systems" %}
+{% import "_ui.html" as ui %}
 {% block title %}{% if id %}{{ form.name }}{% else %}Новая платёжная система{% endif %}{% endblock %}
 {% block content %}
 <div class="breadcrumbs"><a href="/admin/shop/pay-systems">Платёжные системы</a></div>
 <h1>{% if id %}{{ form.name }}{% else %}Новая платёжная система{% endif %}</h1>
+
+<div data-card>
+{{ ui.card_tabs(card_tabs, tabctx) }}
 <form class="card form" method="post" action="{% if id %}/admin/shop/pay-systems/{{ id }}{% else %}/admin/shop/pay-systems{% endif %}">
   {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+
+  {% call ui.tab_pane("main", tabctx) %}
   <div class="grid-2">
     <label>Название *<input name="name" value="{{ form.name }}" required></label>
     <label>Код<input name="code" value="{{ form.code }}"></label>
@@ -19,15 +25,21 @@
     <label class="check"><input type="checkbox" name="active" {% if form.active %}checked{% endif %}> Активна</label>
   </div>
   <label>Описание<textarea name="description" rows="2">{{ form.description }}</textarea></label>
+  {% endcall %}
+
+  {% call ui.tab_pane("access", tabctx) %}
   <div class="field">
     <span class="field-label">Доступна группам (ничего не отмечено — всем)</span>
     <div class="check-grid">
       {% for g in groups %}<label class="check"><input type="checkbox" name="group_ids" value="{{ g[0] }}" {% if g[0] in form.group_ids %}checked{% endif %}> {{ g[1] }}</label>{% endfor %}
     </div>
   </div>
+  {% endcall %}
+
   <div class="form-actions form-actions-sticky">
     <button class="btn primary" type="submit">Сохранить</button>
     <a class="btn" href="/admin/shop/pay-systems">Отмена</a>
   </div>
 </form>
+</div>
 {% endblock %}

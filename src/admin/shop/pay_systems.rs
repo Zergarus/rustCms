@@ -13,7 +13,10 @@ use sqlx::FromRow;
 use super::{UsedQuery, require_shop};
 use crate::{
     access::Access,
-    admin::{parse_sort, render},
+    admin::{
+        card::{TabErrors, tab_context},
+        parse_sort, render,
+    },
     error::{AppError, AppResult},
     state::AppState,
 };
@@ -126,10 +129,16 @@ async fn form_page(
             .fetch_all(&state.db)
             .await?;
     let api_types = API_TYPES;
+    let card_tabs = vec![
+        ("main", "Основное", None),
+        ("access", "Доступ", Some(form.group_ids.len())),
+    ];
+    let visible: Vec<&'static str> = card_tabs.iter().map(|tab| tab.0).collect();
+    let tabctx = tab_context(&TabErrors::new(), &visible, None);
     render(
         state,
         "shop/pay_system_form.html",
-        context! { user, id, form, error, groups, api_types },
+        context! { user, id, form, error, groups, api_types, card_tabs, tabctx },
     )
 }
 
