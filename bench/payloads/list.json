@@ -1,0 +1,1 @@
+{"select":["id","name","code","detailPageUrl","sectionName","image","catalogPrice","stocks","condition"],"imageResize":[160,480,960],"filter":{"active":"Y","iblockSection.globalActive":"Y"},"order":{"name":"ASC"},"offset":0,"limit":20}
