@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SITE_DIR="${SITE_DIR:-$ROOT/../transopt.local}"
 NETWORK="${BITRIX_NETWORK:-bitrix-common_bitrix}"
+[[ -d "$SITE_DIR" ]] || { echo "нет SITE_DIR=$SITE_DIR" >&2; exit 1; }
+[[ -d "$ROOT/../config/php-fpm" ]] || { echo "нет $ROOT/../config/php-fpm" >&2; exit 1; }
 CMS_IMAGE="${CMS_IMAGE:-cms-bench}"
 BITRIX_IMAGE="${BITRIX_IMAGE:-registry.gitlab.com/bitrix-docker/images/php-fpm-8.3:latest}"
 

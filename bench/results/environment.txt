@@ -1,12 +1,21 @@
 date=2026-11-13T15:53:41Z
 commit=390b2cd
-host=Darwin MacBook-Pro-Artem.local 24.1.0 Darwin Kernel Version 24.1.0: Thu Oct 10 21:06:57 PDT 2024; root:xnu-11215.41.3~3/RELEASE_ARM64_T6041 arm64
+command=BENCH_ROUNDS=3 BENCH_DURATION=10 BENCH_LATENCY_REQUESTS=200 bash bench/run.sh
+rounds_requested=3
+rounds_completed=2
+excluded=third round partial (host pauses)
+host=Darwin MacBook-Pro-Artem.local 24.1.0 Darwin Kernel Version 24.1.0 arm64
 cpu=Apple M4 Pro
 docker=29.1.3
 cms_url=http://127.0.0.1:8082
 bitrix_url=http://127.0.0.1:8081
-rounds=2 duration=10s (третий раунд частичный, исключён из-за пауз хоста) latency_requests=200 throughput_clients=16
-mem cms-bench 27.34MiB / 2GiB cpu 0.00%
-mem bench-php-fpm 345.4MiB / 2GiB cpu 0.01%
-mem bench-bitrix-nginx 15.73MiB / 7.653GiB cpu 0.00%
-mem bench-nginx 12.13MiB / 7.653GiB cpu 0.00%
+client_host=host, through published ports (NAT included)
+cms_db=postgres://cms@host.docker.internal:5433/cms
+bitrix_db=bitrix-common-db on bench network
+duration=10s
+latency_requests=200
+throughput_clients=16
+mem cms-bench 27.34MiB / 2GiB
+mem bench-php-fpm 345.4MiB / 2GiB
+mem bench-bitrix-nginx 15.73MiB / 7.653GiB
+mem bench-nginx 12.13MiB / 7.653GiB

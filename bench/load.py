@@ -10,14 +10,23 @@ import time
 from urllib.parse import urlsplit
 
 
-def request_once(conn, path, body, headers, timeout=30):
+def request_once(conn, path, body, headers):
     conn.request("POST", path, body=body, headers=headers)
     resp = conn.getresponse()
-    resp.read()
-    return resp.status
+    data = resp.read()
+    return resp.status, data
 
 
-def worker(url, payload, ctx, total_requests, deadline, warmup_done, out):
+def is_success(body, validate):
+    if not validate:
+        return True
+    try:
+        return json.loads(body).get("status") == "success"
+    except Exception:
+        return False
+
+
+def worker(url, payload, ctx, total_requests, duration, out):
     parts = urlsplit(url)
     path = parts.path or "/"
     body = open(payload, "rb").read()
@@ -32,6 +41,8 @@ def worker(url, payload, ctx, total_requests, deadline, warmup_done, out):
     latencies = []
     errors = 0
     done = 0
+    first_start = time.monotonic()
+    deadline = first_start + duration if duration is not None else None
     try:
         while True:
             if deadline is not None and time.monotonic() >= deadline:
@@ -40,10 +51,14 @@ def worker(url, payload, ctx, total_requests, deadline, warmup_done, out):
                 break
             start = time.perf_counter()
             try:
-                status = request_once(conn, path, body, headers)
-                if status != 200:
+                status, data = request_once(conn, path, body, headers)
+                done += 1
+                if status != 200 or not is_success(data, ctx["validate"]):
                     errors += 1
+                    continue
+                latencies.append((time.perf_counter() - start) * 1000.0)
             except Exception:
+                done += 1
                 errors += 1
                 try:
                     conn.close()
@@ -52,22 +67,22 @@ def worker(url, payload, ctx, total_requests, deadline, warmup_done, out):
                 conn = http.client.HTTPConnection(
                     parts.hostname, parts.port or 80, timeout=30
                 )
-            latencies.append((time.perf_counter() - start) * 1000.0)
-            done += 1
     finally:
         try:
             conn.close()
         except Exception:
             pass
-    out.put((done, errors, latencies))
+    out.put((done, errors, latencies, first_start, time.monotonic()))
 
 
 def percentile(values, p):
     if not values:
         return 0.0
     values = sorted(values)
-    idx = min(len(values) - 1, int(len(values) * p))
-    return values[idx]
+    import math
+
+    idx = max(0, math.ceil(p * len(values)) - 1)
+    return values[min(idx, len(values) - 1)]
 
 
 def main():
@@ -81,13 +96,14 @@ def main():
     parser.add_argument("--warmup", type=int, default=30)
     parser.add_argument("--host", default="transopt.local")
     parser.add_argument("--header", action="append", default=[])
+    parser.add_argument("--validate", action="store_true", help="проверять status=success в JSON")
     args = parser.parse_args()
 
     headers = []
     for raw in args.header:
         key, _, value = raw.partition(":")
         headers.append((key.strip(), value.strip()))
-    ctx = {"host": args.host, "headers": headers}
+    ctx = {"host": args.host, "headers": headers, "validate": args.validate}
 
     # Прогрев: первый запрос после простоя не должен попасть в замер.
     parts = urlsplit(args.url)
@@ -105,41 +121,34 @@ def main():
             pass
     warm.close()
 
-    workers = args.concurrency
+    workers = 1 if args.mode == "latency" else args.concurrency
+    total_requests = args.requests if args.mode == "latency" else None
+    duration = args.duration if args.mode == "throughput" else None
     queue = mp.Queue()
-    start_event = mp.Event()
-    deadline = None
-    total = None
-    if args.mode == "latency":
-        workers = 1
-        total = args.requests
-        per_worker = args.requests
-    else:
-        per_worker = 0
-
     procs = []
-    started = time.perf_counter()
     for _ in range(workers):
-        if args.mode == "throughput":
-            dl = started + args.duration
-        else:
-            dl = None
-        p = mp.Process(target=worker, args=(args.url, args.payload, ctx, per_worker, dl, start_event, queue))
+        p = mp.Process(
+            target=worker,
+            args=(args.url, args.payload, ctx, total_requests, duration, queue),
+        )
         p.start()
         procs.append(p)
-    # Сначала вычитываем очередь, иначе воркер с большим списком latency
-    # блокируется на записи в pipe, а join ждёт его — взаимная блокировка.
+
     counts = []
     errors = 0
     latencies = []
+    starts = []
+    ends = []
     received = 0
     while received < workers:
         try:
-            done, err, lat = queue.get(timeout=1.0)
+            done, err, lat, first, last = queue.get(timeout=1.0)
             received += 1
             counts.append(done)
             errors += err
             latencies.extend(lat)
+            starts.append(first)
+            ends.append(last)
         except Exception:
             if all(not p.is_alive() for p in procs):
                 break
@@ -147,22 +156,35 @@ def main():
         p.join()
     while True:
         try:
-            done, err, lat = queue.get_nowait()
+            done, err, lat, first, last = queue.get_nowait()
         except Exception:
             break
         counts.append(done)
         errors += err
         latencies.extend(lat)
-    elapsed = time.perf_counter() - started
-    total_done = sum(counts)
-    rps = total_done / elapsed if elapsed else 0.0
+        starts.append(first)
+        ends.append(last)
+
+    if len(counts) != workers:
+        print(
+            f"worker died: got {len(counts)} results, expected {workers}",
+            file=sys.stderr,
+        )
+        return 2
+
+    started = min(starts) if starts else time.monotonic()
+    finished = max(ends) if ends else started
+    elapsed = max(finished - started, 1e-9)
+    attempts = sum(counts)
+    total_done = max(attempts - errors, 0)
     result = {
         "mode": args.mode,
         "url": args.url,
         "total": total_done,
+        "attempts": attempts,
         "concurrency": workers,
         "elapsed_s": round(elapsed, 3),
-        "rps": round(rps, 1),
+        "rps": round(total_done / elapsed, 1),
         "errors": errors,
         "p50_ms": round(percentile(latencies, 0.50), 2),
         "p95_ms": round(percentile(latencies, 0.95), 2),
@@ -173,4 +195,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

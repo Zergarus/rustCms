@@ -23,15 +23,15 @@ ENDPOINTS=(
 
 run_one() {
   local system="$1" path="$2" payload="$3" mode="$4" round="$5"
-  local url header=()
-  if [[ "$system" == "cms" ]]; then url="$CMS_URL"; else url="$BITRIX_URL"; header=(--header "X-Forwarded-Proto: https"); fi
+  local url
+  if [[ "$system" == "cms" ]]; then url="$CMS_URL"; else url="$BITRIX_URL"; fi
   local args=(--url "$url$path" --payload "$ROOT/bench/payloads/$payload" --mode "$mode"
     --concurrency 1 --requests "$LATENCY_REQUESTS" --duration "$DURATION" --warmup 30)
   if [[ "$mode" == "throughput" ]]; then
     args=(--url "$url$path" --payload "$ROOT/bench/payloads/$payload" --mode throughput
       --concurrency "$THROUGHPUT_CLIENTS" --duration "$DURATION" --warmup 30)
   fi
-  if [[ ${#header[@]} -gt 0 ]]; then args+=(--header "X-Forwarded-Proto: https"); fi
+  if [[ "$system" == "bitrix" ]]; then args+=(--header "X-Forwarded-Proto: https"); fi
   local out="$RES/${mode}-${system}-${name}-r${round}.json"
   python3 "$ROOT/bench/load.py" "${args[@]}" > "$out"
   python3 - "$out" <<'PY'

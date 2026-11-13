@@ -90,8 +90,8 @@ data = {
     "search_u660": {"cms": cms_search, "bitrix": bitrix_search},
     "counts": {"cms": cms_counts, "bitrix": bitrix_counts, "pairs": pairs, "mismatches": mismatches},
 }
-out.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 if mismatches:
     raise SystemExit(f"Расхождение counts: {mismatches}")
+out.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 print(f"snapshot ok: {out} ({len(cms_counts)} коллекций CMS, {len(bitrix_counts)} Битрикса)")
 PY
