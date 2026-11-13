@@ -127,18 +127,33 @@ def main():
         p = mp.Process(target=worker, args=(args.url, args.payload, ctx, per_worker, dl, start_event, queue))
         p.start()
         procs.append(p)
-    for p in procs:
-        p.join()
-    elapsed = time.perf_counter() - started
-
+    # Сначала вычитываем очередь, иначе воркер с большим списком latency
+    # блокируется на записи в pipe, а join ждёт его — взаимная блокировка.
     counts = []
     errors = 0
     latencies = []
-    while not queue.empty():
-        done, err, lat = queue.get()
+    received = 0
+    while received < workers:
+        try:
+            done, err, lat = queue.get(timeout=1.0)
+            received += 1
+            counts.append(done)
+            errors += err
+            latencies.extend(lat)
+        except Exception:
+            if all(not p.is_alive() for p in procs):
+                break
+    for p in procs:
+        p.join()
+    while True:
+        try:
+            done, err, lat = queue.get_nowait()
+        except Exception:
+            break
         counts.append(done)
         errors += err
         latencies.extend(lat)
+    elapsed = time.perf_counter() - started
     total_done = sum(counts)
     rps = total_done / elapsed if elapsed else 0.0
     result = {
