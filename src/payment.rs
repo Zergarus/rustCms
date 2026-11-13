@@ -181,21 +181,31 @@ async fn last_payment(db: &PgPool, order_id: i64) -> sqlx::Result<Option<Payment
     .await
 }
 
-async fn pay_system(db: &PgPool, id: i64) -> sqlx::Result<(String, String)> {
+async fn pay_system(db: &PgPool, id: i64) -> sqlx::Result<(String, String, Value)> {
     Ok(
-        sqlx::query_as("SELECT code, api_type FROM pay_systems WHERE id = $1")
+        sqlx::query_as("SELECT code, api_type, settings FROM pay_systems WHERE id = $1")
             .bind(id)
             .fetch_optional(db)
             .await?
-            .unwrap_or_default(),
+            .unwrap_or_else(|| {
+                (
+                    String::new(),
+                    String::new(),
+                    Value::Object(Default::default()),
+                )
+            }),
     )
 }
 
 /// Данные для провайдера: в `status` он видит то, что вернул `start`.
 async fn reference(state: &AppState, order: &Order, payment: &Payment) -> sqlx::Result<PaymentRef> {
-    let (code, api_type) = match payment.pay_system_id {
+    let (code, api_type, settings) = match payment.pay_system_id {
         Some(id) => pay_system(&state.db, id).await?,
-        None => (String::new(), String::new()),
+        None => (
+            String::new(),
+            String::new(),
+            Value::Object(Default::default()),
+        ),
     };
     let data = payment
         .data
@@ -212,6 +222,7 @@ async fn reference(state: &AppState, order: &Order, payment: &Payment) -> sqlx::
         pay_system_type: api_type,
         sum: payment.sum,
         currency: payment.currency.clone(),
+        settings,
         data,
     })
 }

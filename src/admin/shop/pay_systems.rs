@@ -46,6 +46,14 @@ pub struct PaySystemForm {
     pub api_type: String,
     #[serde(default)]
     pub group_ids: Vec<i64>,
+    #[serde(default)]
+    pub handler: String,
+    #[serde(default)]
+    pub shop_id: String,
+    #[serde(default)]
+    pub secret_key: String,
+    #[serde(default)]
+    pub webhook_secret: String,
 }
 
 #[derive(Debug)]
@@ -57,6 +65,8 @@ pub struct PaySystemInput {
     pub sort: i32,
     pub api_type: String,
     pub group_ids: Vec<i64>,
+    pub handler: String,
+    pub settings: serde_json::Value,
 }
 
 impl PaySystemForm {
@@ -77,6 +87,12 @@ impl PaySystemForm {
             sort: parse_sort(&self.sort),
             api_type: api_type.to_string(),
             group_ids: self.group_ids.clone(),
+            handler: self.handler.trim().to_string(),
+            settings: serde_json::json!({
+                "shop_id": self.shop_id.trim(),
+                "secret_key": self.secret_key.trim(),
+                "webhook_secret": self.webhook_secret.trim(),
+            }),
         })
     }
 }
@@ -132,13 +148,15 @@ async fn form_page(
     let card_tabs = vec![
         ("main", "Основное", None),
         ("access", "Доступ", Some(form.group_ids.len())),
+        ("handler", "Обработчик", None),
     ];
+    let handlers = [("", "Без обработчика"), ("yookassa", "ЮKassa")];
     let visible: Vec<&'static str> = card_tabs.iter().map(|tab| tab.0).collect();
     let tabctx = tab_context(&TabErrors::new(), &visible, None);
     render(
         state,
         "shop/pay_system_form.html",
-        context! { user, id, form, error, groups, api_types, card_tabs, tabctx },
+        context! { user, id, form, error, groups, api_types, card_tabs, tabctx, handlers },
     )
 }
 
@@ -162,7 +180,7 @@ pub async fn edit_form(
     Path(id): Path<i64>,
 ) -> AppResult<Html<String>> {
     require_shop(&user)?;
-    let (code, name, description, active, sort, api_type, group_ids): (
+    let (code, name, description, active, sort, api_type, group_ids, handler, settings): (
         String,
         String,
         String,
@@ -170,8 +188,11 @@ pub async fn edit_form(
         i32,
         String,
         Vec<i64>,
+        String,
+        serde_json::Value,
     ) = sqlx::query_as(
-        "SELECT code, name, description, active, sort, api_type, group_ids FROM pay_systems WHERE id = $1",
+        "SELECT code, name, description, active, sort, api_type, group_ids, handler, settings
+         FROM pay_systems WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db)
@@ -185,6 +206,22 @@ pub async fn edit_form(
         sort: sort.to_string(),
         api_type,
         group_ids,
+        handler,
+        shop_id: settings
+            .get("shop_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        secret_key: settings
+            .get("secret_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        webhook_secret: settings
+            .get("webhook_secret")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
     };
     form_page(&state, user, Some(id), form, None).await
 }
@@ -206,12 +243,13 @@ async fn save(
     let saved: Option<i64> = match id {
         Some(id) => sqlx::query_scalar(
             "UPDATE pay_systems SET code = $2, name = $3, description = $4, active = $5, sort = $6,
-                 api_type = $7, group_ids = $8 WHERE id = $1 RETURNING id",
+                 api_type = $7, group_ids = $8, handler = $9, settings = $10
+             WHERE id = $1 RETURNING id",
         )
         .bind(id),
         None => sqlx::query_scalar(
-            "INSERT INTO pay_systems (code, name, description, active, sort, api_type, group_ids)
-             SELECT $2, $3, $4, $5, $6, $7, $8 WHERE $1::bigint IS NULL RETURNING id",
+            "INSERT INTO pay_systems (code, name, description, active, sort, api_type, group_ids, handler, settings)
+             SELECT $2, $3, $4, $5, $6, $7, $8, $9, $10 WHERE $1::bigint IS NULL RETURNING id",
         )
         .bind(None::<i64>),
     }
@@ -222,6 +260,8 @@ async fn save(
     .bind(input.sort)
     .bind(&input.api_type)
     .bind(&input.group_ids)
+    .bind(&input.handler)
+    .bind(&input.settings)
     .fetch_optional(&state.db)
     .await?;
     saved.ok_or(AppError::NotFound)?;
@@ -271,6 +311,49 @@ pub async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[sqlx::test]
+    async fn saves_handler_and_secrets(db: sqlx::PgPool) {
+        use crate::smoke_tests::post_form;
+        use crate::test_support::{admin_cookie, test_state};
+        let app = crate::app(test_state(db.clone()));
+        let cookie = admin_cookie(&db).await;
+        let (status, _) = post_form(
+            &app,
+            "/admin/shop/pay-systems",
+            &cookie,
+            "name=QR+test&api_type=qr&handler=yookassa&shop_id=123&secret_key=sec&webhook_secret=hook",
+        )
+        .await;
+        assert!(status.is_redirection(), "{status}");
+        let (handler, shop, secret, hook): (String, String, String, String) = sqlx::query_as(
+            "SELECT handler, settings->>'shop_id', settings->>'secret_key', settings->>'webhook_secret'
+             FROM pay_systems WHERE name = 'QR test'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!((handler.as_str(), shop.as_str()), ("yookassa", "123"));
+        assert_eq!((secret.as_str(), hook.as_str()), ("sec", "hook"));
+    }
+
+    #[test]
+    fn pay_system_handler_settings() {
+        let form = PaySystemForm {
+            name: "QR".into(),
+            api_type: "qr".into(),
+            handler: "yookassa".into(),
+            shop_id: " 123 ".into(),
+            secret_key: " secret ".into(),
+            webhook_secret: " hook ".into(),
+            ..Default::default()
+        };
+        let input = form.validate().unwrap();
+        assert_eq!(input.handler, "yookassa");
+        assert_eq!(input.settings["shop_id"], "123");
+        assert_eq!(input.settings["secret_key"], "secret");
+        assert_eq!(input.settings["webhook_secret"], "hook");
+    }
 
     #[test]
     fn pay_system_input_type() {

@@ -318,6 +318,9 @@ pub struct PaymentRef {
     pub pay_system_type: String,
     pub sum: f64,
     pub currency: String,
+    /// Настройки обработчика платёжной системы (`pay_systems.settings`):
+    /// `shop_id`, `secret_key`, `webhook_secret` и будущие параметры.
+    pub settings: Value,
     /// Накопленные данные платежа (`payments.data`).
     pub data: Value,
 }

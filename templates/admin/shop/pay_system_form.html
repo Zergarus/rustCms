@@ -36,10 +36,42 @@
   </div>
   {% endcall %}
 
+  {% call ui.tab_pane("handler", tabctx) %}
+  <div class="grid-2">
+    <label>Обработчик
+      <select name="handler" id="pay-handler">
+        {% for code, label in handlers %}<option value="{{ code }}" {% if form.handler == code %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <div class="muted small" style="align-self:end;padding-bottom:6px">Параметры читает провайдер проекта через <code>PaymentRef.settings</code>.</div>
+  </div>
+  <div data-handler-fields="yookassa" {% if form.handler != "yookassa" %}hidden{% endif %}>
+    <div class="grid-2">
+      <label>ID магазина (shopId)<input name="shop_id" value="{{ form.shop_id }}" autocomplete="off"></label>
+      <label>Секретный ключ<input name="secret_key" type="password" value="{{ form.secret_key }}" autocomplete="new-password"></label>
+    </div>
+    <label>Секрет вебхука<input name="webhook_secret" type="password" value="{{ form.webhook_secret }}" autocomplete="new-password"><small class="field-hint">Если пусто, подпись уведомлений проверяется без отдельного секрета.</small></label>
+    <div class="alert" role="alert"><strong>Секреты хранятся в базе без шифрования.</strong> Доступ к ним есть у тех, кто может управлять магазином и инструментами БД.</div>
+  </div>
+  {% endcall %}
+
   <div class="form-actions form-actions-sticky">
     <button class="btn primary" type="submit">Сохранить</button>
     <a class="btn" href="/admin/shop/pay-systems">Отмена</a>
   </div>
 </form>
 </div>
+<script>
+(function () {
+  var handler = document.getElementById('pay-handler');
+  if (!handler) return;
+  function sync() {
+    document.querySelectorAll('[data-handler-fields]').forEach(function (block) {
+      block.hidden = block.dataset.handlerFields !== handler.value;
+    });
+  }
+  handler.addEventListener('change', sync);
+  sync();
+})();
+</script>
 {% endblock %}
