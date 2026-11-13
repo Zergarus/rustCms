@@ -1,0 +1,77 @@
+{
+  "date": "2026-11-13T15:50:36+00:00",
+  "commit": "58f5c26",
+  "product": {
+    "cms": {
+      "id": 38382,
+      "name": "Ремкомплект оверол АКПП OHK A6MF2 4WD 09+"
+    },
+    "bitrix": {
+      "id": 38382,
+      "name": "Ремкомплект оверол АКПП OHK A6MF2 4WD 09+"
+    }
+  },
+  "search_u660": {
+    "cms": {
+      "items": 10,
+      "marks": 1
+    },
+    "bitrix": {
+      "items": 10,
+      "marks": 1
+    }
+  },
+  "counts": {
+    "cms": {
+      "iblock_25": 0,
+      "demo_goods": 1,
+      "catalog": 5149,
+      "akpp_family": 1521,
+      "markirovka_akpp_cvt_dsg": 3236,
+      "home_tabs": 12,
+      "marks": 1176,
+      "demo_goods_offers": 2,
+      "ads": 0,
+      "banners": 3,
+      "texts": 4,
+      "akpp_family_marking": 1499,
+      "qrcodes": 3,
+      "schemes": 421,
+      "feedback": 3,
+      "locations": 1355,
+      "models": 6500,
+      "hlsys_marking_code_group": 12,
+      "auto": 2053,
+      "news": 25,
+      "questions": 1,
+      "info": 143
+    },
+    "bitrix": {
+      "NULL": 16,
+      "ads": 0,
+      "auto": 2053,
+      "auto_variants": 6500,
+      "banners": 3,
+      "feedback": 3,
+      "info": 143,
+      "locations": 1355,
+      "marks": 1176,
+      "news": 25,
+      "qr_codes": 3,
+      "questions": 1,
+      "schemes": 421,
+      "task": 5149
+    },
+    "pairs": {
+      "catalog": "task",
+      "auto": "auto",
+      "marks": "marks",
+      "models": "auto_variants",
+      "locations": "locations",
+      "schemes": "schemes",
+      "news": "news",
+      "info": "info"
+    },
+    "mismatches": {}
+  }
+}
