@@ -1,1 +1,0 @@
-{"mode": "throughput", "url": "http://127.0.0.1:8082/api/v1/iblock/catalog/element/38382", "total": 6339, "concurrency": 16, "elapsed_s": 10.043, "rps": 631.2, "errors": 0, "p50_ms": 22.09, "p95_ms": 39.05, "p99_ms": 64.77, "mean_ms": 24.98}
