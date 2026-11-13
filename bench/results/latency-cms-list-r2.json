@@ -1,0 +1,1 @@
+{"mode": "latency", "url": "http://127.0.0.1:8082/api/v1/iblock/catalog/element/list", "total": 200, "concurrency": 1, "elapsed_s": 2.189, "rps": 91.3, "errors": 0, "p50_ms": 9.85, "p95_ms": 13.95, "p99_ms": 23.88, "mean_ms": 10.55}

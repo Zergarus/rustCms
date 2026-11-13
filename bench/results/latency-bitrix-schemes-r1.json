@@ -1,0 +1,1 @@
+{"mode": "latency", "url": "http://127.0.0.1:8081/api/v1/iblock/schemes/element/list", "total": 200, "concurrency": 1, "elapsed_s": 29.746, "rps": 6.7, "errors": 0, "p50_ms": 145.28, "p95_ms": 165.68, "p99_ms": 209.91, "mean_ms": 148.43}

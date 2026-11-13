@@ -1,0 +1,1 @@
+{"mode": "throughput", "url": "http://127.0.0.1:8082/api/v1/iblock/schemes/element/list", "total": 5471, "concurrency": 16, "elapsed_s": 10.035, "rps": 545.2, "errors": 0, "p50_ms": 28.58, "p95_ms": 36.75, "p99_ms": 48.27, "mean_ms": 28.95}

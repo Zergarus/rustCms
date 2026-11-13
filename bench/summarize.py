@@ -30,7 +30,8 @@ def load(results: Path):
 
 
 def main():
-    results = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("bench/results")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    results = Path(args[0]) if args else Path("bench/results")
     rows = load(results)
     summary = {}
     for (mode, system, endpoint), items in sorted(rows.items()):
@@ -54,6 +55,11 @@ def main():
             for (mode, endpoint), data in summary.items()
         },
     }
+    if "--json-out" in sys.argv:
+        target = Path(sys.argv[sys.argv.index("--json-out") + 1])
+        target.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n")
+        return
+
     print(json.dumps(out, ensure_ascii=False, indent=2))
 
     for mode in ("latency", "throughput"):
