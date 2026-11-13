@@ -27,6 +27,7 @@ cargo run                             # http://127.0.0.1:3000/admin
 - [Дизайн админки](docs/design.md) — направление, аудит, как снять скриншоты.
 - [Паритет с Битриксом](docs/bitrix-parity.md), [бэклог ядра](docs/core-backlog.md) и [техдолг](docs/tech-debt.md).
 - [Готовность к замене Битрикса](docs/readiness.md) — что готово, чего нет и P0 перед пилотом.
+- [Замер CMS против Битрикса](docs/benchmark-v2.md) — Docker, bxapi, latency/throughput.
 
 ## Коллекции
 
